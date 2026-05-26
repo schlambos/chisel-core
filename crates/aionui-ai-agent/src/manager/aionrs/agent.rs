@@ -182,17 +182,23 @@ impl AionrsAgentManager {
     }
 
     /// Take the current turn's done-receiver, if any.
-    #[allow(dead_code)] // wired up by IAgentConnector::cancel_current_turn in Task 3
     pub(crate) async fn take_turn_done_rx(&self) -> Option<oneshot::Receiver<()>> {
         self.turn_done_rx.lock().await.take()
     }
 
-    #[cfg(test)]
+    /// Begin a turn slot exposed for integration tests under the same
+    /// `cfg(any(test, feature = "test-support"))` gate used by other test
+    /// hooks in this crate. Allows downstream tests to simulate an
+    /// in-flight turn without a real LLM provider.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn begin_turn_for_test(&self) -> Option<TurnGuard> {
         self.begin_turn()
     }
 
-    #[cfg(test)]
+    /// Issue a connector-style cancel from integration tests. Mirrors
+    /// `IAgentConnector::cancel_current_turn` semantics: signals
+    /// `cancel_notify` then awaits the in-flight turn's done-receiver.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn cancel_for_test(&self) -> Result<(), AppError> {
         // Mirrors connector cancel_current_turn semantics.
         self.cancel_notify.notify_waiters();
