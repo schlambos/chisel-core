@@ -178,7 +178,9 @@ impl AionrsAgentManager {
             return None;
         }
         *slot = Some(done_rx);
-        Some(TurnGuard { _done_tx: Some(done_tx) })
+        Some(TurnGuard {
+            _done_tx: Some(done_tx),
+        })
     }
 
     /// Take the current turn's done-receiver, if any.
