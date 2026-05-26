@@ -1,7 +1,7 @@
 //! New connect-layer trait. See spec § Connect layer: `IAgentConnector`.
 //!
 //! Speaks protocol/process language only. Does **not** import or expose
-//! `ConversationStatus` — that belongs to the conv layer (see
+//! conversation-status types — those belong to the conv layer (see
 //! `aionui-conversation`).
 //!
 //! Object-safe by construction: no generic methods, no `Self` by value.
