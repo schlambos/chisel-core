@@ -40,15 +40,18 @@ M0 共识冻结 → M1 W1 完工 → M2 W2 骨架 → M3 W2 闭环跑通 → M4 
 **时点**：所有 Wave 1 开工前。
 
 **产出物清单**：
+
 - ✅ [interface-contracts.md](./interface-contracts.md) 已写完（本次产出的一部分）
 - ⬜ 所有 Wave 1 模块认领人 Ack 过 §1–§8 的签名，**文字确认"按这个签名开工"**
 - ⬜ SDK `McpServer` variant 形状由 D3 先读一次真实源码并在 PR 注释里贴出 —— [backend-audit.md §9 第 1 项](./backend-audit.md#9-仍需进一步确认的事项) 标为必须先确认
 
 **验收证据**：
+
 1. team lead 私聊收到每个 D1–D6 开发者的"已读并 ack"回执
 2. D3 在 `crates/aionui-team/src/mcp/bridge.rs` PR 里附一段注释：`// SDK McpServer variant shape (as of agent-client-protocol-schema 0.12.0): ...`
 
 **不通过的典型信号**：
+
 - 任何开发者说"我觉得这个签名不对" → 暂停，重开讨论，改 interface-contracts.md 后再开工
 - D3 发现 SDK 的 stdio variant 不是预期的 `{command, args, env}` → 更新 §3 的 `into_sdk()` 方案
 
@@ -61,6 +64,7 @@ M0 共识冻结 → M1 W1 完工 → M2 W2 骨架 → M3 W2 闭环跑通 → M4 
 **时点**：M0 后约 1 天（并行 10 人）。
 
 **产出物清单**（10 个模块）：
+
 - ⬜ D1 `aionui-api-types::team_mcp` 合并 + 单元测试绿
 - ⬜ D2 `AcpBuildExtra.team_mcp_stdio_config` 字段合并 + 旧 extra 反序列化成 None 的测试绿
 - ⬜ D3 `TeamMcpStdioServerSpec` 合并 + 3 条单元测试绿
@@ -70,15 +74,18 @@ M0 共识冻结 → M1 W1 完工 → M2 W2 骨架 → M3 W2 闭环跑通 → M4 
 - ⬜ D6 `aionui-backend mcp-bridge` 子命令合并；独立集成测试通过（spawn 子进程 + mock TCP 收到 `auth_token`）
 
 **验收证据**：
+
 1. `cargo test --workspace` 全绿（列出新增用例：`team_mcp_config_roundtrip`、`acp_build_extra_team_mcp`、`stdio_spec_env`、`team_list_models_descriptor_matches`、`build_lead_prompt_with_preset_assistants`、`mcp_bridge_forwards_tools_list` 等）
 2. `cargo clippy --workspace -- -D warnings` 无新增 warning
 3. 测试报告粘贴到 phase1 PR 描述里
 
 **关键对齐点**：
+
 - D4 descriptor 对齐：把 team-prompts.md §5.2 中 `team_list_models` / `team_describe_assistant` 的 description 原文复制到 Rust 常量，跑 `diff` 脚本证明零差异
 - D5 prompt 对齐：同样方法对 `LEAD_PROMPT_TEMPLATE` / `TEAMMATE_PROMPT_TEMPLATE` / `TEAM_GUIDE_PROMPT_TEMPLATE` 三个常量做 diff，证据贴在 PR 里
 
 **不通过的典型信号**：
+
 - 任何 descriptor 或 prompt 常量"改写成了更清晰的版本" → 驳回，按 AionUi 原文重改（[aionui-audit §8 #5](./aionui-audit.md#8-源码中发现的硬约束agent-行为易坏点)）
 - D6 bridge 丢弃了 `auth_token` 没有带入 TCP 请求 → 驳回
 
@@ -91,6 +98,7 @@ M0 共识冻结 → M1 W1 完工 → M2 W2 骨架 → M3 W2 闭环跑通 → M4 
 **时点**：M1 后 4 天（D7 拆 3 个 + D11.5 新增；session.rs / service.rs 同文件串行 merge）。
 
 **产出物清单**（8 个模块）：
+
 - ⬜ **D7a `TeamSession` 三个新方法合并 + 4 条测试绿**（compute_wake_input / stdio_spec / on_agent_finish）
 - ⬜ **D7b send 路径接 wake + `files` 附件 + log-not-throw 合并 + 5 条测试绿**（P0#45/#46）
 - ⬜ **D7c `send_message_to_agent(silent=true)` 占位合并 + 2 条测试绿**
@@ -101,16 +109,19 @@ M0 共识冻结 → M1 W1 完工 → M2 W2 骨架 → M3 W2 闭环跑通 → M4 
 - ⬜ **D11.5 `remove_team` 级联 kill agent 进程合并 + 2 条集成测试绿**（P0#47 补漏，MockWorkerTaskManager kill 被调 N 次）
 
 **验收证据**：
+
 1. `cargo test --workspace` 全绿
 2. `cargo clippy --workspace -- -D warnings` 无新增 warning
 3. `cargo build --release` 成功产出 `aionui-backend` 二进制
 4. 手工执行：`./target/release/aionui-backend mcp-bridge` 在无 env 时报错退出（证明 bridge 入口连通）
 
 **关键对齐点**：
+
 - D9 的 `ensure_session` 闭环必须在集成测试里用 `MockWorkerTaskManager` 断言**顺序**：先 update_extra，再 kill，最后 get_or_build_task；顺序错会导致新进程读到旧 extra
 - D7 的 `on_agent_finish` **单独测试** `finalize_turn` 的 5s dedup 和 leader re-wake（即使 phase1 不上全部 P1 可靠性，这两条是闭环跑通的硬前提）
 
 **不通过的典型信号**：
+
 - D9 集成测试里 mock 没 assert 调用顺序 → 驳回要求补
 - D7 的 send 路径没有 `compute_wake_input` 返回 `should_send=false` 时的 skip 分支 → 驳回
 
@@ -123,6 +134,7 @@ M0 共识冻结 → M1 W1 完工 → M2 W2 骨架 → M3 W2 闭环跑通 → M4 
 **时点**：M2 后 2 天。
 
 **产出物清单**：
+
 - ⬜ D11 smoke test `crates/aionui-app/tests/team_phase1_smoke.rs` 合并
 - ⬜ 本地机器安装 `claude --experimental-acp` 并跑通 smoke
 - ⬜ 测试日志 / WS 事件流贴到 phase1 PR
@@ -141,12 +153,14 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 ```
 
 **验收证据**：
+
 1. smoke test 脚本跑通 → 在本地终端截图（含前 5 秒到 60 秒的时间戳）
 2. `sqlite3 aionui.db "SELECT extra FROM conversations WHERE id IN (...)"` 能看到 `team_mcp_stdio_config` 字段
 3. WS 事件序列抓取成文本日志（`wscat` 或后端自己的 `/api/ws-token` + client）
 4. MCP server TCP log（开 `RUST_LOG=aionui_team::mcp=debug` 跑）能看到至少一次 `tools/call team_task_create`
 
 **不通过的典型信号**：
+
 - `ensure_session` 后 extra 里没有 `team_mcp_stdio_config` → 回退到 M2 的 D9
 - lead 进程启动了但调不到 `team_*` 工具（报错 "unknown tool"）→ 回退到 M2 的 D10 或 M1 的 D6
 - lead 调到工具但 coder 从没被 wake → 回退到 M2 的 D7 的 send 路径
@@ -161,6 +175,7 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 **时点**：M3 后 1 天。
 
 **产出物清单**：
+
 - ⬜ Wave 1 + Wave 2 所有 PR rebase 到 main 并合并
 - ⬜ `cargo build --release` 无 warning
 - ⬜ `cargo test --workspace` 全绿（包含 smoke 标记为 `#[ignore]` —— 真 CLI 测试不进 CI，但代码必须 compile）
@@ -170,12 +185,14 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 - ⬜ Wave 3 / Wave 4 可以开始分配人 + 并行开工
 
 **验收证据**：
+
 1. main 分支跑一次 CI → 绿
 2. 后端独立 e2e 手工跑一遍 smoke（证据和 M3 一致）
 3. 文档页面 `docs/teams/phase1/README.md` 所有链接都能点开
 4. Wave 3 / Wave 4 开发者在团队频道发 "ack" 回执
 
 **不通过的典型信号**：
+
 - 任何 PR 带 `TODO: phase1 返工` 注释 → 修完再进 M4
 - smoke test 本地机换了一台跑不起来 → 不算 M3，打回
 
@@ -188,6 +205,7 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 **时点**：M4 后 2 天（16 人并行；关键路径 D13a→D13b→D13c ≈ 1.6 天 + D16a→D16b→D16c ≈ 1.7 天）。
 
 **产出物清单**：
+
 - ⬜ W3-D12a list_teams 合并 + 1 条测试绿
 - ⬜ W3-D12b get_team 归属校验合并 + 1 条测试绿
 - ⬜ W3-D12c remove_team 归属校验合并 + 1 条测试绿
@@ -206,16 +224,19 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 - ⬜ W3-D17b tool call 300s 超时合并 + 1 条测试绿
 
 **验收证据**：
+
 1. `cargo test --workspace` 全绿
 2. `cargo clippy --workspace -- -D warnings` 无新增 warning
 3. 多用户隔离手工验证：两个 session 分别登录 user_a / user_b 各建 team，互看都是 NotFound
 4. `conversation.send_message` 发给 team 成员 conversation → 能看到 `RUST_LOG=aionui_conversation=debug` 里 `routing to team path` 的日志
 
 **关键对齐点**：
+
 - W3-D16 的 trait `ITeamMessageRouter` 放 `aionui-conversation` 或中间层，**禁止** `aionui-conversation` 反向依赖 `aionui-team`
 - W3-D14 的 `renamed_agents` map 要能被 W2 D5 的 prompt builder 读到；若 D5 在 W2 阶段未预留参数，M5 里回头补 builder 参数（按 [interface-contracts.md §5](./interface-contracts.md#5-aionui-teamprompts-大幅扩写wave-1--模块-d5) 本来就有）
 
 **不通过的典型信号**：
+
 - W3-D12 的实现把越权访问暴露成 `Forbidden` 而不是 `NotFound` → 驳回（信息泄漏）
 - W3-D16 的 trait 误放 `aionui-team` 导致 `aionui-conversation → aionui-team` 循环依赖 → 驳回
 - W3-D17 的常量写死在 team crate 而非 common crate → 驳回（后续其他 MCP 复用要）
@@ -229,6 +250,7 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 **时点**：M4 后 3.5 天（底座链 D25a→D25b→D25c-1→D25c-2 约 1.6 天 → 其他并行 2 天）。**可与 M5 并行**。
 
 **产出物清单**（22 个子模块）：
+
 - ⬜ W4-D25a `AgentStreamChunk` enum 合并 + 1 条 serde 测试绿
 - ⬜ W4-D25b `subscribe_stream()` trait 方法合并 + 1 条 trait 对象测试绿
 - ⬜ **W4-D25c-1 broadcast channel 字段 + subscribe_stream impl 合并 + 2 条测试绿**
@@ -276,17 +298,20 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 ```
 
 **验收证据**：
+
 1. 上述 smoke 脚本实跑日志（含时间戳）
 2. `RUST_LOG=aionui_team=debug` 运行日志显示所有 8 个 phase 的触发点
 3. `cargo test --workspace` 全绿
 
 **关键对齐点**：
+
 - **W4-D25 必须最先合并**（D18/D20/D21/D22 都订阅它）
 - W4-D18 的 `release_wake_lock` 必须在"消息发出成功"时立即调用，不等 finish（aionui-audit §8 #2）
 - W4-D19 的 `clear_finalized_turn` 必须在 re-wake 前调用（aionui-audit §8 #3）
 - W4-D24 的 timeout 必须 graceful resolve，不能 reject（aionui-audit §8 #11）
 
 **不通过的典型信号**：
+
 - 任何模块绕过 W4-D25 自己订阅 ACP stream → 驳回（违反 DRY）
 - W4-D18 的 wake lock 在 finish 事件之后才释放 → 死锁风险，驳回
 - W4-D20 的 leader crash 逻辑走了 remove 路径而不是只 failed → 驳回（aionui-audit §2.1）
@@ -300,6 +325,7 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 **时点**：M5 和 M6 **均通过**后 6 天（Wave 5 关键路径 D26a→D26b→D26d + D29 链 D29a→D29b→D29c→D29d 两条并行，约 6 日历日）。
 
 **产出物清单**（31 个子模块）：
+
 - ⬜ W5-D26a GuideMcpServer 启停合并 + 2 条测试绿
 - ⬜ **W5-D26b-1 `aion_create_team` args 解析 + 默认值（纯函数）合并 + 4 条测试绿**
 - ⬜ **W5-D26b-2 `handle_aion_create_team` 调 service + 返回结构化合并 + 3 条测试绿**
@@ -365,18 +391,21 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 ```
 
 **验收证据**：
+
 1. 上述 3 + 互斥 4 个场景全部实跑日志（含 WS 事件流 + MCP server log）
 2. `sqlite3 aionui.db` 查场景 A 后 conversations 表确认复用：单聊 conversation.extra.team_id 被写入且 conversation 未删除
 3. 场景 C 后 `ps aux | grep claude` 确认 coder 进程已消失
 4. `cargo test --workspace` 全绿
 
 **关键对齐点**：
+
 - 场景 A 依赖 Wave 3 W3-D15（conversation 复用）正确实现
 - 场景 B 依赖 Wave 4 W4-D18（wake 锁）+ W4-D23（add_agent_locks）
 - 场景 C 依赖 Wave 4 W4-D18（清 wake 锁）+ W4-D19（清 finalized_turns）
 - 场景 D 是硬约束（aionui-audit §8 #17），失败直接影响产品语义
 
 **不通过的典型信号**：
+
 - 场景 A 后单聊 conversation 消失 → 复用逻辑错误，回滚 W3-D15
 - 场景 B spawn 后新 agent 永远 Pending 不被 wake → W5-D29 步骤 10 未调 wake 或 W4-D18 lock 错用
 - 场景 C shutdown_approved 后 agent 进程仍在 → W5-D30 的 `remove_agent` 未调 kill
@@ -391,6 +420,7 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 **时点**：M7 后 1 天。
 
 **产出物清单**：
+
 - ⬜ Wave 1–5 全部 PR 合并到 main
 - ⬜ `cargo build --release` 无 warning
 - ⬜ `cargo test --workspace` 全绿
@@ -399,6 +429,7 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 - ⬜ 未覆盖的 P1/P2 项（若有，如 preset assistant 体系）整理成 phase2 backlog
 
 **验收证据**：
+
 1. 后端独立 e2e 手工跑 Wave 2 smoke + Wave 4 可靠性 smoke + Wave 5 全量 e2e，证据齐全
 2. 所有 PR 链接集中列在 phase1 交付 PR 的 body
 3. 文档页面所有链接都能点开
@@ -410,34 +441,34 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 
 ## 1. 模块 ↔ 里程碑交叉表（87 模块）
 
-| 里程碑 | W1（10） | W2（8） | W3（16） | W4（22） | W5（31） |
-|:---:|---|---|---|---|---|
-| M0 (ack) | D1–D4b + D5a/b/c + D6 all ack | D7a/b/c + D8–D11 + D11.5 ack | — | — | — |
-| M1 (merge) | D1–D6 + D4b all ✅ | — | — | — | — |
-| M2 (merge) | — | D7a → D7b → D7c → D11.5 串行 + D8/D9/D10/D11 ✅（D11 骨架） | — | — | — |
-| M3 (smoke) | — | D11 smoke ✅ | — | — | — |
-| M4 (W2 收尾) | post-fix | post-fix | ack（16 人） | ack（22 人） | — |
-| M5 (W3 merge) | — | — | W3-D12a..D17b ✅ | — | — |
-| M6 (W4 merge) | — | — | — | W4-D18a..D25c-2 ✅ + 可靠性 smoke | — |
-| M7 (W5 merge) | — | — | — | — | W5-D26a..D31c ✅（31 子模块）+ 全量 e2e |
-| M8 (ship) | post-fix | post-fix | post-fix | post-fix | post-fix |
+|    里程碑     | W1（10）                      | W2（8）                                                     | W3（16）         | W4（22）                          | W5（31）                                |
+| :-----------: | ----------------------------- | ----------------------------------------------------------- | ---------------- | --------------------------------- | --------------------------------------- |
+|   M0 (ack)    | D1–D4b + D5a/b/c + D6 all ack | D7a/b/c + D8–D11 + D11.5 ack                                | —                | —                                 | —                                       |
+|  M1 (merge)   | D1–D6 + D4b all ✅            | —                                                           | —                | —                                 | —                                       |
+|  M2 (merge)   | —                             | D7a → D7b → D7c → D11.5 串行 + D8/D9/D10/D11 ✅（D11 骨架） | —                | —                                 | —                                       |
+|  M3 (smoke)   | —                             | D11 smoke ✅                                                | —                | —                                 | —                                       |
+| M4 (W2 收尾)  | post-fix                      | post-fix                                                    | ack（16 人）     | ack（22 人）                      | —                                       |
+| M5 (W3 merge) | —                             | —                                                           | W3-D12a..D17b ✅ | —                                 | —                                       |
+| M6 (W4 merge) | —                             | —                                                           | —                | W4-D18a..D25c-2 ✅ + 可靠性 smoke | —                                       |
+| M7 (W5 merge) | —                             | —                                                           | —                | —                                 | W5-D26a..D31c ✅（31 子模块）+ 全量 e2e |
+|   M8 (ship)   | post-fix                      | post-fix                                                    | post-fix         | post-fix                          | post-fix                                |
 
 ---
 
 ## 2. 风险与降级
 
-| 风险 | 触发条件 | 降级策略 |
-|------|---------|---------|
-| ACP SDK 的 `McpServer` stdio variant 不符合预期 | D3 在 M0 阶段发现 | 改用 HTTP transport 注入（backend-audit §4.3 备选）；延期 M1 半天 |
-| `claude --experimental-acp` 本地机跑不起来 | M3 / M7 阶段 | 手工 WS 连 + curl 校验 DB extra + mock ACP 响应；smoke 改成半手工 |
-| Wave N 某模块做到一半发现签名冲突 | 各 Wave 阶段 | 暂停该模块，开 issue 改 interface-contracts.md，leader 裁决；其他模块不冻结 |
-| D5 的 AionUi prompt 文本在移植时有 UTF-8/换行问题 | M1 阶段 | 改用 `include_str!("prompt_templates/lead.txt")` 把 AionUi 原文件逐字节拷进来，再 diff |
-| `task_manager.kill` + `get_or_build_task` 组合在 team agent 首次启动（DashMap 里本来就没）时行为不确定 | M2 / M7 阶段 | D9 / W5-D29 显式处理：`kill` 返回 `NotFound` 视为成功 |
-| Finish 事件订阅导致后台 task 泄漏 | M3 / M6 阶段 | D9 / W4-D18 在 `stop_session` 里 abort 所有订阅 task 的 JoinHandle；smoke test 跑完断言后台 task 已退出 |
-| W4-D25 broadcast channel 被 lagged 订阅拖慢 | M6 阶段 | channel size 已取 256；lagged 订阅者 tokio broadcast 自动 skip 不影响其他订阅 |
-| W5-D26 Guide MCP 和 W3-D15 conversation 复用语义冲突 | M7 阶段 | W3-D15 冲突校验已在 §16 定义；W5-D26 MCP 路径走相同 service 方法自动兼容 |
-| W5-D29 spawn 闭环任一步失败导致半成品 agent | M7 阶段 | phase1 最小实现：log + set_status(Failed) 不回滚 agents 数组；W5-D30 的 removeAgent 可手工清理 |
-| Wave 3 与 Wave 4 同时改 `scheduler.rs` 导致大量 merge 冲突 | M5 / M6 阶段 | Wave 3 不动 scheduler.rs（见各 W3-Dn 的"目标文件"，只 W3-D14 改 scheduler.rs 的 rename_agent，与 Wave 4 范围天然隔离） |
+| 风险                                                                                                   | 触发条件          | 降级策略                                                                                                               |
+| ------------------------------------------------------------------------------------------------------ | ----------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| ACP SDK 的 `McpServer` stdio variant 不符合预期                                                        | D3 在 M0 阶段发现 | 改用 HTTP transport 注入（backend-audit §4.3 备选）；延期 M1 半天                                                      |
+| `claude --experimental-acp` 本地机跑不起来                                                             | M3 / M7 阶段      | 手工 WS 连 + curl 校验 DB extra + mock ACP 响应；smoke 改成半手工                                                      |
+| Wave N 某模块做到一半发现签名冲突                                                                      | 各 Wave 阶段      | 暂停该模块，开 issue 改 interface-contracts.md，leader 裁决；其他模块不冻结                                            |
+| D5 的 AionUi prompt 文本在移植时有 UTF-8/换行问题                                                      | M1 阶段           | 改用 `include_str!("prompt_templates/lead.txt")` 把 AionUi 原文件逐字节拷进来，再 diff                                 |
+| `task_manager.kill` + `get_or_build_task` 组合在 team agent 首次启动（DashMap 里本来就没）时行为不确定 | M2 / M7 阶段      | D9 / W5-D29 显式处理：`kill` 返回 `NotFound` 视为成功                                                                  |
+| Finish 事件订阅导致后台 task 泄漏                                                                      | M3 / M6 阶段      | D9 / W4-D18 在 `stop_session` 里 abort 所有订阅 task 的 JoinHandle；smoke test 跑完断言后台 task 已退出                |
+| W4-D25 broadcast channel 被 lagged 订阅拖慢                                                            | M6 阶段           | channel size 已取 256；lagged 订阅者 tokio broadcast 自动 skip 不影响其他订阅                                          |
+| W5-D26 Guide MCP 和 W3-D15 conversation 复用语义冲突                                                   | M7 阶段           | W3-D15 冲突校验已在 §16 定义；W5-D26 MCP 路径走相同 service 方法自动兼容                                               |
+| W5-D29 spawn 闭环任一步失败导致半成品 agent                                                            | M7 阶段           | phase1 最小实现：log + set_status(Failed) 不回滚 agents 数组；W5-D30 的 removeAgent 可手工清理                         |
+| Wave 3 与 Wave 4 同时改 `scheduler.rs` 导致大量 merge 冲突                                             | M5 / M6 阶段      | Wave 3 不动 scheduler.rs（见各 W3-Dn 的"目标文件"，只 W3-D14 改 scheduler.rs 的 rename_agent，与 Wave 4 范围天然隔离） |
 
 ---
 
@@ -445,28 +476,28 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 
 > 原 phase1 规划（只做 Wave 1/2）里的 "phase2 backlog" 已经**全部并入** Wave 3/4/5。以下是覆盖证明。
 
-| 原 "phase2" 条目 | 新归属 Wave | 模块 |
-|------------------|:-----------:|------|
-| activeWakes 重入锁 | Wave 4 | W4-D18 |
-| wakeTimeouts 60s 看门狗 | Wave 4 | W4-D18 |
-| finalizedTurns 5s dedup | Wave 4 | W4-D19 |
-| crash recovery | Wave 4 | W4-D20 |
-| 429 / rate-limit 识别 | Wave 4 | W4-D21 |
-| inactivity watchdog | Wave 4 | W4-D22 |
-| addAgentLocks per-team 串行化 | Wave 4 | W4-D23 |
-| leader 不可 shutdown 的 target role 检查 | Wave 5 | W5-D30 |
-| `team_send_message` 识别 `shutdown_approved/rejected` | Wave 5 | W5-D30 |
-| `team_spawn_agent` 真实 spawn | Wave 5 | W5-D29 |
-| `team_rename_agent` 规范化 + renamed_agents map | Wave 3 | W3-D14 |
-| `teammate_message` WS 事件 | Wave 5 | W5-D31 |
-| Team Guide MCP 单例（aion_create_team / aion_list_models） | Wave 5 | W5-D26 / W5-D27 / W5-D28 |
-| `mcp_ready` 握手 | Wave 4 | W4-D24 |
-| 300s 请求超时 + 64MB 帧 | Wave 3 | W3-D17 |
-| `getTeam` 的 `repairTeamAgentsIfMissing` | Wave 3 | W3-D13 |
-| user-scope 过滤 | Wave 3 | W3-D12 |
-| `ConversationService::send_message` 识别 `extra.team_id` | Wave 3 | W3-D16 |
-| conversation 复用（单聊→建团） | Wave 3 (REST) + Wave 5 (MCP) | W3-D15 + W5-D26 |
-| `team.mcpStatus` 10-phase WS 事件 | Wave 5 | W5-D31 |
+| 原 "phase2" 条目                                           |         新归属 Wave          | 模块                     |
+| ---------------------------------------------------------- | :--------------------------: | ------------------------ |
+| activeWakes 重入锁                                         |            Wave 4            | W4-D18                   |
+| wakeTimeouts 60s 看门狗                                    |            Wave 4            | W4-D18                   |
+| finalizedTurns 5s dedup                                    |            Wave 4            | W4-D19                   |
+| crash recovery                                             |            Wave 4            | W4-D20                   |
+| 429 / rate-limit 识别                                      |            Wave 4            | W4-D21                   |
+| inactivity watchdog                                        |            Wave 4            | W4-D22                   |
+| addAgentLocks per-team 串行化                              |            Wave 4            | W4-D23                   |
+| leader 不可 shutdown 的 target role 检查                   |            Wave 5            | W5-D30                   |
+| `team_send_message` 识别 `shutdown_approved/rejected`      |            Wave 5            | W5-D30                   |
+| `team_spawn_agent` 真实 spawn                              |            Wave 5            | W5-D29                   |
+| `team_rename_agent` 规范化 + renamed_agents map            |            Wave 3            | W3-D14                   |
+| `teammate_message` WS 事件                                 |            Wave 5            | W5-D31                   |
+| Team Guide MCP 单例（aion_create_team / aion_list_models） |            Wave 5            | W5-D26 / W5-D27 / W5-D28 |
+| `mcp_ready` 握手                                           |            Wave 4            | W4-D24                   |
+| 300s 请求超时 + 64MB 帧                                    |            Wave 3            | W3-D17                   |
+| `getTeam` 的 `repairTeamAgentsIfMissing`                   |            Wave 3            | W3-D13                   |
+| user-scope 过滤                                            |            Wave 3            | W3-D12                   |
+| `ConversationService::send_message` 识别 `extra.team_id`   |            Wave 3            | W3-D16                   |
+| conversation 复用（单聊→建团）                             | Wave 3 (REST) + Wave 5 (MCP) | W3-D15 + W5-D26          |
+| `team.mcpStatus` 10-phase WS 事件                          |            Wave 5            | W5-D31                   |
 
 **真正延后到 phase2** 的只剩 P2 项（非 phase1 交付目标）：
 

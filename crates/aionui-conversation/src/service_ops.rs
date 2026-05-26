@@ -37,24 +37,24 @@ impl ConversationService {
     // ── Model ───────────────────────────────────────────────────────
 
     pub async fn get_model(&self, conversation_id: &str) -> Result<GetModelInfoResponse, AppError> {
-        self.task(conversation_id)?.get_model().await
+        self.get_or_build_agent(conversation_id).await?.get_model().await
     }
 
     pub async fn set_model(&self, conversation_id: &str, req: SetModelRequest) -> Result<(), AppError> {
         if req.model_id.trim().is_empty() {
             return Err(AppError::BadRequest("model_id must not be empty".into()));
         }
-        self.task(conversation_id)?.set_model(&req.model_id).await
+        self.get_or_build_agent(conversation_id).await?.set_model(&req.model_id).await
     }
 
     // ── Usage / Slash commands ──────────────────────────────────────
 
     pub async fn get_usage(&self, conversation_id: &str) -> Result<Option<serde_json::Value>, AppError> {
-        self.task(conversation_id)?.get_usage().await
+        self.get_or_build_agent(conversation_id).await?.get_usage().await
     }
 
     pub async fn get_slash_commands(&self, conversation_id: &str) -> Result<Vec<SlashCommandItem>, AppError> {
-        self.task(conversation_id)?.get_slash_commands().await
+        self.get_or_build_agent(conversation_id).await?.get_slash_commands().await
     }
 
     // ── Side question ───────────────────────────────────────────────

@@ -9,6 +9,7 @@
 //! - `DELETE /api/remote-agents/{id}`                 — delete remote agent
 //! - `POST /api/remote-agents/test-connection`          — test connection to remote agent (without saving it)
 //! - `POST /api/remote-agents/{id}/handshake`          — perform handshake with the remote agent to verify connectivity and retrieve agent info
+//! - `GET  /api/remote-agents/{id}/models`             — fetch available models from an OpenCode remote agent's /provider endpoint
 
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
@@ -17,8 +18,8 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 
 use aionui_api_types::{
-    ApiResponse, CreateRemoteAgentRequest, HandshakeResponse, RemoteAgentListItem, RemoteAgentResponse,
-    TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
+    ApiResponse, CreateRemoteAgentRequest, HandshakeResponse, ModelInfoPayload, RemoteAgentListItem,
+    RemoteAgentResponse, TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
 };
 use aionui_auth::CurrentUser;
 use aionui_common::AppError;
@@ -34,6 +35,7 @@ pub fn remote_agent_routes(state: RemoteAgentRouterState) -> Router {
         .route("/api/remote-agents/test-connection", post(test_connection))
         .route("/api/remote-agents/{id}", get(get_one).put(update).delete(delete_one))
         .route("/api/remote-agents/{id}/handshake", post(handshake))
+        .route("/api/remote-agents/{id}/models", get(fetch_models))
         .with_state(state)
 }
 
@@ -101,4 +103,13 @@ async fn handshake(
 ) -> Result<Json<ApiResponse<HandshakeResponse>>, AppError> {
     let resp = state.service.handshake(&id).await?;
     Ok(Json(ApiResponse::ok(resp)))
+}
+
+async fn fetch_models(
+    State(state): State<RemoteAgentRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<ModelInfoPayload>>, AppError> {
+    let payload = state.service.fetch_models(&id).await?;
+    Ok(Json(ApiResponse::ok(payload)))
 }

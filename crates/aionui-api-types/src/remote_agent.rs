@@ -88,16 +88,22 @@ pub struct RemoteAgentResponse {
     pub updated_at: TimestampMs,
 }
 
-/// Request body for testing a remote agent WebSocket connection.
+/// Request body for testing a remote agent connection.
 #[derive(Debug, Deserialize)]
 pub struct TestRemoteAgentConnectionRequest {
     pub url: String,
+    #[serde(default = "default_remote_agent_protocol")]
+    pub protocol: RemoteAgentProtocol,
     #[serde(default)]
     pub auth_type: Option<RemoteAgentAuthType>,
     #[serde(default)]
     pub auth_token: Option<String>,
     #[serde(default)]
     pub allow_insecure: bool,
+}
+
+fn default_remote_agent_protocol() -> RemoteAgentProtocol {
+    RemoteAgentProtocol::OpenClaw
 }
 
 /// Response for OpenClaw handshake.

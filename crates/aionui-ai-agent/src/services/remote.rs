@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aionui_api_types::{
-    CreateRemoteAgentRequest, HandshakeResponse, RemoteAgentListItem, RemoteAgentResponse,
-    TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
+    CreateRemoteAgentRequest, HandshakeResponse, ModelInfoEntry, ModelInfoPayload, RemoteAgentListItem,
+    RemoteAgentResponse, TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
 };
 use aionui_common::{
     AppError, RemoteAgentAuthType, RemoteAgentProtocol, RemoteAgentStatus, decrypt_string, encrypt_string,
@@ -13,6 +13,7 @@ use aionui_db::{IRemoteAgentRepository, UpdateRemoteAgentParams};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::SigningKey;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use tokio_tungstenite::tungstenite;
 use tracing::warn;
 
@@ -86,6 +87,17 @@ impl RemoteAgentService {
 
     /// Update an existing remote agent.
     pub async fn update(&self, id: &str, req: UpdateRemoteAgentRequest) -> Result<RemoteAgentResponse, AppError> {
+        let existing = self
+            .repo
+            .find_by_id(id)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::NotFound(format!("Remote agent '{id}' not found")))?;
+        validate_protocol_url(
+            req.protocol.unwrap_or_else(|| parse_protocol(&existing.protocol)),
+            req.url.as_deref().unwrap_or(&existing.url),
+        )?;
+
         let encrypted_token = match &req.auth_token {
             Some(Some(t)) => Some(Some(encrypt_string(t, &self.encryption_key)?)),
             Some(None) => Some(None),
@@ -122,30 +134,26 @@ impl RemoteAgentService {
         })
     }
 
-    /// Test a WebSocket connection to a remote agent URL (10s timeout, SSRF protected).
+    /// Test a remote agent connection using its protocol-specific transport.
     pub async fn test_connection(&self, req: TestRemoteAgentConnectionRequest) -> Result<(), AppError> {
-        validate_ws_url(&req.url)?;
-
-        let url = req.url.clone();
-        let result = tokio::time::timeout(Duration::from_secs(10), async {
-            tokio::task::spawn_blocking(move || {
-                tungstenite::connect(&url)
-                    .map(|_| ())
-                    .map_err(|e| AppError::BadGateway(format!("WebSocket connection failed: {e}")))
-            })
-            .await
-            .map_err(|e| AppError::Internal(format!("Join error: {e}")))?
-        })
-        .await;
-
-        match result {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(AppError::Timeout("Connection timed out after 10 seconds".into())),
+        match req.protocol {
+            RemoteAgentProtocol::OpenCode => {
+                test_opencode_health(
+                    &req.url,
+                    req.auth_type.unwrap_or(RemoteAgentAuthType::None),
+                    req.auth_token.as_deref(),
+                    req.allow_insecure,
+                )
+                .await
+            }
+            RemoteAgentProtocol::OpenClaw | RemoteAgentProtocol::Acp => test_websocket_connection(&req.url).await,
+            RemoteAgentProtocol::ZeroClaw => Err(AppError::BadRequest(
+                "ZeroClaw remote protocol is not supported yet".into(),
+            )),
         }
     }
 
-    /// OpenClaw device handshake (15s timeout).
+    /// Protocol-specific handshake / health verification.
     pub async fn handshake(&self, id: &str) -> Result<HandshakeResponse, AppError> {
         let row = self
             .repo
@@ -155,9 +163,29 @@ impl RemoteAgentService {
             .ok_or_else(|| AppError::NotFound(format!("Remote agent '{id}' not found")))?;
 
         let protocol = parse_protocol(&row.protocol);
+        if protocol == RemoteAgentProtocol::OpenCode {
+            let auth_type = parse_auth_type(&row.auth_type);
+            let auth_token = decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
+            let health_result =
+                test_opencode_health(&row.url, auth_type, auth_token.as_deref(), row.allow_insecure).await;
+            match health_result {
+                Ok(()) => {
+                    let now = aionui_common::now_ms();
+                    let _ = self.repo.update_status(id, "connected", Some(now)).await;
+                    return Ok(HandshakeResponse {
+                        status: "ok".to_string(),
+                    });
+                }
+                Err(e) => {
+                    let _ = self.repo.update_status(id, "error", None).await;
+                    return Err(e);
+                }
+            }
+        }
+
         if protocol != RemoteAgentProtocol::OpenClaw {
             return Err(AppError::BadRequest(
-                "Handshake is only supported for OpenClaw protocol".into(),
+                "Handshake is not supported for this protocol".into(),
             ));
         }
 
@@ -192,6 +220,36 @@ impl RemoteAgentService {
                 Err(AppError::Timeout("Handshake timed out after 15 seconds".into()))
             }
         }
+    }
+
+    /// Fetch available models from an OpenCode remote agent's `/provider`
+    /// endpoint.  Used by the Guid (New Chat) page to populate the model
+    /// selector without requiring an active session.
+    ///
+    /// Mirrors the [`handshake`] pattern: reads the row by id, decrypts the
+    /// auth token using the service's encryption key (the plaintext never
+    /// leaves the Rust process), and returns the snake_case `ModelInfoPayload`
+    /// shape the renderer expects.  Model ids are encoded as
+    /// `"<providerID>::<modelID>"` to match the format the live session path
+    /// in `manager/remote/agent.rs` already splits on.
+    pub async fn fetch_models(&self, id: &str) -> Result<ModelInfoPayload, AppError> {
+        let row = self
+            .repo
+            .find_by_id(id)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::NotFound(format!("Remote agent '{id}' not found")))?;
+
+        let protocol = parse_protocol(&row.protocol);
+        if protocol != RemoteAgentProtocol::OpenCode {
+            return Err(AppError::BadRequest(
+                "Model fetch is only supported for OpenCode remote agents".into(),
+            ));
+        }
+
+        let auth_type = parse_auth_type(&row.auth_type);
+        let auth_token = decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
+        fetch_opencode_model_info(&row.url, auth_type, auth_token.as_deref(), row.allow_insecure).await
     }
 
     // ── Private helpers ──────────────────────────────────────────
@@ -259,7 +317,16 @@ fn validate_create_request(req: &CreateRemoteAgentRequest) -> Result<(), AppErro
     if req.url.trim().is_empty() {
         return Err(AppError::BadRequest("url must not be empty".into()));
     }
-    validate_ws_url(&req.url)
+    validate_protocol_url(req.protocol, &req.url)
+}
+
+fn validate_protocol_url(protocol: RemoteAgentProtocol, url: &str) -> Result<(), AppError> {
+    match protocol {
+        RemoteAgentProtocol::OpenCode => validate_http_url(url),
+        RemoteAgentProtocol::OpenClaw | RemoteAgentProtocol::Acp | RemoteAgentProtocol::ZeroClaw => {
+            validate_ws_url(url)
+        }
+    }
 }
 
 fn validate_ws_url(url: &str) -> Result<(), AppError> {
@@ -267,6 +334,212 @@ fn validate_ws_url(url: &str) -> Result<(), AppError> {
         return Err(AppError::BadRequest("URL must use ws:// or wss:// protocol".into()));
     }
     Ok(())
+}
+
+fn validate_http_url(url: &str) -> Result<(), AppError> {
+    let normalized = normalize_opencode_base_url(url)?;
+    if !normalized.starts_with("http://") && !normalized.starts_with("https://") {
+        return Err(AppError::BadRequest("URL must use http:// or https:// protocol".into()));
+    }
+    Ok(())
+}
+
+fn normalize_opencode_base_url(url: &str) -> Result<String, AppError> {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest("url must not be empty".into()));
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Ok(trimmed.to_string());
+    }
+    if trimmed.contains("://") {
+        return Err(AppError::BadRequest("URL must use http:// or https:// protocol".into()));
+    }
+    Ok(format!("http://{trimmed}"))
+}
+
+async fn test_websocket_connection(url: &str) -> Result<(), AppError> {
+    validate_ws_url(url)?;
+
+    let url = url.to_string();
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::task::spawn_blocking(move || {
+            tungstenite::connect(&url)
+                .map(|_| ())
+                .map_err(|e| AppError::BadGateway(format!("WebSocket connection failed: {e}")))
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Join error: {e}")))?
+    })
+    .await;
+
+    match result {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(AppError::Timeout("Connection timed out after 10 seconds".into())),
+    }
+}
+
+async fn test_opencode_health(
+    url: &str,
+    auth_type: RemoteAgentAuthType,
+    auth_token: Option<&str>,
+    allow_insecure: bool,
+) -> Result<(), AppError> {
+    let base_url = normalize_opencode_base_url(url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .danger_accept_invalid_certs(allow_insecure)
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))?;
+    let response = client
+        .get(format!("{base_url}/global/health"))
+        .headers(build_opencode_auth_headers(auth_type, auth_token)?)
+        .send()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode health check failed: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(AppError::BadGateway(format!(
+            "OpenCode health check failed: {}",
+            response.status()
+        )));
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode health response was not JSON: {e}")))?;
+    if body.get("healthy").and_then(|v| v.as_bool()) == Some(true) {
+        return Ok(());
+    }
+
+    Err(AppError::BadGateway(
+        "OpenCode health endpoint returned unhealthy status".into(),
+    ))
+}
+
+/// Fetch the OpenCode `/provider` listing and convert it into the renderer's
+/// `ModelInfoPayload` shape.  Encodes ids as `"<providerID>::<modelID>"` to
+/// match the format the live session parser at
+/// `manager/remote/agent.rs::set_model` already understands.
+async fn fetch_opencode_model_info(
+    url: &str,
+    auth_type: RemoteAgentAuthType,
+    auth_token: Option<&str>,
+    allow_insecure: bool,
+) -> Result<ModelInfoPayload, AppError> {
+    let base_url = normalize_opencode_base_url(url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .danger_accept_invalid_certs(allow_insecure)
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))?;
+    let response = client
+        .get(format!("{base_url}/provider"))
+        .headers(build_opencode_auth_headers(auth_type, auth_token)?)
+        .send()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode provider fetch failed: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(AppError::BadGateway(format!(
+            "OpenCode /provider returned {}",
+            response.status()
+        )));
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode /provider response was not JSON: {e}")))?;
+
+    let connected: std::collections::HashSet<&str> = body
+        .get("connected")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    let defaults: std::collections::HashMap<&str, &str> = body
+        .get("default")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.as_str(), s)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut available_models: Vec<ModelInfoEntry> = Vec::new();
+    let mut current_model_id: Option<String> = None;
+    let mut current_model_label: Option<String> = None;
+
+    if let Some(all) = body.get("all").and_then(|v| v.as_array()) {
+        for provider in all {
+            let provider_id = match provider.get("id").and_then(|v| v.as_str()) {
+                // Only surface models from connected (authenticated) providers
+                // when the response includes a `connected` list.  If the list
+                // is empty (older OpenCode builds), fall through and include
+                // everything.
+                Some(id) if connected.is_empty() || connected.contains(id) => id,
+                _ => continue,
+            };
+            let provider_default = defaults.get(provider_id).copied();
+            if let Some(models) = provider.get("models").and_then(|v| v.as_object()) {
+                for (model_id, model) in models {
+                    let label = model.get("name").and_then(|v| v.as_str()).unwrap_or(model_id);
+                    let qualified_id = format!("{provider_id}::{model_id}");
+                    let qualified_label = format!("[{provider_id}] {label}");
+                    if current_model_id.is_none() && provider_default == Some(model_id.as_str()) {
+                        current_model_id = Some(qualified_id.clone());
+                        current_model_label = Some(qualified_label.clone());
+                    }
+                    available_models.push(ModelInfoEntry {
+                        id: qualified_id,
+                        label: qualified_label,
+                    });
+                }
+            }
+        }
+    }
+
+    if current_model_id.is_none()
+        && let Some(first) = available_models.first()
+    {
+        current_model_id = Some(first.id.clone());
+        current_model_label = Some(first.label.clone());
+    }
+
+    Ok(ModelInfoPayload {
+        current_model_id,
+        current_model_label,
+        available_models,
+    })
+}
+
+fn build_opencode_auth_headers(
+    auth_type: RemoteAgentAuthType,
+    auth_token: Option<&str>,
+) -> Result<HeaderMap, AppError> {
+    let mut headers = HeaderMap::new();
+    let Some(token) = auth_token.filter(|t| !t.is_empty()) else {
+        return Ok(headers);
+    };
+
+    let value = match auth_type {
+        RemoteAgentAuthType::Bearer => format!("Bearer {token}"),
+        RemoteAgentAuthType::Password => format!("Basic {}", BASE64.encode(format!("opencode:{token}"))),
+        RemoteAgentAuthType::None => return Ok(headers),
+    };
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&value).map_err(|e| AppError::BadRequest(format!("Invalid auth token: {e}")))?,
+    );
+    Ok(headers)
+}
+
+fn decrypt_optional_token(token: Option<&str>, key: &[u8; 32]) -> Result<Option<String>, AppError> {
+    token.map(|encrypted| decrypt_string(encrypted, key)).transpose()
 }
 
 // ── Token masking ───────────────────────────────────────────────
@@ -374,6 +647,29 @@ mod tests {
     }
 
     #[test]
+    fn validate_http_url_accepts_http() {
+        assert!(validate_http_url("http://127.0.0.1:4096").is_ok());
+    }
+
+    #[test]
+    fn validate_http_url_accepts_bare_host_port() {
+        assert!(validate_http_url("127.0.0.1:4096").is_ok());
+    }
+
+    #[test]
+    fn validate_http_url_rejects_websocket() {
+        assert!(validate_http_url("wss://example.com/gateway").is_err());
+    }
+
+    #[test]
+    fn normalize_opencode_base_url_trims_and_defaults_to_http() {
+        assert_eq!(
+            normalize_opencode_base_url(" 127.0.0.1:4096/ ").unwrap(),
+            "http://127.0.0.1:4096"
+        );
+    }
+
+    #[test]
     fn generate_device_keypair_produces_valid_output() {
         let key = [0x42u8; 32];
         let (id, pub_key, priv_key) = generate_device_keypair(&key).unwrap();
@@ -400,6 +696,7 @@ mod tests {
     #[test]
     fn enum_to_str_protocol() {
         assert_eq!(enum_to_str(&RemoteAgentProtocol::OpenClaw), "openclaw");
+        assert_eq!(enum_to_str(&RemoteAgentProtocol::OpenCode), "opencode");
         assert_eq!(enum_to_str(&RemoteAgentProtocol::ZeroClaw), "zeroclaw");
         assert_eq!(enum_to_str(&RemoteAgentProtocol::Acp), "acp");
     }
@@ -414,8 +711,19 @@ mod tests {
     #[test]
     fn parse_protocol_known_values() {
         assert_eq!(parse_protocol("openclaw"), RemoteAgentProtocol::OpenClaw);
+        assert_eq!(parse_protocol("opencode"), RemoteAgentProtocol::OpenCode);
         assert_eq!(parse_protocol("zeroclaw"), RemoteAgentProtocol::ZeroClaw);
         assert_eq!(parse_protocol("acp"), RemoteAgentProtocol::Acp);
+    }
+
+    #[test]
+    fn build_opencode_password_auth_uses_basic_with_default_username() {
+        let headers = build_opencode_auth_headers(RemoteAgentAuthType::Password, Some("secret")).unwrap();
+
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            format!("Basic {}", BASE64.encode("opencode:secret"))
+        );
     }
 
     #[test]

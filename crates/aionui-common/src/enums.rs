@@ -176,6 +176,8 @@ pub enum ProtocolType {
 #[serde(rename_all = "lowercase")]
 pub enum RemoteAgentProtocol {
     OpenClaw,
+    #[serde(rename = "opencode")]
+    OpenCode,
     ZeroClaw,
     Acp,
 }

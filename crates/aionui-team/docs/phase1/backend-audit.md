@@ -5,6 +5,7 @@
 > **目标**：让 backend 包掉所有 team 逻辑，上层调用方（参考 AionUi 实现）只管渲染。
 >
 > 相关已有文档（本文档的断言若与其冲突，以本文档和源码为准）：
+>
 > - [`docs/teams/phase1/aionui-audit.md`](./aionui-audit.md) — **AionUi 侧权威事实来源**（搭档 aionui-audit 交付，锚定 AionUi main @ `ed8a6bcd3`）
 > - [`docs/teams/README.md`](../README.md) — 模块总览和 ASCII 架构图
 > - [`docs/teams/api.md`](../api.md) — HTTP API 清单
@@ -19,20 +20,20 @@
 
 ## 0. 快速结论
 
-| 领域 | 结论 |
-|------|------|
-| **核心数据面**（HTTP CRUD、邮箱、任务板、MCP TCP server、scheduler 工具执行） | 已完整实现且带 unit/integration test |
-| **控制面 —— agent 运行时与 team 的耦合** | **完全未接通**。`TeammateManager::try_wake`、`TeamMcpStdioConfig`、`build_lead_prompt` 等关键能力均无生产调用 |
-| **Team 内部 MCP 工具** | **10 个工具少了 2 个且 8 个中有 1 个是 Lead-only 错判**：现有 8 个（见第 1.5.2 节），AionUi 参考要 10 个（缺 `team_describe_assistant` / `team_list_models`）；`team_rename_agent` AionUi 允许所有角色，本后端实现也是所有角色（一致） |
-| **Team Guide MCP（单聊→建团）** | **完全未实现**。AionUi 有 `aion_create_team` + `aion_list_models` 两个工具 + 独立单例 TCP server + stdio bridge + Layer-1 Prompt 注入，后端此模块不存在 |
-| **ACP session_new 对 mcp_servers 的注入** | **完全没接通**。`AcpAgentManager::session_new_and_prompt` 直接 `NewSessionRequest::new(workspace)`，ACP agent 看不到任何 `team_*` 工具 |
-| **AcpBuildExtra 字段** | 没有 `team_id` / `slot_id` / `team_mcp`，参数传不下去 |
-| **ConversationService.send_message** | 不识别 `extra.teamId`，team conversation 的消息走不到 scheduler |
-| **Prompt 三层体系** | Layer-2/3 后端有裸函数 `build_lead_prompt` / `build_teammate_prompt`，但**模板内容严重不足**（AionUi leader 有 15 步 Workflow + Model Selection + Preset Assistant + Sequencing Dependent Work；teammate 有 Standing By + Shutdown 协议原文）；Layer-1 Team Guide Prompt 完全不存在 |
-| **MCP 可靠性机制** | `mcp_ready` 握手、`waitForMcpReady(30s) graceful`、`MAX_MCP_MESSAGE_SIZE=64MB`、300s 请求超时 —— **全部没有**（后端帧大小上限 10MB，无 ready 握手，无请求超时） |
-| **Scheduler 可靠性机制** | `activeWakes` 重入锁、`wakeTimeouts` 60s 看门狗、`finalizedTurns` 5s dedup、crash recovery、429/inactivity watchdog、`addAgentLocks` 串行化 —— **全部没有** |
-| **Agent 生命周期事件** | AionUi `team.*` WebSocket 事件集有 6 组（mcpStatus 含 10 个 phase），后端只有 4 组基础事件（status/spawned/removed/renamed），缺 `team.listChanged` / `team.mcpStatus` |
-| **Role 不变式**（leader 不可 shutdown/remove） | scheduler 层**部分**：shutdown_agent 只对角色做了 Lead-only 检查（[scheduler.rs:451-455](../../../crates/aionui-team/src/scheduler.rs)），`remove_agent` 不检查 role |
+| 领域                                                                          | 结论                                                                                                                                                                                                                                                                                |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **核心数据面**（HTTP CRUD、邮箱、任务板、MCP TCP server、scheduler 工具执行） | 已完整实现且带 unit/integration test                                                                                                                                                                                                                                                |
+| **控制面 —— agent 运行时与 team 的耦合**                                      | **完全未接通**。`TeammateManager::try_wake`、`TeamMcpStdioConfig`、`build_lead_prompt` 等关键能力均无生产调用                                                                                                                                                                       |
+| **Team 内部 MCP 工具**                                                        | **10 个工具少了 2 个且 8 个中有 1 个是 Lead-only 错判**：现有 8 个（见第 1.5.2 节），AionUi 参考要 10 个（缺 `team_describe_assistant` / `team_list_models`）；`team_rename_agent` AionUi 允许所有角色，本后端实现也是所有角色（一致）                                              |
+| **Team Guide MCP（单聊→建团）**                                               | **完全未实现**。AionUi 有 `aion_create_team` + `aion_list_models` 两个工具 + 独立单例 TCP server + stdio bridge + Layer-1 Prompt 注入，后端此模块不存在                                                                                                                             |
+| **ACP session_new 对 mcp_servers 的注入**                                     | **完全没接通**。`AcpAgentManager::session_new_and_prompt` 直接 `NewSessionRequest::new(workspace)`，ACP agent 看不到任何 `team_*` 工具                                                                                                                                              |
+| **AcpBuildExtra 字段**                                                        | 没有 `team_id` / `slot_id` / `team_mcp`，参数传不下去                                                                                                                                                                                                                               |
+| **ConversationService.send_message**                                          | 不识别 `extra.teamId`，team conversation 的消息走不到 scheduler                                                                                                                                                                                                                     |
+| **Prompt 三层体系**                                                           | Layer-2/3 后端有裸函数 `build_lead_prompt` / `build_teammate_prompt`，但**模板内容严重不足**（AionUi leader 有 15 步 Workflow + Model Selection + Preset Assistant + Sequencing Dependent Work；teammate 有 Standing By + Shutdown 协议原文）；Layer-1 Team Guide Prompt 完全不存在 |
+| **MCP 可靠性机制**                                                            | `mcp_ready` 握手、`waitForMcpReady(30s) graceful`、`MAX_MCP_MESSAGE_SIZE=64MB`、300s 请求超时 —— **全部没有**（后端帧大小上限 10MB，无 ready 握手，无请求超时）                                                                                                                     |
+| **Scheduler 可靠性机制**                                                      | `activeWakes` 重入锁、`wakeTimeouts` 60s 看门狗、`finalizedTurns` 5s dedup、crash recovery、429/inactivity watchdog、`addAgentLocks` 串行化 —— **全部没有**                                                                                                                         |
+| **Agent 生命周期事件**                                                        | AionUi `team.*` WebSocket 事件集有 6 组（mcpStatus 含 10 个 phase），后端只有 4 组基础事件（status/spawned/removed/renamed），缺 `team.listChanged` / `team.mcpStatus`                                                                                                              |
+| **Role 不变式**（leader 不可 shutdown/remove）                                | scheduler 层**部分**：shutdown_agent 只对角色做了 Lead-only 检查（[scheduler.rs:451-455](../../../crates/aionui-team/src/scheduler.rs)），`remove_agent` 不检查 role                                                                                                                |
 
 **P0 gap 的本质**（对照 aionui-audit.md §7）：aionui-backend 目前停在"AionUi 架构的数据结构层"，agent 运行时、MCP 注入链、Prompt 内容、可靠性机制全部缺失。只有 team 数据面先跑通 MCP 工具注入 + 订阅 ACP Finish 事件回调 `finalize_turn`，用户才可能第一次看到 "lead 在对话里调度 teammate" 的真实行为。
 
@@ -56,15 +57,15 @@ pub struct TeamSession {
 }
 ```
 
-| 方法 | 位置 | 作用 |
-|------|------|------|
-| `start(team, repo, broadcaster)` | [session.rs:23](../../../crates/aionui-team/src/session.rs) | 构造 mailbox / task_board / scheduler / mcp_server，返回 session |
-| `team_id()` / `scheduler()` / `mailbox()` / `task_board()` | [session.rs:57-146](../../../crates/aionui-team/src/session.rs) | getter |
-| `mcp_stdio_config(slot_id) -> TeamMcpStdioConfig` | [session.rs:65](../../../crates/aionui-team/src/session.rs) | **返回一个 `{port, token, slot_id}` 结构，但从来没有被生产代码调用**（见第 3 节） |
-| `send_message(content)` | [session.rs:73](../../../crates/aionui-team/src/session.rs) | 用户→lead mailbox 写一条 `Message`，并把 lead 状态置 `Working` |
-| `send_message_to_agent(slot_id, content)` | [session.rs:98](../../../crates/aionui-team/src/session.rs) | 用户→指定 agent mailbox，**不验证 agent 是否在线** |
-| `add_agent` / `remove_agent` / `rename_agent` | [session.rs:123-133](../../../crates/aionui-team/src/session.rs) | 转发给 scheduler |
-| `stop()` | [session.rs:135](../../../crates/aionui-team/src/session.rs) | 停 mcp_server（**不 kill 对应的 ACP agent 进程**） |
+| 方法                                                       | 位置                                                             | 作用                                                                              |
+| ---------------------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `start(team, repo, broadcaster)`                           | [session.rs:23](../../../crates/aionui-team/src/session.rs)      | 构造 mailbox / task_board / scheduler / mcp_server，返回 session                  |
+| `team_id()` / `scheduler()` / `mailbox()` / `task_board()` | [session.rs:57-146](../../../crates/aionui-team/src/session.rs)  | getter                                                                            |
+| `mcp_stdio_config(slot_id) -> TeamMcpStdioConfig`          | [session.rs:65](../../../crates/aionui-team/src/session.rs)      | **返回一个 `{port, token, slot_id}` 结构，但从来没有被生产代码调用**（见第 3 节） |
+| `send_message(content)`                                    | [session.rs:73](../../../crates/aionui-team/src/session.rs)      | 用户→lead mailbox 写一条 `Message`，并把 lead 状态置 `Working`                    |
+| `send_message_to_agent(slot_id, content)`                  | [session.rs:98](../../../crates/aionui-team/src/session.rs)      | 用户→指定 agent mailbox，**不验证 agent 是否在线**                                |
+| `add_agent` / `remove_agent` / `rename_agent`              | [session.rs:123-133](../../../crates/aionui-team/src/session.rs) | 转发给 scheduler                                                                  |
+| `stop()`                                                   | [session.rs:135](../../../crates/aionui-team/src/session.rs)     | 停 mcp_server（**不 kill 对应的 ACP agent 进程**）                                |
 
 > **Gap 特征**：`TeamSession` 里没有任何 agent 运行时引用（没有 `WorkerTaskManager`、没有 `AgentManagerHandle`）。它只管数据，不管 agent 进程。
 
@@ -84,20 +85,21 @@ pub fn new(
 
 全部 public 方法：
 
-| 方法 | 行 | 作用 |
-|------|----|------|
-| `create_team(user_id, CreateTeamRequest)` | 39 | 为每个 agent 建 conversation（`extra={"teamId": team_id}`，[service.rs:73](../../../crates/aionui-team/src/service.rs)），首个 agent = Lead |
-| `list_teams()` / `get_team(id)` | 127, 137 | DB 读取 |
-| `remove_team(user_id, team_id)` | 147 | stop_session + 删每个 conversation + 删 mailbox / tasks / team |
-| `rename_team` | 172 | 改名 |
-| `add_agent` / `remove_agent` / `rename_agent` | 191, 262, 307 | 增删改 agent，同步到 session（若存在） |
-| `ensure_session(team_id)` | 346 | 幂等启动 TeamSession |
-| `stop_session(team_id)` | 364 | 停掉 session（dashmap 删） |
-| `send_message(team_id, content)` | 370 | 转发 `TeamSession::send_message` |
-| `send_message_to_agent(team_id, slot_id, content)` | 378 | 同上 |
-| `dispose_all()` | 391 | 停所有 session |
+| 方法                                               | 行            | 作用                                                                                                                                        |
+| -------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `create_team(user_id, CreateTeamRequest)`          | 39            | 为每个 agent 建 conversation（`extra={"teamId": team_id}`，[service.rs:73](../../../crates/aionui-team/src/service.rs)），首个 agent = Lead |
+| `list_teams()` / `get_team(id)`                    | 127, 137      | DB 读取                                                                                                                                     |
+| `remove_team(user_id, team_id)`                    | 147           | stop_session + 删每个 conversation + 删 mailbox / tasks / team                                                                              |
+| `rename_team`                                      | 172           | 改名                                                                                                                                        |
+| `add_agent` / `remove_agent` / `rename_agent`      | 191, 262, 307 | 增删改 agent，同步到 session（若存在）                                                                                                      |
+| `ensure_session(team_id)`                          | 346           | 幂等启动 TeamSession                                                                                                                        |
+| `stop_session(team_id)`                            | 364           | 停掉 session（dashmap 删）                                                                                                                  |
+| `send_message(team_id, content)`                   | 370           | 转发 `TeamSession::send_message`                                                                                                            |
+| `send_message_to_agent(team_id, slot_id, content)` | 378           | 同上                                                                                                                                        |
+| `dispose_all()`                                    | 391           | 停所有 session                                                                                                                              |
 
 **关键事实**：
+
 1. `CreateTeamRequest` 校验 `agents.is_empty()` 抛错（[service.rs:44](../../../crates/aionui-team/src/service.rs)），**但不校验 user_id 归属 —— `get_team`/`list_teams`/`remove_team` 都不做 user 过滤**（这条在 [api.md](../api.md) 有提到是 bug #5）。
 2. 首个 agent 强制 `role=Lead`（`i==0`，[service.rs:56-60](../../../crates/aionui-team/src/service.rs)），忽略输入的 role 字段。
 3. 每个 agent 独立 conversation，`extra.teamId = team_id`（[service.rs:73](../../../crates/aionui-team/src/service.rs) / [service.rs:218](../../../crates/aionui-team/src/service.rs)）。**这是目前唯一把 team 和 conversation 绑定的线索，但 `ConversationService::send_message` 不读它**（见第 4 节）。
@@ -106,20 +108,20 @@ pub fn new(
 
 端点（[routes.rs:24-48](../../../crates/aionui-team/src/routes.rs)）：
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/teams` | 创建 |
-| GET | `/api/teams` | 列表（**未按 user 过滤**） |
-| GET | `/api/teams/{id}` | 详情 |
-| DELETE | `/api/teams/{id}` | 删除 |
-| PATCH | `/api/teams/{id}/name` | 改名 |
-| POST | `/api/teams/{id}/agents` | 加 agent |
-| DELETE | `/api/teams/{id}/agents/{slot_id}` | 删 agent |
-| PATCH | `/api/teams/{id}/agents/{slot_id}/name` | 改 agent 名 |
-| POST | `/api/teams/{id}/messages` | **发消息给 team（写 lead 邮箱）** |
-| POST | `/api/teams/{id}/agents/{slot_id}/messages` | **发消息给指定 agent（写其邮箱）** |
-| POST | `/api/teams/{id}/session` | 启动/确保 session |
-| DELETE | `/api/teams/{id}/session` | 停 session |
+| 方法   | 路径                                        | 说明                               |
+| ------ | ------------------------------------------- | ---------------------------------- |
+| POST   | `/api/teams`                                | 创建                               |
+| GET    | `/api/teams`                                | 列表（**未按 user 过滤**）         |
+| GET    | `/api/teams/{id}`                           | 详情                               |
+| DELETE | `/api/teams/{id}`                           | 删除                               |
+| PATCH  | `/api/teams/{id}/name`                      | 改名                               |
+| POST   | `/api/teams/{id}/agents`                    | 加 agent                           |
+| DELETE | `/api/teams/{id}/agents/{slot_id}`          | 删 agent                           |
+| PATCH  | `/api/teams/{id}/agents/{slot_id}/name`     | 改 agent 名                        |
+| POST   | `/api/teams/{id}/messages`                  | **发消息给 team（写 lead 邮箱）**  |
+| POST   | `/api/teams/{id}/agents/{slot_id}/messages` | **发消息给指定 agent（写其邮箱）** |
+| POST   | `/api/teams/{id}/session`                   | 启动/确保 session                  |
+| DELETE | `/api/teams/{id}/session`                   | 停 session                         |
 
 **注意**：没有 `GET /tasks`、`GET /mailbox`、`GET /members` 端点。客户端要看任务板 / 邮箱只能通过 WebSocket 事件或者等 agent 在 prompt 里回显（AionUi 参考实现同样无 HTTP 拉取端点）。
 
@@ -134,25 +136,27 @@ pub fn new(
 
 `TeammateManager` 关键方法：
 
-| 方法 | 行 | 作用 |
-|------|----|------|
-| `set_status(slot_id, status)` | 120 | 改状态 + `team.agent.status` WS 事件 |
-| `get_status(slot_id)` / `get_agent(slot_id)` | 134, 142 | getter |
-| `build_wake_payload(slot_id)` | 150 | 组装 `{agent, tasks, unread_messages}` |
-| `try_wake(slot_id)` | 164 | **原子 Idle→Working，返回 payload；非 idle 返回 None** |
-| `mark_idle(slot_id)` | 182 | 置 idle；若非 lead 则尝试 `maybe_wake_leader_when_all_idle` |
-| `execute_action(from_slot_id, action)` | 201 | 执行单个 SchedulerAction |
-| `finalize_turn(slot_id, actions)` | 281 | 批量 execute + mark_idle（若无 IdleNotification） |
-| `add_agent` / `remove_agent` / `rename_agent` | 305, 324, 336 | 动态增删改 + 广播事件 |
-| `list_agents()` / `list_tasks()` / `find_lead_slot_id()` | 348, 353, 357 | getter |
-| `maybe_wake_leader_when_all_idle()` | 482 | 防死循环：全员 idle 且 lead idle 时返回 lead slot_id（**调用方自己负责 wake**） |
+| 方法                                                     | 行            | 作用                                                                            |
+| -------------------------------------------------------- | ------------- | ------------------------------------------------------------------------------- |
+| `set_status(slot_id, status)`                            | 120           | 改状态 + `team.agent.status` WS 事件                                            |
+| `get_status(slot_id)` / `get_agent(slot_id)`             | 134, 142      | getter                                                                          |
+| `build_wake_payload(slot_id)`                            | 150           | 组装 `{agent, tasks, unread_messages}`                                          |
+| `try_wake(slot_id)`                                      | 164           | **原子 Idle→Working，返回 payload；非 idle 返回 None**                          |
+| `mark_idle(slot_id)`                                     | 182           | 置 idle；若非 lead 则尝试 `maybe_wake_leader_when_all_idle`                     |
+| `execute_action(from_slot_id, action)`                   | 201           | 执行单个 SchedulerAction                                                        |
+| `finalize_turn(slot_id, actions)`                        | 281           | 批量 execute + mark_idle（若无 IdleNotification）                               |
+| `add_agent` / `remove_agent` / `rename_agent`            | 305, 324, 336 | 动态增删改 + 广播事件                                                           |
+| `list_agents()` / `list_tasks()` / `find_lead_slot_id()` | 348, 353, 357 | getter                                                                          |
+| `maybe_wake_leader_when_all_idle()`                      | 482           | 防死循环：全员 idle 且 lead idle 时返回 lead slot_id（**调用方自己负责 wake**） |
 
 反死循环规则（tested in [scheduler.rs:701-776](../../../crates/aionui-team/src/scheduler.rs)）：
+
 - Lead 变 idle 时：立刻 `Ok(None)`
 - Non-lead 变 idle 时：全员 idle 且 lead idle → 返回 `Some(lead_slot_id)`；否则 `None`
 - `try_wake` 发现非 idle → `Ok(None)`（跳过重复唤醒）
 
 **特殊 action**：
+
 - `SpawnAgent` ([scheduler.rs:254-266](../../../crates/aionui-team/src/scheduler.rs))：**只 log，不执行**，注释写 `spawn_agent action — requires TeamSession to complete`。实际 spawn 逻辑根本没实现。
 - `ShutdownAgent` ([scheduler.rs:267](../../../crates/aionui-team/src/scheduler.rs))：Lead-only，写 `ShutdownRequest` 消息到目标邮箱，不 kill 进程。
 - `IdleNotification` ([scheduler.rs:250](../../../crates/aionui-team/src/scheduler.rs))：非 lead 发送时写到 lead 邮箱；随后 `mark_idle(from_slot_id)`。
@@ -169,11 +173,13 @@ pub fn new(
 结构 ([server.rs:26-30](../../../crates/aionui-team/src/mcp/server.rs))：`{ addr, auth_token, shutdown_tx }`。
 
 启动流程：
+
 1. `TcpListener::bind("127.0.0.1:0")` — **localhost 任意端口**（[server.rs:37](../../../crates/aionui-team/src/mcp/server.rs)）
 2. `tokio::spawn(accept_loop)`
 3. 每个 `TcpStream` 走 `handle_connection`
 
 `handle_connection` ([server.rs:117](../../../crates/aionui-team/src/mcp/server.rs)) 握手：
+
 1. 第一条 request 必须是 `initialize`，带 `auth_token` + `slot_id`（同时接受 `authToken`/`slotId` 驼峰别名）
 2. 认证过后存 `caller_slot_id`
 3. 支持 `notifications/initialized` / `tools/list` / `tools/call`
@@ -186,16 +192,16 @@ pub fn new(
 
 `all_tool_descriptors()` ([tools.rs:18-115](../../../crates/aionui-team/src/mcp/tools.rs)) 返回 **8 个** tool：
 
-| 工具 | 作用 | 权限 |
-|------|------|------|
-| `team_send_message` | 发消息给指定 slot 或 `*` 广播 | 所有角色 |
-| `team_spawn_agent` | 动态创建 teammate（白名单 `claude`, `codex`） | **Lead only** |
-| `team_task_create` | 建任务 | 所有 |
-| `team_task_update` | 改任务（status/description/owner/blocked_by） | 所有 |
-| `team_task_list` | 列任务 | 所有 |
-| `team_members` | 列成员 | 所有 |
-| `team_rename_agent` | 改 agent 名 | 所有 |
-| `team_shutdown_agent` | 发送 shutdown_request | **Lead only** |
+| 工具                  | 作用                                          | 权限          |
+| --------------------- | --------------------------------------------- | ------------- |
+| `team_send_message`   | 发消息给指定 slot 或 `*` 广播                 | 所有角色      |
+| `team_spawn_agent`    | 动态创建 teammate（白名单 `claude`, `codex`） | **Lead only** |
+| `team_task_create`    | 建任务                                        | 所有          |
+| `team_task_update`    | 改任务（status/description/owner/blocked_by） | 所有          |
+| `team_task_list`      | 列任务                                        | 所有          |
+| `team_members`        | 列成员                                        | 所有          |
+| `team_rename_agent`   | 改 agent 名                                   | 所有          |
+| `team_shutdown_agent` | 发送 shutdown_request                         | **Lead only** |
 
 **Backend 白名单**：`["claude", "codex"]`（[tools.rs:167](../../../crates/aionui-team/src/mcp/tools.rs)）。硬编码，注意和 `AcpBackend` 实际支持的 17 个 backend（[enums.rs:102](../../../crates/aionui-common/src/enums.rs)）不一致 —— 这里列白名单是为了防 prompt injection 乱 spawn。
 
@@ -219,12 +225,12 @@ pub struct TeamMcpStdioConfig {
 
 封装 `ITeamRepository` 的四个方法（[mailbox.rs:11-90](../../../crates/aionui-team/src/mailbox.rs)）：
 
-| 方法 | 行 | 后端调用 |
-|------|----|--------|
-| `write(team_id, to_agent_id, from_agent_id, msg_type, content, summary)` | 20 | `repo.write_message()` |
-| `read_unread(team_id, agent_id)` | 56 | `repo.read_unread_and_mark()` — 读取 + 原子标记已读 |
-| `get_history(team_id, agent_id, limit)` | 74 | `repo.get_history()` |
-| `delete_by_team(team_id)` | 85 | `repo.delete_mailbox_by_team()` |
+| 方法                                                                     | 行  | 后端调用                                            |
+| ------------------------------------------------------------------------ | --- | --------------------------------------------------- |
+| `write(team_id, to_agent_id, from_agent_id, msg_type, content, summary)` | 20  | `repo.write_message()`                              |
+| `read_unread(team_id, agent_id)`                                         | 56  | `repo.read_unread_and_mark()` — 读取 + 原子标记已读 |
+| `get_history(team_id, agent_id, limit)`                                  | 74  | `repo.get_history()`                                |
+| `delete_by_team(team_id)`                                                | 85  | `repo.delete_mailbox_by_team()`                     |
 
 `MailboxMessageType` 三种：`Message`、`IdleNotification`、`ShutdownRequest`（[types.rs:146-150](../../../crates/aionui-team/src/types.rs)）。
 
@@ -232,12 +238,12 @@ pub struct TeamMcpStdioConfig {
 
 CRUD + 依赖管理：
 
-| 方法 | 行 | 说明 |
-|------|----|------|
-| `create_task(team_id, subject, description?, owner?, blocked_by[])` | 31 | 创建时验证依赖 task 存在，并回写依赖 task 的 `blocks` 字段 |
-| `update_task(team_id, task_id, TaskUpdate)` | 75 | TaskUpdate: `{status, description, owner, blocked_by, metadata}`；若状态变 `Completed` 则调 `check_unblocks` |
-| `list_tasks(team_id)` | 120 | 全部任务 |
-| `check_unblocks` (私有) | 129 | 任务完成 → 把下游任务的 `blocked_by` 中去掉当前 id |
+| 方法                                                                | 行  | 说明                                                                                                         |
+| ------------------------------------------------------------------- | --- | ------------------------------------------------------------------------------------------------------------ |
+| `create_task(team_id, subject, description?, owner?, blocked_by[])` | 31  | 创建时验证依赖 task 存在，并回写依赖 task 的 `blocks` 字段                                                   |
+| `update_task(team_id, task_id, TaskUpdate)`                         | 75  | TaskUpdate: `{status, description, owner, blocked_by, metadata}`；若状态变 `Completed` 则调 `check_unblocks` |
+| `list_tasks(team_id)`                                               | 120 | 全部任务                                                                                                     |
+| `check_unblocks` (私有)                                             | 129 | 任务完成 → 把下游任务的 `blocked_by` 中去掉当前 id                                                           |
 
 Task 状态 ([types.rs:198-203](../../../crates/aionui-team/src/types.rs))：`Pending` / `InProgress` / `Completed` / `Deleted`。
 
@@ -245,24 +251,24 @@ Task 状态 ([types.rs:198-203](../../../crates/aionui-team/src/types.rs))：`Pe
 
 三个函数（[prompts.rs:5-157](../../../crates/aionui-team/src/prompts.rs)）：
 
-| 函数 | 产物 |
-|------|------|
-| `build_lead_prompt(team_name, members)` | Lead 的 system prompt：团队成员列表 + 8 个 team_* 工具说明 + Workflow Guidelines |
-| `build_teammate_prompt(agent, team_name)` | Teammate 的 system prompt：身份 + 通信协议（`team_send_message` / `team_task_update` / idle/shutdown） |
-| `build_wake_payload(agent, tasks, unread_messages)` | wake 时注入给 agent 的 markdown：未读消息列表 + 任务板表格 |
+| 函数                                                | 产物                                                                                                   |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `build_lead_prompt(team_name, members)`             | Lead 的 system prompt：团队成员列表 + 8 个 team\_\* 工具说明 + Workflow Guidelines                     |
+| `build_teammate_prompt(agent, team_name)`           | Teammate 的 system prompt：身份 + 通信协议（`team_send_message` / `team_task_update` / idle/shutdown） |
+| `build_wake_payload(agent, tasks, unread_messages)` | wake 时注入给 agent 的 markdown：未读消息列表 + 任务板表格                                             |
 
 **用法缺失**：这三个函数**仅在 unit test 调用**，生产代码无人用（grep 证实）。即使 team 接通了，目前也没有代码把 `build_lead_prompt()` 作为 ACP agent 的 system prompt 注入 —— ACP 的 system prompt 走 `AcpBuildExtra.preset_context`（[types.rs:58-60](../../../crates/aionui-ai-agent/src/types.rs)），而 `TeamSessionService::create_team` 在构造 `CreateConversationRequest` 时**没有设置 preset_context**（[service.rs:63-74](../../../crates/aionui-team/src/service.rs)）。
 
 ### 1.9 `crates/aionui-team/src/types.rs` — 类型定义
 
-| 类型 | 要点 |
-|------|------|
-| `TeammateRole` ([types.rs:11-36](../../../crates/aionui-team/src/types.rs)) | `Lead` / `Teammate`；接受 `"leader"` 别名 |
-| `TeammateStatus` ([types.rs:42-82](../../../crates/aionui-team/src/types.rs)) | `Idle` / `Working` / `Thinking` / `ToolUse` / `Completed` / `Error`；接受 AionUi 别名（pending/active/failed） |
-| `TeamAgent` ([types.rs:88-108](../../../crates/aionui-team/src/types.rs)) | `{slot_id, name, role, conversation_id, backend, model, custom_agent_id, status, conversation_type, cli_path}`；`backend` 接受 `agentType` 别名 |
-| `Team` ([types.rs:129-138](../../../crates/aionui-team/src/types.rs)) | `{id, name, agents, lead_agent_id, created_at, updated_at}`（**没有 workspace 字段**，`TeamRow` 里有但 `Team` 没导出） |
-| `MailboxMessageType` / `MailboxMessage` | 邮件类型 + 邮件结构（[types.rs:144-190](../../../crates/aionui-team/src/types.rs)） |
-| `TaskStatus` / `TeamTask` | 任务状态 + 任务结构（带 `blocked_by` / `blocks`） |
+| 类型                                                                          | 要点                                                                                                                                            |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TeammateRole` ([types.rs:11-36](../../../crates/aionui-team/src/types.rs))   | `Lead` / `Teammate`；接受 `"leader"` 别名                                                                                                       |
+| `TeammateStatus` ([types.rs:42-82](../../../crates/aionui-team/src/types.rs)) | `Idle` / `Working` / `Thinking` / `ToolUse` / `Completed` / `Error`；接受 AionUi 别名（pending/active/failed）                                  |
+| `TeamAgent` ([types.rs:88-108](../../../crates/aionui-team/src/types.rs))     | `{slot_id, name, role, conversation_id, backend, model, custom_agent_id, status, conversation_type, cli_path}`；`backend` 接受 `agentType` 别名 |
+| `Team` ([types.rs:129-138](../../../crates/aionui-team/src/types.rs))         | `{id, name, agents, lead_agent_id, created_at, updated_at}`（**没有 workspace 字段**，`TeamRow` 里有但 `Team` 没导出）                          |
+| `MailboxMessageType` / `MailboxMessage`                                       | 邮件类型 + 邮件结构（[types.rs:144-190](../../../crates/aionui-team/src/types.rs)）                                                             |
+| `TaskStatus` / `TeamTask`                                                     | 任务状态 + 任务结构（带 `blocked_by` / `blocks`）                                                                                               |
 
 ### 1.10 `crates/aionui-ai-agent/src/types.rs` — AcpBuildExtra 当前字段
 
@@ -325,6 +331,7 @@ Key by `conversation_id`（[task_manager.rs:25](../../../crates/aionui-ai-agent/
 ### 1.13 `crates/aionui-ai-agent/src/factory.rs` — agent 工厂
 
 ACP 分支（[factory.rs:88-154](../../../crates/aionui-ai-agent/src/factory.rs)）：
+
 1. 反序列化 `extra` 为 `AcpBuildExtra`
 2. 从 `agent_registry` 解析 backend / cli_path / env
 3. `CommandSpec { command, args, env, cwd: Some(workspace) }`
@@ -335,6 +342,7 @@ ACP 分支（[factory.rs:88-154](../../../crates/aionui-ai-agent/src/factory.rs)
 ### 1.14 `crates/aionui-conversation/src/service.rs` — send_message / build_task_options
 
 `build_task_options` ([service.rs:1029-1065](../../../crates/aionui-conversation/src/service.rs))：
+
 ```rust
 fn build_task_options(&self, row: &ConversationRow) -> Result<BuildTaskOptions, AppError> {
     // ... 解析 row.type → agent_type
@@ -354,6 +362,7 @@ fn build_task_options(&self, row: &ConversationRow) -> Result<BuildTaskOptions, 
 **`extra` 里虽然可能有 `teamId`（由 `TeamSessionService` 写入），但 `build_task_options` 原样透传给 factory，factory 的 ACP 分支反序列化为 `AcpBuildExtra` 时会完全忽略它**（`AcpBuildExtra` 没有 `teamId` 字段，serde 默认丢弃未知字段）。
 
 `send_message` ([service.rs:809-920](../../../crates/aionui-conversation/src/service.rs))：
+
 - 主流程：校验 → 存 user message → `build_task_options` → `task_manager.get_or_build_task` → 改 status Running → 订阅 agent 事件 → send
 - **不识别 team conversation**。agent 回复后不回调 `TeamSessionService::finalize_turn` 或任何 team scheduler 方法。
 
@@ -442,62 +451,62 @@ pub fn build_team_state(
 
 ### 3.1 P0（没它 team 跑不起来）
 
-| # | 能力 | 后端有 | AionUi | GAP | aionui-audit 锚点 |
-|---|------|:------:|:------:|-----|------|
-| 1 | `AcpBuildExtra` 携带 team 上下文 | ❌ | ✅ | 无 `team_id` / `slot_id` / `teamMcpStdioConfig` 字段；factory 反序列化 `extra.teamMcpStdioConfig` 被直接丢弃 | §2.1 "启动 agent（MCP 注入）"、§3.1 "Team 内部 MCP 启动" |
-| 2 | ACP `session/new` 携带 team MCP | ❌ | ✅ | `NewSessionRequest::new(workspace)` 不调 `.mcp_servers(...)`；AionUi 在 `acp/index.ts:1605-1656` 把 `teamMcpStdioConfig` 包成 `AcpSessionMcpServer` 塞进 `session/new` | §2.1 |
-| 3 | `getOrStartSession` 语义 | ❌ | ✅ | 后端 `ensure_session` 只启动 MCP server + 填 `slots`；**不回写** `extra.teamMcpStdioConfig`，**不调** `task_manager.get_or_build_task({skipCache:true})` 重建 agent。AionUi 的 "全部成功才 `sessions.set`" 避免坏 session 缓存也没做 | §1.1 启动 session、§1.3 序列图 |
-| 4 | `sendMessage(teamId, content)` → wake leader | ❌ | ✅ | 后端 `send_message` 写完 lead mailbox + set_status Working 就返回；AionUi 还会 `wakeAfterAcceptedDelivery(leadSlotId, 'team')` 真正拉一次流 | §4.1 wake 来源（user 对 team 说话） |
-| 5 | `sendMessageToAgent(teamId, slotId, content, silent?, files?)` → wake target | ❌ | ✅ | 后端只写 mailbox；AionUi 写完后 `safeWake(targetSlotId)`；`silent=true` 还需要 **不** 写 user bubble 到目标 conversation | §4.1 "user 对某 agent 说话" |
-| 6 | Wake 流程：首次→完整 role prompt + unread messages；后续→仅 unread messages；unread 为空→释放锁 idle 掉 | ❌ | ✅ | `try_wake` 返回 `WakePayload` 后无人消费；`build_lead_prompt` / `build_teammate_prompt` / `build_wake_payload` 生产链路为空 | §2.1 "启动 agent（prompt 注入）"、§2.1 "pending → idle 转换" |
-| 7 | ACP turn 完成事件订阅 → `finalize_turn` | ❌ | ✅ | `AgentStreamEvent::Finish` 无订阅者；AionUi 通过 `teamEventBus.on('responseStream', …)` 监听 finish/error → `finalizeTurn(conversationId)` | §4.4 finalize_turn 流程 |
-| 8 | Layer-2 Leader prompt 全内容注入 | ⚠️ | ✅ | `build_lead_prompt`（[prompts.rs:5-60](../../../crates/aionui-team/src/prompts.rs)）仅有"团队成员列表 + 8 个工具列表 + 7 条 Workflow"。AionUi `leadPrompt.ts:111-166` 有 Workflow 15 条、Model Selection Guidelines、Sequencing Dependent Work、Preset Assistant Selection 等**上千字节**的产品语义；还接受 `availableAgentTypes` / `availableAssistants` / `renamedAgents` / `teamWorkspace` 四个动态参数 | §5.1 三层结构、§5.2 动态 context |
-| 9 | Layer-3 Teammate prompt 全内容注入 | ⚠️ | ✅ | `build_teammate_prompt`（[prompts.rs:62-89](../../../crates/aionui-team/src/prompts.rs)）三段概要；AionUi `teammatePrompt.ts:85-97` 显式 "Standing By (300s 超时防护)" + "Shutdown 协议原文" | §5.1 |
-| 10 | 10 个 team 内部 MCP 工具 | ⚠️ 8/10 | ✅ | 缺 `team_describe_assistant`、`team_list_models`；`team_members` 输出格式和 `team_task_list` ID 截断（[server.rs:427-443](../../../crates/aionui-team/src/mcp/server.rs)）与 AionUi 对齐但需要验证 | §3.2 Team 内部 10 个工具 |
-| 11 | 认证 token 机制 | ✅ | ✅ | 后端已实现（session 生成 token + handshake 校验），但目前 token 没有分发给任何 agent（见 #2） | §3.1 auth |
-| 12 | MCP `tools/call` arg 上下文 | ❌ | ✅ | 后端 `handle_tools_call` 把 `caller_slot_id` 作为参数传给 handler；AionUi bridge 在每次 request 里附 `from_slot_id`，便于 `team_send_message` 取 `fromAgentId`。后端虽然有 `caller_slot_id`，但 "shutdown_approved/rejected" 消息**识别**逻辑缺失（AionUi `TeamMcpServer.ts:244-277` 在 `handleSendMessage` 里识别这两种消息） | §3.2 `team_send_message` 行为说明 |
+| #   | 能力                                                                                                    | 后端有  | AionUi | GAP                                                                                                                                                                                                                                                                                                                                                                                                        | aionui-audit 锚点                                            |
+| --- | ------------------------------------------------------------------------------------------------------- | :-----: | :----: | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| 1   | `AcpBuildExtra` 携带 team 上下文                                                                        |   ❌    |   ✅   | 无 `team_id` / `slot_id` / `teamMcpStdioConfig` 字段；factory 反序列化 `extra.teamMcpStdioConfig` 被直接丢弃                                                                                                                                                                                                                                                                                               | §2.1 "启动 agent（MCP 注入）"、§3.1 "Team 内部 MCP 启动"     |
+| 2   | ACP `session/new` 携带 team MCP                                                                         |   ❌    |   ✅   | `NewSessionRequest::new(workspace)` 不调 `.mcp_servers(...)`；AionUi 在 `acp/index.ts:1605-1656` 把 `teamMcpStdioConfig` 包成 `AcpSessionMcpServer` 塞进 `session/new`                                                                                                                                                                                                                                     | §2.1                                                         |
+| 3   | `getOrStartSession` 语义                                                                                |   ❌    |   ✅   | 后端 `ensure_session` 只启动 MCP server + 填 `slots`；**不回写** `extra.teamMcpStdioConfig`，**不调** `task_manager.get_or_build_task({skipCache:true})` 重建 agent。AionUi 的 "全部成功才 `sessions.set`" 避免坏 session 缓存也没做                                                                                                                                                                       | §1.1 启动 session、§1.3 序列图                               |
+| 4   | `sendMessage(teamId, content)` → wake leader                                                            |   ❌    |   ✅   | 后端 `send_message` 写完 lead mailbox + set_status Working 就返回；AionUi 还会 `wakeAfterAcceptedDelivery(leadSlotId, 'team')` 真正拉一次流                                                                                                                                                                                                                                                                | §4.1 wake 来源（user 对 team 说话）                          |
+| 5   | `sendMessageToAgent(teamId, slotId, content, silent?, files?)` → wake target                            |   ❌    |   ✅   | 后端只写 mailbox；AionUi 写完后 `safeWake(targetSlotId)`；`silent=true` 还需要 **不** 写 user bubble 到目标 conversation                                                                                                                                                                                                                                                                                   | §4.1 "user 对某 agent 说话"                                  |
+| 6   | Wake 流程：首次→完整 role prompt + unread messages；后续→仅 unread messages；unread 为空→释放锁 idle 掉 |   ❌    |   ✅   | `try_wake` 返回 `WakePayload` 后无人消费；`build_lead_prompt` / `build_teammate_prompt` / `build_wake_payload` 生产链路为空                                                                                                                                                                                                                                                                                | §2.1 "启动 agent（prompt 注入）"、§2.1 "pending → idle 转换" |
+| 7   | ACP turn 完成事件订阅 → `finalize_turn`                                                                 |   ❌    |   ✅   | `AgentStreamEvent::Finish` 无订阅者；AionUi 通过 `teamEventBus.on('responseStream', …)` 监听 finish/error → `finalizeTurn(conversationId)`                                                                                                                                                                                                                                                                 | §4.4 finalize_turn 流程                                      |
+| 8   | Layer-2 Leader prompt 全内容注入                                                                        |   ⚠️    |   ✅   | `build_lead_prompt`（[prompts.rs:5-60](../../../crates/aionui-team/src/prompts.rs)）仅有"团队成员列表 + 8 个工具列表 + 7 条 Workflow"。AionUi `leadPrompt.ts:111-166` 有 Workflow 15 条、Model Selection Guidelines、Sequencing Dependent Work、Preset Assistant Selection 等**上千字节**的产品语义；还接受 `availableAgentTypes` / `availableAssistants` / `renamedAgents` / `teamWorkspace` 四个动态参数 | §5.1 三层结构、§5.2 动态 context                             |
+| 9   | Layer-3 Teammate prompt 全内容注入                                                                      |   ⚠️    |   ✅   | `build_teammate_prompt`（[prompts.rs:62-89](../../../crates/aionui-team/src/prompts.rs)）三段概要；AionUi `teammatePrompt.ts:85-97` 显式 "Standing By (300s 超时防护)" + "Shutdown 协议原文"                                                                                                                                                                                                               | §5.1                                                         |
+| 10  | 10 个 team 内部 MCP 工具                                                                                | ⚠️ 8/10 |   ✅   | 缺 `team_describe_assistant`、`team_list_models`；`team_members` 输出格式和 `team_task_list` ID 截断（[server.rs:427-443](../../../crates/aionui-team/src/mcp/server.rs)）与 AionUi 对齐但需要验证                                                                                                                                                                                                         | §3.2 Team 内部 10 个工具                                     |
+| 11  | 认证 token 机制                                                                                         |   ✅    |   ✅   | 后端已实现（session 生成 token + handshake 校验），但目前 token 没有分发给任何 agent（见 #2）                                                                                                                                                                                                                                                                                                              | §3.1 auth                                                    |
+| 12  | MCP `tools/call` arg 上下文                                                                             |   ❌    |   ✅   | 后端 `handle_tools_call` 把 `caller_slot_id` 作为参数传给 handler；AionUi bridge 在每次 request 里附 `from_slot_id`，便于 `team_send_message` 取 `fromAgentId`。后端虽然有 `caller_slot_id`，但 "shutdown_approved/rejected" 消息**识别**逻辑缺失（AionUi `TeamMcpServer.ts:244-277` 在 `handleSendMessage` 里识别这两种消息）                                                                             | §3.2 `team_send_message` 行为说明                            |
 
 ### 3.2 P1（能跑但体验差 / 关键硬约束）
 
-| # | 能力 | 后端有 | AionUi | GAP | aionui-audit 锚点 |
-|---|------|:------:|:------:|-----|------|
-| 13 | `activeWakes` 重入锁（正在 wake 时再次 wake 跳过） | ❌ | ✅ | scheduler 没有这个 set。无锁双 wake 会导致 mailbox 被双读 | §4.3 wake 重入与幂等、§8 #1/#2 |
-| 14 | `wakeTimeouts` 60s 看门狗（流中 chunk reset、finish clear；超时→failed + idle_notification） | ❌ | ✅ | `WAKE_TIMEOUT_MS=60_000` 已定义（[scheduler.rs:16](../../../crates/aionui-team/src/scheduler.rs)）**但无 timer 读**。Stuck agent 永远不会被标 failed | §2.1 inactivity watchdog、§8 |
-| 15 | `finalizedTurns` 5s dedup 窗口（避免同 turn 多次 finalize；re-wake 前显式 delete） | ❌ | ✅ | 无任何 dedup 机制 | §4.3、§8 #3 |
-| 16 | `maybeWakeLeaderWhenAllIdle` 仅在 `{idle,completed,failed,pending}` 时 wake leader | ⚠️ | ✅ | 后端只检查 `TeammateStatus::Idle`（[scheduler.rs:495](../../../crates/aionui-team/src/scheduler.rs)），不把 `failed`/`completed` 当 settled，导致一个 failed teammate 会**永久阻塞** leader | §4.4、§8 #4 |
-| 17 | Crash recovery：`finish.agentCrash` / error 含 `process exited unexpectedly`/`Session not found` → testament + kill + failed + wake leader；**leader crash 只 failed 不 remove** | ❌ | ✅ | 没有任何 crash 识别代码 | §2.1 crash recovery、§8 #6 |
-| 18 | 429/Rate-limit 识别：error 正则 `/429\|rate.?limit\|quota\|too many requests/i` → failed | ❌ | ✅ | 无识别；429 会被当普通 error 冒泡 | §2.1 "429 / 限流识别" |
-| 19 | `addAgentLocks` per-team 串行化并发 addAgent | ❌ | ✅ | `TeamSessionService::add_agent` 用 read-modify-write 更新 `team.agents`（[service.rs:197-253](../../../crates/aionui-team/src/service.rs)），并发下会丢 agent | §8 #14 |
-| 20 | Leader 不可 shutdown / remove 的硬约束 | ⚠️ 部分 | ✅ | `shutdown_agent` 检查了 Lead-only caller（[scheduler.rs:451-455](../../../crates/aionui-team/src/scheduler.rs)），但目标 agent role 未检查；`remove_agent` 完全不检查 role。AionUi 两处都拒 | §8 #6 |
-| 21 | `team_send_message` 识别 `"shutdown_approved"` / `"shutdown_rejected: <reason>"` | ❌ | ✅ | 后端把所有消息当普通 message 入箱。AionUi 拦截这两种消息：approved → `removeAgent(fromSlotId)` 并通知 leader；rejected → 写 reason 给 leader | §2.1 shutdown 协议、§3.2 |
-| 22 | `team_spawn_agent` 真正 spawn teammate conversation + agent task | ❌ | ✅ | scheduler 只 log 不执行（[scheduler.rs:254-266](../../../crates/aionui-team/src/scheduler.rs)）；AionUi 走 `spawnAgent` 闭包 → `addAgent` → 写 `teamMcpStdioConfig` 回 extra → wake 新 agent | §2.1 MCP spawn、§1.3 getOrStartSession 闭包 |
-| 23 | `team_shutdown_agent` 真正 kill 进程（发完 shutdown_request 等 teammate 回复） | ⚠️ | ✅ | 后端仅写 `ShutdownRequest` 到邮箱；AionUi 是同一套（也只写邮件），但**后续 teammate 回 `shutdown_approved` 时**要 kill 进程 + `removeAgent` —— 这一步后端未实现（见 #21） | §2.1 |
-| 24 | `team_rename_agent` 规范化（trim + 去不可见字符 + 小写唯一性校验） + 保留 originalName 供 prompt | ❌ | ✅ | 后端直接写新 name（[scheduler.rs:336-346](../../../crates/aionui-team/src/scheduler.rs)）；AionUi 额外做规范化 + 唯一性 + `renamedAgents` map（供 prompt 显示 `[formerly: X]`） | §2.1 renameAgent |
-| 25 | `TeammateStatus` 枚举 `pending` / `idle` / `active` / `completed` / `failed` | ⚠️ | ✅ | 后端是 `Idle` / `Working` / `Thinking` / `ToolUse` / `Completed` / `Error`（[types.rs:42-55](../../../crates/aionui-team/src/types.rs)）。语义差异：AionUi 的 `pending` = 首次 wake 前的 "未启动"；后端没有这个状态。并且接受 AionUi 别名（`pending`→Idle, `active`→Working, `failed`→Error）**已经做了**，但少了 `pending` 触发首次 role prompt 注入的区分 | §2.2 状态机 |
-| 26 | 首次 wake vs 非首次 wake 区分 | ❌ | ✅ | 后端 `try_wake` 对所有 wake 一视同仁；AionUi 只在 `status in {pending, failed}` 才注入 role prompt，否则只发 unread messages | §2.1 |
-| 27 | Teammate 收到的 mailbox message 额外 emit 为 UI 左气泡（leader 不 emit） | ❌ | ✅ | 后端没有 `user_content` / `teammate_message` 事件；AionUi `TeammateManager.ts:127-161` 逐条 emit 到 `acpConversation.responseStream` | §2.1 "active 期间输入字节流" |
-| 28 | Team Guide MCP 单例（`aion_create_team` / `aion_list_models`） | ❌ | ✅ | 后端**没有**这个 server、stdio bridge、注入逻辑。AionUi 是 app 启动时建单例；solo agent 不在 team 时注入 | §3.1 Team Guide MCP 生命周期 |
-| 29 | Layer-1 Team Guide Prompt 注入 | ❌ | ✅ | 后端 `AcpAgentManager` 的 system instructions 构造（`preset_context` 拼接路径）没有 `getTeamGuidePrompt({backend, leaderLabel})` 等价物 | §5.1 |
-| 30 | `isTeamCapableBackend(backend, caps)` 白名单 + ACP stdio 能力判断 | ❌ | ✅ | 后端硬编码 `["claude", "codex"]`（[tools.rs:167](../../../crates/aionui-team/src/mcp/tools.rs)），仅用于 `team_spawn_agent` 白名单。AionUi 白名单是 `{gemini, claude, codex, aionrs}` + 其他 backend 按 `cachedInitResults.capabilities.mcpCapabilities.stdio===true` 动态判定 | §3.1 "Team Guide 能力判断" |
-| 31 | User-scope 过滤（list_teams / get_team / remove_team） | ❌ | ✅ | [service.rs:127-170](../../../crates/aionui-team/src/service.rs) 未按 user_id 过滤。AionUi `listTeams(userId)` 直接按 user 查 | §1.1 列 team |
-| 32 | `ConversationService.send_message` 识别 `extra.teamId` → 路由到 team 发送路径 | ❌ | ✅ | 当前两个路径（`conversation.send_message` 和 `team.send_message_to_agent`）互不感知 | §7.1 "对 agent 发话" |
-| 33 | `TeamGuideMcpServer.handleCreateTeam` 建成后发的 IPC 事件 | ❌ | ✅ | AionUi 发 `team.listChanged` + `conversation.listChanged` + `deepLink.received { route:/team/<id> }`；后端这些 WS 事件都没有 | §1.2 建团流程、§7.6 |
-| 34 | MCP `mcp_ready` 握手（bridge `server.connect` 后发 `{type:'mcp_ready', slot_id, auth_token}`；service `waitForMcpReady(slotId, 30s) graceful` 超时 resolve 不 reject） | ❌ | ✅ | 后端只有 `initialize` 握手，无 `mcp_ready` 握手 | §3.1 "MCP ready 握手"、§8 #11 |
-| 35 | MCP 帧大小上限 64MB（`MAX_MCP_MESSAGE_SIZE`） | ⚠️ 10MB | ⚠️ 64MB | 后端 `10 * 1024 * 1024`（[protocol.rs:88](../../../crates/aionui-team/src/mcp/protocol.rs)）—— 工具返回大 JSON 会炸 | §3.1 TCP 传输协议 |
-| 36 | MCP 请求默认超时 300s | ❌ | ✅ | 后端无请求级超时 | §3.1 |
-| 37 | `getTeam` 的 agent 修复逻辑（`repairTeamAgentsIfMissing`，从 conversation.extra.teamId 反推） | ❌ | ✅ | 后端 `get_team` 直接读 repo，不做修复 | §1.1 |
+| #   | 能力                                                                                                                                                                             | 后端有  | AionUi  | GAP                                                                                                                                                                                                                                                                                                                                                         | aionui-audit 锚点                           |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-----: | :-----: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| 13  | `activeWakes` 重入锁（正在 wake 时再次 wake 跳过）                                                                                                                               |   ❌    |   ✅    | scheduler 没有这个 set。无锁双 wake 会导致 mailbox 被双读                                                                                                                                                                                                                                                                                                   | §4.3 wake 重入与幂等、§8 #1/#2              |
+| 14  | `wakeTimeouts` 60s 看门狗（流中 chunk reset、finish clear；超时→failed + idle_notification）                                                                                     |   ❌    |   ✅    | `WAKE_TIMEOUT_MS=60_000` 已定义（[scheduler.rs:16](../../../crates/aionui-team/src/scheduler.rs)）**但无 timer 读**。Stuck agent 永远不会被标 failed                                                                                                                                                                                                        | §2.1 inactivity watchdog、§8                |
+| 15  | `finalizedTurns` 5s dedup 窗口（避免同 turn 多次 finalize；re-wake 前显式 delete）                                                                                               |   ❌    |   ✅    | 无任何 dedup 机制                                                                                                                                                                                                                                                                                                                                           | §4.3、§8 #3                                 |
+| 16  | `maybeWakeLeaderWhenAllIdle` 仅在 `{idle,completed,failed,pending}` 时 wake leader                                                                                               |   ⚠️    |   ✅    | 后端只检查 `TeammateStatus::Idle`（[scheduler.rs:495](../../../crates/aionui-team/src/scheduler.rs)），不把 `failed`/`completed` 当 settled，导致一个 failed teammate 会**永久阻塞** leader                                                                                                                                                                 | §4.4、§8 #4                                 |
+| 17  | Crash recovery：`finish.agentCrash` / error 含 `process exited unexpectedly`/`Session not found` → testament + kill + failed + wake leader；**leader crash 只 failed 不 remove** |   ❌    |   ✅    | 没有任何 crash 识别代码                                                                                                                                                                                                                                                                                                                                     | §2.1 crash recovery、§8 #6                  |
+| 18  | 429/Rate-limit 识别：error 正则 `/429\|rate.?limit\|quota\|too many requests/i` → failed                                                                                         |   ❌    |   ✅    | 无识别；429 会被当普通 error 冒泡                                                                                                                                                                                                                                                                                                                           | §2.1 "429 / 限流识别"                       |
+| 19  | `addAgentLocks` per-team 串行化并发 addAgent                                                                                                                                     |   ❌    |   ✅    | `TeamSessionService::add_agent` 用 read-modify-write 更新 `team.agents`（[service.rs:197-253](../../../crates/aionui-team/src/service.rs)），并发下会丢 agent                                                                                                                                                                                               | §8 #14                                      |
+| 20  | Leader 不可 shutdown / remove 的硬约束                                                                                                                                           | ⚠️ 部分 |   ✅    | `shutdown_agent` 检查了 Lead-only caller（[scheduler.rs:451-455](../../../crates/aionui-team/src/scheduler.rs)），但目标 agent role 未检查；`remove_agent` 完全不检查 role。AionUi 两处都拒                                                                                                                                                                 | §8 #6                                       |
+| 21  | `team_send_message` 识别 `"shutdown_approved"` / `"shutdown_rejected: <reason>"`                                                                                                 |   ❌    |   ✅    | 后端把所有消息当普通 message 入箱。AionUi 拦截这两种消息：approved → `removeAgent(fromSlotId)` 并通知 leader；rejected → 写 reason 给 leader                                                                                                                                                                                                                | §2.1 shutdown 协议、§3.2                    |
+| 22  | `team_spawn_agent` 真正 spawn teammate conversation + agent task                                                                                                                 |   ❌    |   ✅    | scheduler 只 log 不执行（[scheduler.rs:254-266](../../../crates/aionui-team/src/scheduler.rs)）；AionUi 走 `spawnAgent` 闭包 → `addAgent` → 写 `teamMcpStdioConfig` 回 extra → wake 新 agent                                                                                                                                                                | §2.1 MCP spawn、§1.3 getOrStartSession 闭包 |
+| 23  | `team_shutdown_agent` 真正 kill 进程（发完 shutdown_request 等 teammate 回复）                                                                                                   |   ⚠️    |   ✅    | 后端仅写 `ShutdownRequest` 到邮箱；AionUi 是同一套（也只写邮件），但**后续 teammate 回 `shutdown_approved` 时**要 kill 进程 + `removeAgent` —— 这一步后端未实现（见 #21）                                                                                                                                                                                   | §2.1                                        |
+| 24  | `team_rename_agent` 规范化（trim + 去不可见字符 + 小写唯一性校验） + 保留 originalName 供 prompt                                                                                 |   ❌    |   ✅    | 后端直接写新 name（[scheduler.rs:336-346](../../../crates/aionui-team/src/scheduler.rs)）；AionUi 额外做规范化 + 唯一性 + `renamedAgents` map（供 prompt 显示 `[formerly: X]`）                                                                                                                                                                             | §2.1 renameAgent                            |
+| 25  | `TeammateStatus` 枚举 `pending` / `idle` / `active` / `completed` / `failed`                                                                                                     |   ⚠️    |   ✅    | 后端是 `Idle` / `Working` / `Thinking` / `ToolUse` / `Completed` / `Error`（[types.rs:42-55](../../../crates/aionui-team/src/types.rs)）。语义差异：AionUi 的 `pending` = 首次 wake 前的 "未启动"；后端没有这个状态。并且接受 AionUi 别名（`pending`→Idle, `active`→Working, `failed`→Error）**已经做了**，但少了 `pending` 触发首次 role prompt 注入的区分 | §2.2 状态机                                 |
+| 26  | 首次 wake vs 非首次 wake 区分                                                                                                                                                    |   ❌    |   ✅    | 后端 `try_wake` 对所有 wake 一视同仁；AionUi 只在 `status in {pending, failed}` 才注入 role prompt，否则只发 unread messages                                                                                                                                                                                                                                | §2.1                                        |
+| 27  | Teammate 收到的 mailbox message 额外 emit 为 UI 左气泡（leader 不 emit）                                                                                                         |   ❌    |   ✅    | 后端没有 `user_content` / `teammate_message` 事件；AionUi `TeammateManager.ts:127-161` 逐条 emit 到 `acpConversation.responseStream`                                                                                                                                                                                                                        | §2.1 "active 期间输入字节流"                |
+| 28  | Team Guide MCP 单例（`aion_create_team` / `aion_list_models`）                                                                                                                   |   ❌    |   ✅    | 后端**没有**这个 server、stdio bridge、注入逻辑。AionUi 是 app 启动时建单例；solo agent 不在 team 时注入                                                                                                                                                                                                                                                    | §3.1 Team Guide MCP 生命周期                |
+| 29  | Layer-1 Team Guide Prompt 注入                                                                                                                                                   |   ❌    |   ✅    | 后端 `AcpAgentManager` 的 system instructions 构造（`preset_context` 拼接路径）没有 `getTeamGuidePrompt({backend, leaderLabel})` 等价物                                                                                                                                                                                                                     | §5.1                                        |
+| 30  | `isTeamCapableBackend(backend, caps)` 白名单 + ACP stdio 能力判断                                                                                                                |   ❌    |   ✅    | 后端硬编码 `["claude", "codex"]`（[tools.rs:167](../../../crates/aionui-team/src/mcp/tools.rs)），仅用于 `team_spawn_agent` 白名单。AionUi 白名单是 `{gemini, claude, codex, aionrs}` + 其他 backend 按 `cachedInitResults.capabilities.mcpCapabilities.stdio===true` 动态判定                                                                              | §3.1 "Team Guide 能力判断"                  |
+| 31  | User-scope 过滤（list_teams / get_team / remove_team）                                                                                                                           |   ❌    |   ✅    | [service.rs:127-170](../../../crates/aionui-team/src/service.rs) 未按 user_id 过滤。AionUi `listTeams(userId)` 直接按 user 查                                                                                                                                                                                                                               | §1.1 列 team                                |
+| 32  | `ConversationService.send_message` 识别 `extra.teamId` → 路由到 team 发送路径                                                                                                    |   ❌    |   ✅    | 当前两个路径（`conversation.send_message` 和 `team.send_message_to_agent`）互不感知                                                                                                                                                                                                                                                                         | §7.1 "对 agent 发话"                        |
+| 33  | `TeamGuideMcpServer.handleCreateTeam` 建成后发的 IPC 事件                                                                                                                        |   ❌    |   ✅    | AionUi 发 `team.listChanged` + `conversation.listChanged` + `deepLink.received { route:/team/<id> }`；后端这些 WS 事件都没有                                                                                                                                                                                                                                | §1.2 建团流程、§7.6                         |
+| 34  | MCP `mcp_ready` 握手（bridge `server.connect` 后发 `{type:'mcp_ready', slot_id, auth_token}`；service `waitForMcpReady(slotId, 30s) graceful` 超时 resolve 不 reject）           |   ❌    |   ✅    | 后端只有 `initialize` 握手，无 `mcp_ready` 握手                                                                                                                                                                                                                                                                                                             | §3.1 "MCP ready 握手"、§8 #11               |
+| 35  | MCP 帧大小上限 64MB（`MAX_MCP_MESSAGE_SIZE`）                                                                                                                                    | ⚠️ 10MB | ⚠️ 64MB | 后端 `10 * 1024 * 1024`（[protocol.rs:88](../../../crates/aionui-team/src/mcp/protocol.rs)）—— 工具返回大 JSON 会炸                                                                                                                                                                                                                                         | §3.1 TCP 传输协议                           |
+| 36  | MCP 请求默认超时 300s                                                                                                                                                            |   ❌    |   ✅    | 后端无请求级超时                                                                                                                                                                                                                                                                                                                                            | §3.1                                        |
+| 37  | `getTeam` 的 agent 修复逻辑（`repairTeamAgentsIfMissing`，从 conversation.extra.teamId 反推）                                                                                    |   ❌    |   ✅    | 后端 `get_team` 直接读 repo，不做修复                                                                                                                                                                                                                                                                                                                       | §1.1                                        |
 
 ### 3.3 P2（锦上添花）
 
-| # | 能力 | 后端有 | AionUi | GAP |
-|---|------|:------:|:------:|-----|
-| 38 | `Team.workspace` / `workspace_mode` / `session_mode` 字段暴露给调用方 | ⚠️ | ✅ | `TeamRow` 有但 `Team`（[types.rs:129](../../../crates/aionui-team/src/types.rs)）不导出 |
-| 39 | `CreateTeamRequest.agents[].role` 字段尊重 | ❌ | ✅ | 后端强制 i==0 为 Lead（[service.rs:56-60](../../../crates/aionui-team/src/service.rs)）；AionUi 允许输入指定 |
-| 40 | `updateWorkspace(teamId, newWorkspace)` 级联更新每个 agent conversation 的 extra | ❌ | ✅ | 后端没有这个接口 |
-| 41 | `setSessionMode(teamId, mode)` 供 spawn 继承 | ❌ | ✅ | 后端没有 |
-| 42 | `team.mcpStatus` WS 事件（10 个 phase：`tcp_ready/tcp_error/session_injecting/session_ready/session_error/load_failed/degraded/config_write_failed/mcp_tools_waiting/mcp_tools_ready`） | ❌ | ✅ | 后端一个也没有 |
-| 43 | HTTP 端点拉任务板 / 邮箱历史 | ❌ | ⚠️ | 调用方可以靠 WS 事件拼（AionUi 参考实现亦如此），但后端落地时可选加 |
-| 44 | `team_describe_assistant` 的 locale 解析 + i18n fallback | ❌ | ✅ | 依赖后端 `assistants` 配置，当前后端无此配置来源 |
+| #   | 能力                                                                                                                                                                                    | 后端有 | AionUi | GAP                                                                                                          |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----: | :----: | ------------------------------------------------------------------------------------------------------------ |
+| 38  | `Team.workspace` / `workspace_mode` / `session_mode` 字段暴露给调用方                                                                                                                   |   ⚠️   |   ✅   | `TeamRow` 有但 `Team`（[types.rs:129](../../../crates/aionui-team/src/types.rs)）不导出                      |
+| 39  | `CreateTeamRequest.agents[].role` 字段尊重                                                                                                                                              |   ❌   |   ✅   | 后端强制 i==0 为 Lead（[service.rs:56-60](../../../crates/aionui-team/src/service.rs)）；AionUi 允许输入指定 |
+| 40  | `updateWorkspace(teamId, newWorkspace)` 级联更新每个 agent conversation 的 extra                                                                                                        |   ❌   |   ✅   | 后端没有这个接口                                                                                             |
+| 41  | `setSessionMode(teamId, mode)` 供 spawn 继承                                                                                                                                            |   ❌   |   ✅   | 后端没有                                                                                                     |
+| 42  | `team.mcpStatus` WS 事件（10 个 phase：`tcp_ready/tcp_error/session_injecting/session_ready/session_error/load_failed/degraded/config_write_failed/mcp_tools_waiting/mcp_tools_ready`） |   ❌   |   ✅   | 后端一个也没有                                                                                               |
+| 43  | HTTP 端点拉任务板 / 邮箱历史                                                                                                                                                            |   ❌   |   ⚠️   | 调用方可以靠 WS 事件拼（AionUi 参考实现亦如此），但后端落地时可选加                                          |
+| 44  | `team_describe_assistant` 的 locale 解析 + i18n fallback                                                                                                                                |   ❌   |   ✅   | 依赖后端 `assistants` 配置，当前后端无此配置来源                                                             |
 
 ### 3.4 P0 gap 连锁关系（修正版）
 
@@ -534,19 +543,19 @@ pub fn build_team_state(
 
 以下条目先前漏掉，现补进清单。每一条都锚定到 [aionui-audit.md](./aionui-audit.md) 的原文位置。
 
-| # | 能力 | 后端有 | AionUi | GAP | 优先级 | aionui-audit 锚点 |
-|---|------|:------:|:------:|-----|:------:|------|
-| 45 | `send_message` / `send_message_to_agent` 支持附件 `files` | ❌ | ✅ | 后端 [`routes.rs:136-144`](../../../crates/aionui-team/src/routes.rs) 的 `SendTeamMessageRequest` / `SendAgentMessageRequest` 只有 `content` 字段；AionUi 签名 `{teamId, slotId, content, silent?, files?}` | **P0** | §7.1 "对 team 发话" / "对 agent 发话" |
-| 46 | `wake_after_accepted_delivery` 的"log-not-throw"语义：wake 失败只 log 不 throw，**避免已入箱的消息被重复发送** | ❌ | ✅ | 后端当前 `send_message` 直接返回 mailbox 写结果；若 P0#4 接通 wake 后，wake 错误不能 propagate 给调用方，否则 retry 会双写 mailbox | **P0** | §4.1 表格备注 |
-| 47 | `delete_team` 级联要 kill agent 进程 | ❌ | ✅ | 后端 [`service.rs:147-170`](../../../crates/aionui-team/src/service.rs) 的 `remove_team` 只调 `stop_session` + 删 conversation，**不调** `task_manager.kill(conversation_id, 'team_deleted')`；agent 进程会变成孤儿 | **P0** | §1.1 "删除 team（级联）"、§1.4 删除时序图 |
-| 48 | 工具描述原文常量：`TEAM_SPAWN_AGENT_DESCRIPTION` 常量 + `getCreateTeamToolDescription()` 动态生成器 | ❌ | ✅ | 后端 [`tools.rs:30-45`](../../../crates/aionui-team/src/mcp/tools.rs) 是极简自造描述（"Dynamically create a new teammate agent (Lead only)."）；AionUi 对应描述是"3 PRECONDITIONS + STRICT 流程"的长文本，影响 agent 是否会在 spawn 前征求用户同意 | **P0** | §5.3、§7.4 |
-| 49 | `resolveLeaderAssistantLabel(presetAssistantId)` 按 locale 解析 preset 显示名（给 Team Guide prompt 的 `leaderLabel`） | ❌ | ✅ | 后端没有 preset assistant 体系；Team Guide Prompt 注入时 `leaderLabel` 取不到 | **P1** | §5.2 、§7.4 |
-| 50 | `formatMessages(messages, agents)` 邮件格式化：`[From <senderName\|User>] <content>\nFiles: <joined>` | ❌ | ✅ | 后端 [`prompts.rs:98-117`](../../../crates/aionui-team/src/prompts.rs) 的 `build_wake_payload` 用 "- From \`slot_id\` [type]: content" 格式，和 AionUi 不一致；会影响 LLM 对消息来源的解析 | **P1** | §7.4、§2.1 "消息格式" |
-| 51 | MCP spawn 路径硬编码 `sessionMode='yolo'` / `workspaceMode='shared'` / `userId='system_default_user'` | ❌ | ✅ | 后端 `create_team` 接受 userId 参数（[`service.rs:39`](../../../crates/aionui-team/src/service.rs)），但本地开发模式用 `system_default_user` 的约定未写入；`sessionMode` 字段后端 `TeamSessionService` 根本没传给新建的 conversation（[`service.rs:63-74`](../../../crates/aionui-team/src/service.rs) 只传 `teamId`）。AionUi 这三个是 MCP-spawn 建团的硬默认值 | **P1** | §8 #15/#16、§1.2 建团流程 |
-| 52 | Guide MCP 与 team 内部 MCP 互斥注入：`!extra.teamMcpStdioConfig` 时才注入 Guide；进了 team 只注入内部 MCP | ❌ | ✅ | 后端 Guide 完全不存在（#28），实现时必须保证：agent 只要 `extra.teamMcpStdioConfig` 非空就**不再**注入 Guide，否则 team 成员会把 `aion_create_team` 当工具再次建团 | **P1** | §3.3 图示下方备注、§8 #17 |
-| 53 | 订阅 ACP stream 所有 chunk（text/tool/thought）用于 reset wakeTimeout（#14 的必要条件） | ❌ | ✅ | #14 的实现先决条件；后端订阅 `AgentStreamEvent` 需要覆盖 `Text`/`ToolUse`/`Thought` 等**所有** chunk，而不只是 `Finish` | **P1** | §2.1 inactivity watchdog |
-| 54 | `TeammateManager.removeAgent` 要清理的内部表 | ❌ | ✅ | 后端 [`scheduler.rs:324-333`](../../../crates/aionui-team/src/scheduler.rs) 只从 slots 移除；AionUi 还要清 `wakeTimeouts / activeWakes / ownedConversationIds / finalizedTurns`（#13-15 的实现先决条件） | **P1** | §2.1 TeammateManager.removeAgent |
-| 55 | `TeamTask.owner` 要允许 slotId 以外的 sentinel（比如 `null` / empty 表示 unassigned，AionUi 工具输出显示 "unassigned"） | ✅ | ✅ | 后端 `TeamTask.owner` 是 `Option<String>`（已支持），**但 `team_task_list` 输出格式**（[`mcp/server.rs:436-437`](../../../crates/aionui-team/src/mcp/server.rs)）要对齐 AionUi 的 `- [<id8>] <subject> (<status>, owner: <X> \| unassigned)` 格式 | **P2** | §3.2 `team_task_list` |
+| #   | 能力                                                                                                                    | 后端有 | AionUi | GAP                                                                                                                                                                                                                                                                                                                                                              | 优先级 | aionui-audit 锚点                         |
+| --- | ----------------------------------------------------------------------------------------------------------------------- | :----: | :----: | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----: | ----------------------------------------- |
+| 45  | `send_message` / `send_message_to_agent` 支持附件 `files`                                                               |   ❌   |   ✅   | 后端 [`routes.rs:136-144`](../../../crates/aionui-team/src/routes.rs) 的 `SendTeamMessageRequest` / `SendAgentMessageRequest` 只有 `content` 字段；AionUi 签名 `{teamId, slotId, content, silent?, files?}`                                                                                                                                                      | **P0** | §7.1 "对 team 发话" / "对 agent 发话"     |
+| 46  | `wake_after_accepted_delivery` 的"log-not-throw"语义：wake 失败只 log 不 throw，**避免已入箱的消息被重复发送**          |   ❌   |   ✅   | 后端当前 `send_message` 直接返回 mailbox 写结果；若 P0#4 接通 wake 后，wake 错误不能 propagate 给调用方，否则 retry 会双写 mailbox                                                                                                                                                                                                                               | **P0** | §4.1 表格备注                             |
+| 47  | `delete_team` 级联要 kill agent 进程                                                                                    |   ❌   |   ✅   | 后端 [`service.rs:147-170`](../../../crates/aionui-team/src/service.rs) 的 `remove_team` 只调 `stop_session` + 删 conversation，**不调** `task_manager.kill(conversation_id, 'team_deleted')`；agent 进程会变成孤儿                                                                                                                                              | **P0** | §1.1 "删除 team（级联）"、§1.4 删除时序图 |
+| 48  | 工具描述原文常量：`TEAM_SPAWN_AGENT_DESCRIPTION` 常量 + `getCreateTeamToolDescription()` 动态生成器                     |   ❌   |   ✅   | 后端 [`tools.rs:30-45`](../../../crates/aionui-team/src/mcp/tools.rs) 是极简自造描述（"Dynamically create a new teammate agent (Lead only)."）；AionUi 对应描述是"3 PRECONDITIONS + STRICT 流程"的长文本，影响 agent 是否会在 spawn 前征求用户同意                                                                                                               | **P0** | §5.3、§7.4                                |
+| 49  | `resolveLeaderAssistantLabel(presetAssistantId)` 按 locale 解析 preset 显示名（给 Team Guide prompt 的 `leaderLabel`）  |   ❌   |   ✅   | 后端没有 preset assistant 体系；Team Guide Prompt 注入时 `leaderLabel` 取不到                                                                                                                                                                                                                                                                                    | **P1** | §5.2 、§7.4                               |
+| 50  | `formatMessages(messages, agents)` 邮件格式化：`[From <senderName\|User>] <content>\nFiles: <joined>`                   |   ❌   |   ✅   | 后端 [`prompts.rs:98-117`](../../../crates/aionui-team/src/prompts.rs) 的 `build_wake_payload` 用 "- From \`slot_id\` [type]: content" 格式，和 AionUi 不一致；会影响 LLM 对消息来源的解析                                                                                                                                                                       | **P1** | §7.4、§2.1 "消息格式"                     |
+| 51  | MCP spawn 路径硬编码 `sessionMode='yolo'` / `workspaceMode='shared'` / `userId='system_default_user'`                   |   ❌   |   ✅   | 后端 `create_team` 接受 userId 参数（[`service.rs:39`](../../../crates/aionui-team/src/service.rs)），但本地开发模式用 `system_default_user` 的约定未写入；`sessionMode` 字段后端 `TeamSessionService` 根本没传给新建的 conversation（[`service.rs:63-74`](../../../crates/aionui-team/src/service.rs) 只传 `teamId`）。AionUi 这三个是 MCP-spawn 建团的硬默认值 | **P1** | §8 #15/#16、§1.2 建团流程                 |
+| 52  | Guide MCP 与 team 内部 MCP 互斥注入：`!extra.teamMcpStdioConfig` 时才注入 Guide；进了 team 只注入内部 MCP               |   ❌   |   ✅   | 后端 Guide 完全不存在（#28），实现时必须保证：agent 只要 `extra.teamMcpStdioConfig` 非空就**不再**注入 Guide，否则 team 成员会把 `aion_create_team` 当工具再次建团                                                                                                                                                                                               | **P1** | §3.3 图示下方备注、§8 #17                 |
+| 53  | 订阅 ACP stream 所有 chunk（text/tool/thought）用于 reset wakeTimeout（#14 的必要条件）                                 |   ❌   |   ✅   | #14 的实现先决条件；后端订阅 `AgentStreamEvent` 需要覆盖 `Text`/`ToolUse`/`Thought` 等**所有** chunk，而不只是 `Finish`                                                                                                                                                                                                                                          | **P1** | §2.1 inactivity watchdog                  |
+| 54  | `TeammateManager.removeAgent` 要清理的内部表                                                                            |   ❌   |   ✅   | 后端 [`scheduler.rs:324-333`](../../../crates/aionui-team/src/scheduler.rs) 只从 slots 移除；AionUi 还要清 `wakeTimeouts / activeWakes / ownedConversationIds / finalizedTurns`（#13-15 的实现先决条件）                                                                                                                                                         | **P1** | §2.1 TeammateManager.removeAgent          |
+| 55  | `TeamTask.owner` 要允许 slotId 以外的 sentinel（比如 `null` / empty 表示 unassigned，AionUi 工具输出显示 "unassigned"） |   ✅   |   ✅   | 后端 `TeamTask.owner` 是 `Option<String>`（已支持），**但 `team_task_list` 输出格式**（[`mcp/server.rs:436-437`](../../../crates/aionui-team/src/mcp/server.rs)）要对齐 AionUi 的 `- [<id8>] <subject> (<status>, owner: <X> \| unassigned)` 格式                                                                                                                | **P2** | §3.2 `team_task_list`                     |
 
 **小计**：新增 P0 4 条（45/46/47/48）、P1 6 条（49/50/51/52/53/54）、P2 1 条（55），总 GAP 数由 44 升到 **55**。
 
@@ -562,7 +571,7 @@ pub fn build_team_state(
 ### 4.2 `aionui-common`（P1）
 
 - 新增正则/常量：`RATE_LIMIT_PATTERN: &str = r"(?i)429|rate.?limit|quota|too many requests"`（给 scheduler crash detection 复用）。
-- 新增超时常量：`TEAM_MCP_REQUEST_TIMEOUT_MS`（300_000）、`TEAM_MCP_READY_TIMEOUT_MS`（30_000）、`TEAM_MCP_MAX_FRAME_BYTES`（64 * 1024 * 1024）。
+- 新增超时常量：`TEAM_MCP_REQUEST_TIMEOUT_MS`（300*000）、`TEAM_MCP_READY_TIMEOUT_MS`（30_000）、`TEAM_MCP_MAX_FRAME_BYTES`（64 * 1024 \_ 1024）。
 - 新增枚举：`TeamMcpPhase { TcpReady, TcpError, SessionInjecting, SessionReady, SessionError, LoadFailed, Degraded, ConfigWriteFailed, McpToolsWaiting, McpToolsReady }`（对应 #42）。
 
 ### 4.3 `aionui-ai-agent`（P0 重点）
@@ -656,17 +665,17 @@ P1：
 
 ## 5. 完整改动一览（P0 必做）
 
-| 文件 | 改动摘要 |
-|------|--------|
-| `crates/aionui-ai-agent/src/types.rs` | `AcpBuildExtra` 加 `team_mcp_stdio_config: Option<TeamMcpStdioConfig>`（字段名对齐 AionUi `teamMcpStdioConfig`） |
-| `crates/aionui-ai-agent/src/acp_agent.rs` | `session_new_and_prompt` 调 `.mcp_servers(vec![build_team_mcp_server(cfg)?])`；Finish 事件需能被外部订阅 |
-| `crates/aionui-mcp/src/session_injection.rs` | 新增 `build_team_mcp_server(&TeamMcpStdioConfig) -> McpServer` |
-| `crates/aionui-team/src/service.rs` | `TeamSessionService::new` 加 `task_manager` 参数；`ensure_session` 完整实现（回写 extra + 重建 task）；`create_team`/`add_agent` 注入 `preset_context = build_lead_prompt/build_teammate_prompt(...)` |
-| `crates/aionui-team/src/session.rs` | `send_message`/`send_message_to_agent` 写完 mailbox 后触发 agent task；新增 on_agent_finish 订阅 Finish → `scheduler.finalize_turn`；维护 `conversation_id → slot_id` 的映射表 |
-| `crates/aionui-team/src/prompts.rs` | **整个文件重写**：leader/teammate 模板文本原样复用 AionUi `leadPrompt.ts` / `teammatePrompt.ts`（见 [team-prompts.md §1-§4](../team-prompts.md)）；新增动态参数 `availableAgentTypes/availableAssistants/renamedAgents/teamWorkspace` |
-| `crates/aionui-team/src/mcp/tools.rs` | 新增 `team_describe_assistant`、`team_list_models` 两个 tool descriptor 和 handler |
-| `crates/aionui-team/src/mcp/server.rs` | `handle_send_message` 识别 `shutdown_approved`/`shutdown_rejected` 拦截消息 |
-| `crates/aionui-app/src/state_builders.rs` | `build_team_state` 传 `worker_task_manager` |
+| 文件                                         | 改动摘要                                                                                                                                                                                                                              |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/aionui-ai-agent/src/types.rs`        | `AcpBuildExtra` 加 `team_mcp_stdio_config: Option<TeamMcpStdioConfig>`（字段名对齐 AionUi `teamMcpStdioConfig`）                                                                                                                      |
+| `crates/aionui-ai-agent/src/acp_agent.rs`    | `session_new_and_prompt` 调 `.mcp_servers(vec![build_team_mcp_server(cfg)?])`；Finish 事件需能被外部订阅                                                                                                                              |
+| `crates/aionui-mcp/src/session_injection.rs` | 新增 `build_team_mcp_server(&TeamMcpStdioConfig) -> McpServer`                                                                                                                                                                        |
+| `crates/aionui-team/src/service.rs`          | `TeamSessionService::new` 加 `task_manager` 参数；`ensure_session` 完整实现（回写 extra + 重建 task）；`create_team`/`add_agent` 注入 `preset_context = build_lead_prompt/build_teammate_prompt(...)`                                 |
+| `crates/aionui-team/src/session.rs`          | `send_message`/`send_message_to_agent` 写完 mailbox 后触发 agent task；新增 on_agent_finish 订阅 Finish → `scheduler.finalize_turn`；维护 `conversation_id → slot_id` 的映射表                                                        |
+| `crates/aionui-team/src/prompts.rs`          | **整个文件重写**：leader/teammate 模板文本原样复用 AionUi `leadPrompt.ts` / `teammatePrompt.ts`（见 [team-prompts.md §1-§4](../team-prompts.md)）；新增动态参数 `availableAgentTypes/availableAssistants/renamedAgents/teamWorkspace` |
+| `crates/aionui-team/src/mcp/tools.rs`        | 新增 `team_describe_assistant`、`team_list_models` 两个 tool descriptor 和 handler                                                                                                                                                    |
+| `crates/aionui-team/src/mcp/server.rs`       | `handle_send_message` 识别 `shutdown_approved`/`shutdown_rejected` 拦截消息                                                                                                                                                           |
+| `crates/aionui-app/src/state_builders.rs`    | `build_team_state` 传 `worker_task_manager`                                                                                                                                                                                           |
 
 P1（strongly recommended，agent 行为硬约束）：详见 §4.6 第 8-18 项，核心是 **activeWakes / wakeTimeouts / finalizedTurns / crash recovery / 429 detection / addAgentLocks / leader 不可 shutdown 的 target 检查 / rename 规范化**。
 
@@ -676,17 +685,17 @@ P1 新子系统（Team Guide MCP）：详见 §4.7，需要独立的 server + st
 
 ## 6. 测试覆盖现状
 
-| 测试文件 | 覆盖范围 | 是否使用 Mock |
-|---------|--------|----------------|
-| [`session.rs` 内联](../../../crates/aionui-team/src/session.rs) 138-337 | start/stop、mcp_stdio_config、send_message、agent lifecycle | 是（MockTeamRepo + NullBroadcaster） |
-| [`scheduler.rs` 内联](../../../crates/aionui-team/src/scheduler.rs) 539-1256 | 状态机、反死循环、execute_action 全覆盖、finalize_turn | 是 |
-| [`mailbox.rs` 内联](../../../crates/aionui-team/src/mailbox.rs) 93-254 | 读写、delete、history limit | 是 |
-| [`task_board.rs` 内联](../../../crates/aionui-team/src/task_board.rs) 149-418 | CRUD、依赖链、unblock 传播 | 是 |
-| [`prompts.rs` 内联](../../../crates/aionui-team/src/prompts.rs) 159-410 | 三个 builder 的 snapshot 式检查 | N/A（纯函数） |
-| [`mcp/server.rs` / `mcp/protocol.rs` / `mcp/tools.rs`](../../../crates/aionui-team/src/mcp/) | 协议帧 roundtrip、tool 描述、parse_tool_call | 是 |
-| [`tests/mcp_server_integration.rs`](../../../crates/aionui-team/tests/mcp_server_integration.rs) | 完整 TCP 握手 + tools/list + tools/call | 是（内存 repo） |
-| [`tests/session_service_integration.rs`](../../../crates/aionui-team/tests/session_service_integration.rs) | TeamSessionService CRUD + ensure_session | 是 |
-| [`tests/scheduler_integration.rs`](../../../crates/aionui-team/tests/scheduler_integration.rs) | Scheduler 跨组件 | 是 |
+| 测试文件                                                                                                   | 覆盖范围                                                    | 是否使用 Mock                        |
+| ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------ |
+| [`session.rs` 内联](../../../crates/aionui-team/src/session.rs) 138-337                                    | start/stop、mcp_stdio_config、send_message、agent lifecycle | 是（MockTeamRepo + NullBroadcaster） |
+| [`scheduler.rs` 内联](../../../crates/aionui-team/src/scheduler.rs) 539-1256                               | 状态机、反死循环、execute_action 全覆盖、finalize_turn      | 是                                   |
+| [`mailbox.rs` 内联](../../../crates/aionui-team/src/mailbox.rs) 93-254                                     | 读写、delete、history limit                                 | 是                                   |
+| [`task_board.rs` 内联](../../../crates/aionui-team/src/task_board.rs) 149-418                              | CRUD、依赖链、unblock 传播                                  | 是                                   |
+| [`prompts.rs` 内联](../../../crates/aionui-team/src/prompts.rs) 159-410                                    | 三个 builder 的 snapshot 式检查                             | N/A（纯函数）                        |
+| [`mcp/server.rs` / `mcp/protocol.rs` / `mcp/tools.rs`](../../../crates/aionui-team/src/mcp/)               | 协议帧 roundtrip、tool 描述、parse_tool_call                | 是                                   |
+| [`tests/mcp_server_integration.rs`](../../../crates/aionui-team/tests/mcp_server_integration.rs)           | 完整 TCP 握手 + tools/list + tools/call                     | 是（内存 repo）                      |
+| [`tests/session_service_integration.rs`](../../../crates/aionui-team/tests/session_service_integration.rs) | TeamSessionService CRUD + ensure_session                    | 是                                   |
+| [`tests/scheduler_integration.rs`](../../../crates/aionui-team/tests/scheduler_integration.rs)             | Scheduler 跨组件                                            | 是                                   |
 
 **整个 `aionui-team` crate 不依赖真正的 ACP/agent 进程做 e2e 测试。** P0 gap 修好之后需要在 `crates/aionui-app/tests/` 加 e2e 测试跑真的 ACP（起 `claude --experimental-acp` 子进程或其它可用 CLI）来验证。
 
@@ -740,15 +749,15 @@ P1 新子系统（Team Guide MCP）：详见 §4.7，需要独立的 server + st
 
 ## 8. 对齐 aionui-audit 之后原 7 个待验证点的答案
 
-| 先前问题 | 基于 aionui-audit.md 的答案 |
-|---------|---------------------------|
-| AionUi 建 team 后，每个 agent 的 ACP `session/new.mcp_servers` 是否带 team MCP？ | **是**。`src/process/agent/acp/index.ts:1605-1656` 用 `loadBuiltinSessionMcpServers()` 把 `extra.teamMcpStdioConfig` 包成 `AcpSessionMcpServer` 注入。见 aionui-audit §2.1 / §3.1。 |
-| agent turn 结束的 `finalize_turn` 由谁负责？ | **后端监听 `teamEventBus.on('responseStream')`，type=`finish` 或 `error` 时调 `finalizeTurn(conversationId)`**（`TeammateManager.ts:283-452`）。见 §4.4。 |
-| `try_wake` 是注入 prompt 还是别的方式？ | **首次 wake** 或 `status∈{pending,failed}` 时**注入完整 role prompt + `## Unread Messages`**；**非首次 wake** 仅发 mailbox messages；mailbox 为空时直接设 idle 释放锁。见 §2.1。 |
-| `SpawnAgent` 怎么完成？ | **TeamSession 层完成**。`TeamMcpServer.handleSpawnAgent` 校验 leader → 调外部 `spawnAgent(name, agent_type, model, custom_agent_id)` 闭包（在 `getOrStartSession` 里定义，调 `teamSessionService.addAgent` + 写回 extra）→ 再 `safeWake(newAgent.slotId)`。见 §2.1 / §1.3。 |
-| `ShutdownAgent` 是否 kill ACP 进程？ | **分两步**：1) leader 调 `team_shutdown_agent` → 只写 `shutdown_request` 到 mailbox + `safeWake(target)`；2) teammate 回 `shutdown_approved` 消息 → `team_send_message` 拦截 → `removeAgent(fromSlotId)` → `TeammateManager.removeAgent` 调 `workerTaskManager.kill(conversationId)` 真 kill。见 §2.1。 |
-| AionUi 参考实现是否有 HTTP 拉任务板 / 邮箱？ | **没有**。AionUi 全走 `ipcBridge.team.*` 事件推送，没有专门的 REST endpoint。见 §7.6。后端要实现的话是锦上添花（我们自己决定）。 |
-| Team Guide MCP 是独立还是合并？ | **独立**。app 启动时 `initTeamGuideService()` 建单例；solo agent 通过 ACP `session/new.mcp_servers` 和 team 内部 MCP 一样方式注入，但是独立的 stdio bridge + 独立的 TCP server + 独立的 auth token。**注意**：同一 agent 一旦进 team，Guide MCP 就不再注入（`!this.extra.teamMcpStdioConfig` 条件），Guide 和 team 内部 MCP 互斥。见 §3.1 / §3.3。 |
+| 先前问题                                                                         | 基于 aionui-audit.md 的答案                                                                                                                                                                                                                                                                                                                        |
+| -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AionUi 建 team 后，每个 agent 的 ACP `session/new.mcp_servers` 是否带 team MCP？ | **是**。`src/process/agent/acp/index.ts:1605-1656` 用 `loadBuiltinSessionMcpServers()` 把 `extra.teamMcpStdioConfig` 包成 `AcpSessionMcpServer` 注入。见 aionui-audit §2.1 / §3.1。                                                                                                                                                                |
+| agent turn 结束的 `finalize_turn` 由谁负责？                                     | **后端监听 `teamEventBus.on('responseStream')`，type=`finish` 或 `error` 时调 `finalizeTurn(conversationId)`**（`TeammateManager.ts:283-452`）。见 §4.4。                                                                                                                                                                                          |
+| `try_wake` 是注入 prompt 还是别的方式？                                          | **首次 wake** 或 `status∈{pending,failed}` 时**注入完整 role prompt + `## Unread Messages`**；**非首次 wake** 仅发 mailbox messages；mailbox 为空时直接设 idle 释放锁。见 §2.1。                                                                                                                                                                   |
+| `SpawnAgent` 怎么完成？                                                          | **TeamSession 层完成**。`TeamMcpServer.handleSpawnAgent` 校验 leader → 调外部 `spawnAgent(name, agent_type, model, custom_agent_id)` 闭包（在 `getOrStartSession` 里定义，调 `teamSessionService.addAgent` + 写回 extra）→ 再 `safeWake(newAgent.slotId)`。见 §2.1 / §1.3。                                                                        |
+| `ShutdownAgent` 是否 kill ACP 进程？                                             | **分两步**：1) leader 调 `team_shutdown_agent` → 只写 `shutdown_request` 到 mailbox + `safeWake(target)`；2) teammate 回 `shutdown_approved` 消息 → `team_send_message` 拦截 → `removeAgent(fromSlotId)` → `TeammateManager.removeAgent` 调 `workerTaskManager.kill(conversationId)` 真 kill。见 §2.1。                                            |
+| AionUi 参考实现是否有 HTTP 拉任务板 / 邮箱？                                     | **没有**。AionUi 全走 `ipcBridge.team.*` 事件推送，没有专门的 REST endpoint。见 §7.6。后端要实现的话是锦上添花（我们自己决定）。                                                                                                                                                                                                                   |
+| Team Guide MCP 是独立还是合并？                                                  | **独立**。app 启动时 `initTeamGuideService()` 建单例；solo agent 通过 ACP `session/new.mcp_servers` 和 team 内部 MCP 一样方式注入，但是独立的 stdio bridge + 独立的 TCP server + 独立的 auth token。**注意**：同一 agent 一旦进 team，Guide MCP 就不再注入（`!this.extra.teamMcpStdioConfig` 条件），Guide 和 team 内部 MCP 互斥。见 §3.1 / §3.3。 |
 
 ## 9. 仍需进一步确认的事项
 

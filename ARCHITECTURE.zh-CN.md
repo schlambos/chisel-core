@@ -5,13 +5,13 @@ AionCore 是 AionUi 的后端服务，使用 Rust 构建（Axum + Tokio + SQLite
 
 ## 技术栈
 
-| 组件 | 技术 |
-|------|------|
-| Web 框架 | Axum 0.8 |
-| 异步运行时 | Tokio |
-| 数据库 | SQLite（通过 sqlx，异步） |
-| 认证 | JWT + CSRF（双提交 Cookie 模式） |
-| 实时通信 | WebSocket + 事件广播 |
+| 组件       | 技术                             |
+| ---------- | -------------------------------- |
+| Web 框架   | Axum 0.8                         |
+| 异步运行时 | Tokio                            |
+| 数据库     | SQLite（通过 sqlx，异步）        |
+| 认证       | JWT + CSRF（双提交 Cookie 模式） |
+| 实时通信   | WebSocket + 事件广播             |
 
 ## 整体架构
 
@@ -45,46 +45,46 @@ aionui-common 没有任何内部依赖。
 
 被几乎所有其他 crate 依赖，变更需谨慎。
 
-| Crate | 职责 |
-|-------|------|
-| `aionui-common` | 共享错误类型（AppError）、枚举、ID 生成、加密工具、时间戳、分页 |
-| `aionui-api-types` | 所有 HTTP/WebSocket 的请求和响应类型，是 API 契约的唯一定义处 |
-| `aionui-db` | SQLite 数据库层，定义 Repository trait 和实现 |
-| `aionui-assets` | 嵌入式静态资源（Agent 元数据、提示词） |
-| `aionui-runtime` | 子进程管理、bun 运行时解析、PATH 增强 |
+| Crate              | 职责                                                            |
+| ------------------ | --------------------------------------------------------------- |
+| `aionui-common`    | 共享错误类型（AppError）、枚举、ID 生成、加密工具、时间戳、分页 |
+| `aionui-api-types` | 所有 HTTP/WebSocket 的请求和响应类型，是 API 契约的唯一定义处   |
+| `aionui-db`        | SQLite 数据库层，定义 Repository trait 和实现                   |
+| `aionui-assets`    | 嵌入式静态资源（Agent 元数据、提示词）                          |
+| `aionui-runtime`   | 子进程管理、bun 运行时解析、PATH 增强                           |
 
 ### 能力层（Capability）
 
 提供跨领域的通用能力。
 
-| Crate | 职责 |
-|-------|------|
-| `aionui-auth` | JWT 认证、密码哈希、CSRF 保护、Cookie 管理、认证中间件 |
+| Crate             | 职责                                                        |
+| ----------------- | ----------------------------------------------------------- |
+| `aionui-auth`     | JWT 认证、密码哈希、CSRF 保护、Cookie 管理、认证中间件      |
 | `aionui-realtime` | WebSocket 连接管理、事件广播（BroadcastEventBus）、消息路由 |
 
 ### 领域层（Domain）
 
 每个 crate 拥有独立的业务领域，彼此之间保持松耦合。
 
-| Crate | 职责 |
-|-------|------|
-| `aionui-conversation` | 对话管理、消息收发、确认机制、流式响应 |
-| `aionui-channel` | 多渠道集成（微信、钉钉、飞书）、插件系统、配对会话 |
-| `aionui-team` | 团队协作、任务调度、邮箱系统 |
-| `aionui-cron` | 定时任务执行、Cron 表达式、事件触发 |
-| `aionui-file` | 文件操作、监听、快照、Git 操作、压缩 |
-| `aionui-office` | Office 文档处理（Excel、PPT、Word）、预览、转换 |
-| `aionui-system` | 系统设置、提供商管理、版本检查、模型获取 |
-| `aionui-mcp` | MCP 协议集成、OAuth、多平台适配器 |
-| `aionui-ai-agent` | Agent 生命周期管理、Worker 任务队列、ACP/辅助技能 |
-| `aionui-extension` | 扩展注册中心、Hub 管理、技能发现与安装 |
-| `aionui-shell` | Shell 命令执行、语音转文字 |
-| `aionui-assistant` | Assistant 配置与管理 |
+| Crate                 | 职责                                               |
+| --------------------- | -------------------------------------------------- |
+| `aionui-conversation` | 对话管理、消息收发、确认机制、流式响应             |
+| `aionui-channel`      | 多渠道集成（微信、钉钉、飞书）、插件系统、配对会话 |
+| `aionui-team`         | 团队协作、任务调度、邮箱系统                       |
+| `aionui-cron`         | 定时任务执行、Cron 表达式、事件触发                |
+| `aionui-file`         | 文件操作、监听、快照、Git 操作、压缩               |
+| `aionui-office`       | Office 文档处理（Excel、PPT、Word）、预览、转换    |
+| `aionui-system`       | 系统设置、提供商管理、版本检查、模型获取           |
+| `aionui-mcp`          | MCP 协议集成、OAuth、多平台适配器                  |
+| `aionui-ai-agent`     | Agent 生命周期管理、Worker 任务队列、ACP/辅助技能  |
+| `aionui-extension`    | 扩展注册中心、Hub 管理、技能发现与安装             |
+| `aionui-shell`        | Shell 命令执行、语音转文字                         |
+| `aionui-assistant`    | Assistant 配置与管理                               |
 
 ### 组装层（Composition）
 
-| Crate | 职责 |
-|-------|------|
+| Crate        | 职责                                              |
+| ------------ | ------------------------------------------------- |
 | `aionui-app` | 顶层二进制入口，组装所有 crate 为完整的 Axum 服务 |
 
 ### 依赖方向规则
@@ -119,21 +119,25 @@ crates/aionui-conversation/src/
 ### 各文件职责
 
 **lib.rs** — Crate 入口，只做模块声明和公共 API 导出：
+
 - 导出 `domain_routes()` 函数
 - 导出 `Service` 和 `RouterState`
 - 不包含业务逻辑
 
 **routes.rs** — HTTP 路由定义和 handler 函数：
+
 - 导出一个 `domain_routes(state: RouterState) -> Router` 函数
 - 每个 handler 负责：提取参数 → 调用 service → 构造响应
 - handler 不包含业务逻辑，只做请求/响应转换
 
 **service.rs** — 业务逻辑的唯一存放处：
+
 - 通过构造函数注入依赖（Repository trait 对象、EventBroadcaster 等）
 - 所有业务规则、校验、编排逻辑都在这里
 - 不直接接触 HTTP 类型（不导入 axum）
 
 **state.rs** — 路由状态，是依赖注入的载体：
+
 - 持有 service 实例和其他依赖的 Arc 引用
 - 实现 Clone（Axum 要求）
 
@@ -151,11 +155,13 @@ async fn handler(
 ### 何时新建 Crate vs 扩展现有 Crate
 
 **新建 crate：**
+
 - 代表一个独立的业务领域（有自己的数据模型和生命周期）
 - 需要独立的路由前缀（如 `/api/new-domain/...`）
 - 与现有领域没有强耦合关系
 
 **扩展现有 crate：**
+
 - 功能属于已有领域的子功能
 - 共享同一组数据模型
 - 路由是现有前缀的子路径
@@ -172,6 +178,7 @@ async fn handler(
 ```
 
 规则：
+
 - 始终使用 `/api/` 前缀
 - 资源名和路径段使用 kebab-case（如 `ai-agents`、`qr-login`）
 - 动作类路由使用动词或动词短语（如 `reset`、`stop`、`run`）
@@ -179,6 +186,7 @@ async fn handler(
 ### 统一响应格式
 
 **成功响应（`ApiResponse<T>`）：**
+
 ```json
 {
   "success": true,
@@ -186,9 +194,11 @@ async fn handler(
   "message": "optional message"
 }
 ```
+
 `data` 和 `message` 均为可选字段，值为 null 时不序列化。
 
 **错误响应（`ErrorResponse`）：**
+
 ```json
 {
   "success": false,
@@ -201,18 +211,18 @@ async fn handler(
 
 ### HTTP 状态码映射
 
-| AppError 变体 | 状态码 | 错误码 | 使用场景 |
-|---------------|--------|--------|----------|
-| BadRequest | 400 | BAD_REQUEST | 请求参数无效 |
-| Unauthorized | 401 | UNAUTHORIZED | 未认证或 token 过期 |
-| Forbidden | 403 | FORBIDDEN | 无权限访问 |
-| NotFound | 404 | NOT_FOUND | 资源不存在 |
-| Conflict | 409 | CONFLICT | 资源冲突 |
-| UnprocessableEntity | 422 | UNPROCESSABLE_ENTITY | 语义错误 |
-| RateLimited | 429 | RATE_LIMITED | 请求频率超限 |
-| Internal | 500 | INTERNAL_ERROR | 服务器内部错误 |
-| BadGateway | 502 | BAD_GATEWAY | 上游服务异常 |
-| Timeout | 502 | TIMEOUT | 上游服务超时 |
+| AppError 变体       | 状态码 | 错误码               | 使用场景            |
+| ------------------- | ------ | -------------------- | ------------------- |
+| BadRequest          | 400    | BAD_REQUEST          | 请求参数无效        |
+| Unauthorized        | 401    | UNAUTHORIZED         | 未认证或 token 过期 |
+| Forbidden           | 403    | FORBIDDEN            | 无权限访问          |
+| NotFound            | 404    | NOT_FOUND            | 资源不存在          |
+| Conflict            | 409    | CONFLICT             | 资源冲突            |
+| UnprocessableEntity | 422    | UNPROCESSABLE_ENTITY | 语义错误            |
+| RateLimited         | 429    | RATE_LIMITED         | 请求频率超限        |
+| Internal            | 500    | INTERNAL_ERROR       | 服务器内部错误      |
+| BadGateway          | 502    | BAD_GATEWAY          | 上游服务异常        |
+| Timeout             | 502    | TIMEOUT              | 上游服务超时        |
 
 ### 分页
 
@@ -227,6 +237,7 @@ async fn handler(
 ```
 
 字段说明：
+
 - `items` — 当前页数据
 - `total` — 总记录数
 - `hasMore` — 是否还有更多数据
@@ -238,6 +249,7 @@ async fn handler(
 **入口：** 单一 `/ws` 端点
 
 **消息格式（`WebSocketMessage<T>`）：**
+
 ```json
 {
   "name": "domain.actionName",
@@ -246,6 +258,7 @@ async fn handler(
 ```
 
 **事件命名规范：**
+
 - 格式：`{domain}.{actionName}`，两级结构
 - domain 使用 camelCase（如 `conversation`、`fileWatch`）
 - actionName 使用 camelCase（如 `listChanged`、`statusChanged`）
@@ -274,6 +287,7 @@ pub trait IConversationRepository: Send + Sync {
 ```
 
 规则：
+
 - 每个领域实体对应一个 Repository trait（如 `IConversationRepository`、`IUserRepository`）
 - trait 命名以 `I` 开头，表示接口
 - 具体实现使用 `Sqlite` 前缀（如 `SqliteConversationRepository`）
@@ -283,11 +297,11 @@ pub trait IConversationRepository: Send + Sync {
 
 项目中有三类数据类型，各有归属：
 
-| 类型 | 位置 | 用途 | 示例 |
-|------|------|------|------|
-| Row 模型 | `aionui-db/src/models/` | 数据库行映射 | `ConversationRow` |
-| Params 对象 | `aionui-db/src/repository/` | 数据库写入参数 | `UpdateConversationParams` |
-| 请求/响应类型 | `aionui-api-types` | API 契约与共享 DTO | `CreateConversationRequest`、`ConversationResponse` |
+| 类型          | 位置                        | 用途               | 示例                                                |
+| ------------- | --------------------------- | ------------------ | --------------------------------------------------- |
+| Row 模型      | `aionui-db/src/models/`     | 数据库行映射       | `ConversationRow`                                   |
+| Params 对象   | `aionui-db/src/repository/` | 数据库写入参数     | `UpdateConversationParams`                          |
+| 请求/响应类型 | `aionui-api-types`          | API 契约与共享 DTO | `CreateConversationRequest`、`ConversationResponse` |
 
 **Service 层可以直接使用 `aionui-api-types` 中的类型。** 该 crate 是纯数据结构定义，
 不依赖任何 HTTP 框架，本质上是共享 DTO 层。
@@ -307,6 +321,7 @@ Handler 不做业务判断，Service 不做 HTTP 处理。
 ### Migration 管理
 
 使用 sqlx 的内嵌迁移（`sqlx::migrate!()`）：
+
 - 迁移文件位于 `crates/aionui-db/migrations/`
 - 命名格式：`NNN_descriptive_name.sql`（序号递增）
 - 迁移在应用启动时自动执行
@@ -324,6 +339,7 @@ HTTP 响应（状态码 + ErrorResponse JSON）
 ```
 
 映射规则：
+
 - `DbError::NotFound` → `AppError::NotFound`（保留语义）
 - `DbError::Conflict` → `AppError::Conflict`（保留语义）
 - `DbError::Query` / `Migration` / `Init` → `AppError::Internal`（屏蔽内部细节）
@@ -417,6 +433,7 @@ CORS（仅 local 模式）
 ```
 
 关键点：
+
 - 认证中间件不是全局的，而是通过 `route_layer()` 按路由组选择性应用
 - 登录、状态检查等公开路由不附加认证中间件
 - WebSocket `/ws` 路由不走 HTTP 认证中间件，使用独立的 token 校验回调
@@ -457,6 +474,7 @@ CORS（仅 local 模式，允许任意来源）
 ### CSRF 保护
 
 采用 Double Submit Cookie 模式：
+
 - Cookie 名：`aionui-csrf-token`（非 HttpOnly，JavaScript 需读取）
 - 请求头：`x-csrf-token`
 - 校验逻辑：Cookie 值必须与请求头值完全匹配
@@ -471,24 +489,25 @@ CORS（仅 local 模式，允许任意来源）
 
 ### Cookie 配置
 
-| Cookie | HttpOnly | Secure | SameSite | Max-Age |
-|--------|----------|--------|----------|---------|
-| `aionui-session` | ✅ | HTTPS 时 | Strict(HTTPS) / Lax(HTTP) | 30 天 |
-| `aionui-csrf-token` | ❌ | HTTPS 时 | Strict(HTTPS) / Lax(HTTP) | 30 天 |
+| Cookie              | HttpOnly | Secure   | SameSite                  | Max-Age |
+| ------------------- | -------- | -------- | ------------------------- | ------- |
+| `aionui-session`    | ✅       | HTTPS 时 | Strict(HTTPS) / Lax(HTTP) | 30 天   |
+| `aionui-csrf-token` | ❌       | HTTPS 时 | Strict(HTTPS) / Lax(HTTP) | 30 天   |
 
 ### 频率限制
 
-| 级别 | 限制 | 窗口 | 应用范围 | Key |
-|------|------|------|----------|-----|
-| Auth | 5 次失败 | 15 分钟 | 登录路由 | 客户端 IP |
-| API | 60 次请求 | 1 分钟 | 公开端点 | 客户端 IP |
-| Action | 20 次请求 | 1 分钟 | 敏感操作 | 用户 ID（降级为 IP） |
+| 级别   | 限制      | 窗口    | 应用范围 | Key                  |
+| ------ | --------- | ------- | -------- | -------------------- |
+| Auth   | 5 次失败  | 15 分钟 | 登录路由 | 客户端 IP            |
+| API    | 60 次请求 | 1 分钟  | 公开端点 | 客户端 IP            |
+| Action | 20 次请求 | 1 分钟  | 敏感操作 | 用户 ID（降级为 IP） |
 
 IP 提取优先级：`X-Forwarded-For` → `X-Real-IP` → "unknown"
 
 ### Local 模式
 
 通过 `--local` 启动标志启用，用于 Electron 嵌入场景：
+
 - 跳过 JWT 验证，注入固定用户（`system_default_user`）
 - 跳过 CSRF 检查
 - 启用全开放 CORS
@@ -506,15 +525,16 @@ IP 提取优先级：`X-Forwarded-For` → `X-Real-IP` → "unknown"
 
 ### 测试分层
 
-| 层级 | 位置 | 数据库策略 | 用途 |
-|------|------|-----------|------|
-| 单元测试 | 各 `.rs` 文件内 `#[cfg(test)]` | 无或 Mock | 函数级逻辑验证 |
-| 集成测试 | `crates/<crate>/tests/` | 内存 SQLite | Service 和 Repository 行为验证 |
-| E2E 测试 | `crates/aionui-app/tests/` | 内存 SQLite | 完整 HTTP 请求链路验证 |
+| 层级     | 位置                           | 数据库策略  | 用途                           |
+| -------- | ------------------------------ | ----------- | ------------------------------ |
+| 单元测试 | 各 `.rs` 文件内 `#[cfg(test)]` | 无或 Mock   | 函数级逻辑验证                 |
+| 集成测试 | `crates/<crate>/tests/`        | 内存 SQLite | Service 和 Repository 行为验证 |
+| E2E 测试 | `crates/aionui-app/tests/`     | 内存 SQLite | 完整 HTTP 请求链路验证         |
 
 ### 内存数据库
 
 所有需要数据库的测试使用 `init_database_memory()`：
+
 - 创建 SQLite 内存数据库（`sqlite::memory:`）
 - 单连接池（`max_connections = 1`，保证内存库数据一致性）
 - 自动执行迁移
@@ -547,6 +567,7 @@ let response = app.oneshot(
 ```
 
 登录流程：
+
 1. 直接通过 Repository 创建用户（绕过 API）
 2. GET `/api/auth/status` 提取 CSRF token
 3. POST `/login` 获取 session token
@@ -554,11 +575,11 @@ let response = app.oneshot(
 
 ### 测试文件命名
 
-| 后缀 | 用途 | 示例 |
-|------|------|------|
-| `*_test.rs` | 单元/功能测试 | `extension_loading_test.rs` |
-| `*_integration.rs` | 集成测试 | `acp_agent_integration.rs` |
-| `*_e2e.rs` | 端到端测试 | `auth_e2e.rs`、`conversation_e2e.rs` |
+| 后缀               | 用途          | 示例                                 |
+| ------------------ | ------------- | ------------------------------------ |
+| `*_test.rs`        | 单元/功能测试 | `extension_loading_test.rs`          |
+| `*_integration.rs` | 集成测试      | `acp_agent_integration.rs`           |
+| `*_e2e.rs`         | 端到端测试    | `auth_e2e.rs`、`conversation_e2e.rs` |
 
 ### 测试失败处理规则
 
@@ -571,6 +592,7 @@ let response = app.oneshot(
 3. **不确定** → 停下来，回溯变更，搞清楚再继续
 
 禁止项：
+
 - ❌ 删除失败的测试来"解决"问题
 - ❌ 将具体断言改为模糊断言（如 `assert_eq!(status, 201)` → `assert!(status.is_success())`）
 
@@ -579,11 +601,13 @@ let response = app.oneshot(
 ### 何时新建 Crate
 
 **新建 crate：**
+
 - 代表独立的业务领域（有自己的数据模型和生命周期）
 - 需要独立的路由前缀（`/api/new-domain/...`）
 - 与现有领域没有强耦合关系
 
 **扩展现有 crate：**
+
 - 功能属于已有领域的子功能
 - 共享同一组数据模型
 - 路由是现有前缀的子路径
@@ -635,16 +659,19 @@ crates/aionui-my-feature/
 **第五步：接入 aionui-app**
 
 1. 在 `aionui-app/Cargo.toml` 添加依赖：
+
    ```toml
    aionui-my-feature.workspace = true
    ```
 
 2. 在 `ModuleStates` 中添加字段：
+
    ```rust
    pub my_feature: MyFeatureRouterState,
    ```
 
 3. 编写 `build_my_feature_state()` 函数：
+
    ```rust
    pub fn build_my_feature_state(services: &AppServices) -> MyFeatureRouterState {
        let pool = services.database.pool().clone();
@@ -656,15 +683,17 @@ crates/aionui-my-feature/
    ```
 
 4. 在 `build_module_states()` 中调用：
+
    ```rust
    my_feature: build_my_feature_state(services),
    ```
 
 5. 在 `create_router_with_all_state()` 中注册路由：
+
    ```rust
    let my_feature_authenticated = my_feature_routes(states.my_feature)
        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
-   
+
    let router = Router::new()
        // ... 现有路由
        .merge(my_feature_authenticated)
@@ -674,6 +703,7 @@ crates/aionui-my-feature/
 ### 检查清单
 
 新增 crate 前确认：
+
 - [ ] crate 内部结构遵循标准模式（lib/routes/service/state）
 - [ ] 依赖方向正确（不依赖上层或同层 crate 的具体实现）
 - [ ] Repository trait 定义在 aionui-db，实现使用 Sqlite 前缀

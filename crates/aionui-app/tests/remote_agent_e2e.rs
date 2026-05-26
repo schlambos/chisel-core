@@ -30,6 +30,16 @@ fn openclaw_agent_body() -> serde_json::Value {
     })
 }
 
+fn opencode_agent_body() -> serde_json::Value {
+    json!({
+        "name": "OpenCode Server",
+        "protocol": "opencode",
+        "url": "http://127.0.0.1:4096",
+        "auth_type": "password",
+        "auth_token": "server-password"
+    })
+}
+
 async fn create_agent(app: &mut axum::Router, token: &str, csrf: &str, body: serde_json::Value) -> serde_json::Value {
     let req = json_with_token("POST", "/api/remote-agents", body, token, csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -79,7 +89,40 @@ async fn t1_2_create_openclaw_agent_generates_device_keys() {
 }
 
 #[tokio::test]
-async fn t1_3_create_missing_required_fields() {
+async fn t1_3_create_opencode_agent_accepts_http_url() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+
+    let json = create_agent(&mut app, &token, &csrf, opencode_agent_body()).await;
+
+    let data = &json["data"];
+    assert_eq!(data["protocol"], "opencode");
+    assert_eq!(data["url"], "http://127.0.0.1:4096");
+    assert_eq!(data["auth_type"], "password");
+    assert_eq!(data["auth_token"], "***word");
+    assert!(data.get("device_id").is_none());
+    assert!(data.get("device_public_key").is_none());
+}
+
+#[tokio::test]
+async fn t1_4_create_opencode_agent_rejects_websocket_url() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+
+    let body = json!({
+        "name": "OpenCode Server",
+        "protocol": "opencode",
+        "url": "wss://127.0.0.1:4096",
+        "auth_type": "none"
+    });
+    let req = json_with_token("POST", "/api/remote-agents", body, &token, &csrf);
+    let resp = app.oneshot(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn t1_5_create_missing_required_fields() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -90,7 +133,7 @@ async fn t1_3_create_missing_required_fields() {
 }
 
 #[tokio::test]
-async fn t1_4_create_unauthenticated() {
+async fn t1_6_create_unauthenticated() {
     let (app, _services) = build_app().await;
 
     let body = bearer_agent_body();

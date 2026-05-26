@@ -51,6 +51,7 @@ User                HTTP            TeamSession       Scheduler        Mailbox  
 > 注：`POST /messages` 在本图中泛指触发路径（来自单聊 API 或 agent-to-agent MCP 调用），team 模块本身不再暴露消息端点。
 
 关键点：
+
 - HTTP 立刻 200 返回，agent 回合在 `tokio::spawn` 里跑，失败会把 agent rollback 到 Idle。
 - `read_unread_and_mark` 是**原子**的：一次 SQL 拿走所有未读并标记已读（见 bug #1）。
 - 所有 WS 事件由 `TeamEventEmitter` 发：`team.agent.status / spawned / removed / renamed`。
@@ -58,6 +59,7 @@ User                HTTP            TeamSession       Scheduler        Mailbox  
 ## Mailbox
 
 三种消息（`mailbox` 表 `type` 列）：
+
 - `message` — agent→agent（lead 派单、teammate 汇报）
 - `idle_notification` — teammate 完成后写给 lead（带 `summary`）
 - `shutdown_request` — lead 要求某个 teammate 下线
@@ -107,29 +109,30 @@ Guide MCP 尚未端到端闭环，solo agent 调不到这两个工具。前端�
 
 ### MCP 与 Mailbox / TaskBoard 的交互
 
-| MCP 工具 | 落到哪 | 是否触发 wake |
-|----------|--------|:---:|
-| `team_send_message` | Mailbox.write() (`message` 类型)；W5 新增 `shutdown_approved` / `shutdown_rejected:<reason>` 字符串拦截（见 `mcp/server.rs`） | ⚠️ 否（bug） |
-| `team_shutdown_agent` | Mailbox.write() (`shutdown_request`)，target=Lead 直接拒绝（D30c） | ⚠️ 否 |
-| `IdleNotification` action（非 MCP 工具，是 agent 回合结束时 scheduler 自动触发） | Mailbox.write() (`idle_notification`) → `mark_idle` → 可能 wake lead | ✅ 是 |
-| `team_task_create / update / list` | TaskBoard（SQLite `team_tasks`） | 不涉及 wake |
-| `team_members / team_rename_agent` | 内存 slots（+ WS 广播） | 不涉及 wake |
-| `team_spawn_agent` | 🔄 W5-D29b：从空壳切为调 `add_agent`（会广播 `team.agent.spawned`） | — |
+| MCP 工具                                                                         | 落到哪                                                                                                                        | 是否触发 wake |
+| -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | :-----------: |
+| `team_send_message`                                                              | Mailbox.write() (`message` 类型)；W5 新增 `shutdown_approved` / `shutdown_rejected:<reason>` 字符串拦截（见 `mcp/server.rs`） | ⚠️ 否（bug）  |
+| `team_shutdown_agent`                                                            | Mailbox.write() (`shutdown_request`)，target=Lead 直接拒绝（D30c）                                                            |     ⚠️ 否     |
+| `IdleNotification` action（非 MCP 工具，是 agent 回合结束时 scheduler 自动触发） | Mailbox.write() (`idle_notification`) → `mark_idle` → 可能 wake lead                                                          |     ✅ 是     |
+| `team_task_create / update / list`                                               | TaskBoard（SQLite `team_tasks`）                                                                                              |  不涉及 wake  |
+| `team_members / team_rename_agent`                                               | 内存 slots（+ WS 广播）                                                                                                       |  不涉及 wake  |
+| `team_spawn_agent`                                                               | 🔄 W5-D29b：从空壳切为调 `add_agent`（会广播 `team.agent.spawned`）                                                           |       —       |
 
 **问题**：MCP 写完 mailbox 后没有调 `wake_and_dispatch`，与单聊 API 路径（`POST /api/conversations/{id}/messages` 会走 `TeamSession.wake_and_dispatch`）不一致。agent-to-agent 消息当前靠"下一次外部触发 wake"才被看到。见 bug #2。
 
 ## 崩溃与看门狗（Wave 4）
 
-| 场景 | 检测 | 处理 |
-|------|------|------|
-| Agent 进程退出 / stream Error | `detect_crash` 纯函数（D20a ✅） | `handle_agent_crash` 编排（D20b-2 ✅）：写 testament 到 lead mailbox（D20b-1 ✅）、kill agent 进程、若 teammate 崩则唤醒 lead；若 lead 崩走 leader-crash 分支（D20c ✅） |
-| Agent 卡死（Working 不动） | `handle_inactivity_timeout` 看门狗（D22 🔄）+ `wake_timeouts` 存储（D18b-1 ✅） | 到期回滚到 Idle，重新 wake；`arm_wake_timeout` 的 spawn 任务（D18b-2）和 wake_lock 接入（D18c）待合 |
-| 429 / rate limit | `is_rate_limited` 分类器（D21 ✅） | 走 crash handler 的限流分支 |
-| 同一回合重复 finalize | `finalized_turns` 5s 去重表（D19a/b ✅） | 第二次直接丢弃 |
+| 场景                          | 检测                                                                            | 处理                                                                                                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Agent 进程退出 / stream Error | `detect_crash` 纯函数（D20a ✅）                                                | `handle_agent_crash` 编排（D20b-2 ✅）：写 testament 到 lead mailbox（D20b-1 ✅）、kill agent 进程、若 teammate 崩则唤醒 lead；若 lead 崩走 leader-crash 分支（D20c ✅） |
+| Agent 卡死（Working 不动）    | `handle_inactivity_timeout` 看门狗（D22 🔄）+ `wake_timeouts` 存储（D18b-1 ✅） | 到期回滚到 Idle，重新 wake；`arm_wake_timeout` 的 spawn 任务（D18b-2）和 wake_lock 接入（D18c）待合                                                                      |
+| 429 / rate limit              | `is_rate_limited` 分类器（D21 ✅）                                              | 走 crash handler 的限流分支                                                                                                                                              |
+| 同一回合重复 finalize         | `finalized_turns` 5s 去重表（D19a/b ✅）                                        | 第二次直接丢弃                                                                                                                                                           |
 
 ## remove_agent（Wave 5 D30d，落地中）
 
 完整路径（全部合入后）：
+
 1. kill agent 进程（`task_manager.kill`，D30d-1 🔄）
 2. 清 scheduler 的 `active_wakes` / `wake_timeouts` / `finalized_turns`（D30d-2 ✅）
 3. 从 `slots` 删除 + 广播 `team.agent.removed`（D30d-3 🔄）
@@ -142,15 +145,15 @@ shutdown 协议：lead 调 `team_shutdown_agent` → 写 `shutdown_request` 给 
 
 ## 已知 Bug
 
-| # | 问题 | 现象 | 位置 |
-|---|------|------|------|
-| 1 | Agent 中途崩溃导致消息丢失 | `read_unread` 已标已读但 agent 没处理完就挂了，用户看到无响应 | `mailbox.rs`, `session.rs` |
-| 2 | `WAKE_TIMEOUT_MS` 卡死保护（🔄 W4-D18b/c / D22 落地中） | agent 卡在 Working 永不恢复，新消息静默入队不触发。存储已在（D18b-1），handler + spawn 任务 + wake lock 接入待合 | `scheduler.rs` |
-| 3 | `SpawnAgent` action 是 no-op（🔄 W5-D29b 落地中） | Lead 调 `team_spawn_agent` 后，新 agent 不会真的加进 scheduler。校验链 D29a-1/2 已合，D29a-3/4 / D29b 待合 | `scheduler.rs` |
-| 4 | 任务依赖无环检测 | A blocked_by B、B blocked_by A 可成功创建，互相死锁 | `task_board.rs` |
-| 5 | `list_teams` 不按 user_id 过滤 | 任何登录用户能列出所有人的 team | `routes.rs` |
-| ~~6~~ | ~~用户消息气泡不显示~~ | **已解决**：用户→agent 改走单聊 API，直接写入 `messages` 表，自然产生 visible user row | — |
-| ~~7~~ | ~~Agent Working 时用户后续消息被吞~~ | **已解决**：用户消息不再经 mailbox，走单聊的常规队列，不受 team scheduler 状态影响 | — |
+| #     | 问题                                                    | 现象                                                                                                             | 位置                       |
+| ----- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| 1     | Agent 中途崩溃导致消息丢失                              | `read_unread` 已标已读但 agent 没处理完就挂了，用户看到无响应                                                    | `mailbox.rs`, `session.rs` |
+| 2     | `WAKE_TIMEOUT_MS` 卡死保护（🔄 W4-D18b/c / D22 落地中） | agent 卡在 Working 永不恢复，新消息静默入队不触发。存储已在（D18b-1），handler + spawn 任务 + wake lock 接入待合 | `scheduler.rs`             |
+| 3     | `SpawnAgent` action 是 no-op（🔄 W5-D29b 落地中）       | Lead 调 `team_spawn_agent` 后，新 agent 不会真的加进 scheduler。校验链 D29a-1/2 已合，D29a-3/4 / D29b 待合       | `scheduler.rs`             |
+| 4     | 任务依赖无环检测                                        | A blocked_by B、B blocked_by A 可成功创建，互相死锁                                                              | `task_board.rs`            |
+| 5     | `list_teams` 不按 user_id 过滤                          | 任何登录用户能列出所有人的 team                                                                                  | `routes.rs`                |
+| ~~6~~ | ~~用户消息气泡不显示~~                                  | **已解决**：用户→agent 改走单聊 API，直接写入 `messages` 表，自然产生 visible user row                           | —                          |
+| ~~7~~ | ~~Agent Working 时用户后续消息被吞~~                    | **已解决**：用户消息不再经 mailbox，走单聊的常规队列，不受 team scheduler 状态影响                               | —                          |
 
 > bug #6 / #7 通过删除 team 专属消息路由、改走单聊 API 消除。**bug #2 Wave 4 正在修复**（watchdog / wake lock 代码已写，落地中）。
 

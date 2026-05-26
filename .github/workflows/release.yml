@@ -3,17 +3,17 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - 'v*'
   workflow_call:
     inputs:
       tag_name:
-        description: "Release tag to build and publish (e.g., v0.2.0)"
+        description: 'Release tag to build and publish (e.g., v0.2.0)'
         required: true
         type: string
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag to build and publish (e.g., v0.2.0)"
+        description: 'Release tag to build and publish (e.g., v0.2.0)'
         required: true
         type: string
 
@@ -23,9 +23,9 @@ permissions:
 env:
   BINARY_NAME: aioncore
   CARGO_TERM_COLOR: always
-  CARGO_HTTP_TIMEOUT: "600"
-  CARGO_NET_RETRY: "10"
-  AIONUI_EMBED_BUN: "1"
+  CARGO_HTTP_TIMEOUT: '600'
+  CARGO_NET_RETRY: '10'
+  AIONUI_EMBED_BUN: '1'
   BUN_VARIANT: default
   RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
 
@@ -80,11 +80,11 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: aioncore.exe
-            rustflags: "-C target-feature=+crt-static"
+            rustflags: '-C target-feature=+crt-static'
           - os: windows-latest
             target: aarch64-pc-windows-msvc
             binary_name: aioncore.exe
-            rustflags: "-C target-feature=+crt-static"
+            rustflags: '-C target-feature=+crt-static'
 
     steps:
       - uses: actions/checkout@v6
@@ -93,7 +93,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.95.0"
+          toolchain: '1.95.0'
           targets: ${{ matrix.target }}
 
       - name: Fix MSVC linker (remove Git's link.exe)

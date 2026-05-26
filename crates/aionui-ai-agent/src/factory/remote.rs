@@ -36,11 +36,27 @@ pub(super) async fn build(
         });
     let config = RemoteAgentConfig {
         remote_agent_id: row.id.clone(),
+        protocol: row.protocol.clone(),
         url: row.url.clone(),
         auth_type: row.auth_type.clone(),
         auth_token,
         allow_insecure: row.allow_insecure,
     };
     let agent = RemoteAgentManager::new(ctx.conversation_id, ctx.workspace, config).await?;
-    Ok(AgentInstance::Remote(Arc::new(agent)))
+    let arc = Arc::new(agent);
+    arc.connect().await?;
+
+    // Forward the user's pre-session model pick (e.g. from the Guid page's
+    // pre-fetched model dropdown) into the manager's `desired_model` so the
+    // very first message lands on the right model.  Without this, the
+    // selection is silently dropped — the row JSON carries it but the
+    // factory never reads it, causing the first send to fail and the
+    // in-session model selector to render empty until the user picks again.
+    if let Some(model_id) = extra.current_model_id.as_deref().filter(|s| !s.is_empty())
+        && let Err(e) = arc.set_model(model_id).await
+    {
+        warn!(error = %e, model_id, "Failed to seed initial model on remote agent");
+    }
+
+    Ok(AgentInstance::Remote(arc))
 }

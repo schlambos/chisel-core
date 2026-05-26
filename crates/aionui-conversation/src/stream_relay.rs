@@ -105,8 +105,7 @@ impl StreamRelay {
         let mut text_segments: Vec<PersistedTextSegment> = Vec::new();
         let mut active_text: Option<TextSegmentState> = None;
         let mut active_thinking: Option<ThinkingSegmentState> = None;
-        let mut used_primary_text_msg_id = false;
-        let mut used_primary_thinking_msg_id = false;
+        let mut used_primary_msg_id = false;
 
         loop {
             match rx.recv().await {
@@ -121,7 +120,7 @@ impl StreamRelay {
                             .await;
 
                         let segment = active_thinking.get_or_insert_with(|| ThinkingSegmentState {
-                            id: Self::mint_segment_msg_id(&mut used_primary_thinking_msg_id, &self.msg_id),
+                            id: Self::mint_segment_msg_id(&mut used_primary_msg_id, &self.msg_id),
                             buffer: String::new(),
                             started_at: now_ms(),
                         });
@@ -132,7 +131,7 @@ impl StreamRelay {
                         self.complete_active_thinking(&mut active_thinking).await;
 
                         let segment = active_text.get_or_insert_with(|| TextSegmentState {
-                            id: Self::mint_segment_msg_id(&mut used_primary_text_msg_id, &self.msg_id),
+                            id: Self::mint_segment_msg_id(&mut used_primary_msg_id, &self.msg_id),
                             buffer: String::new(),
                             created_at: now_ms(),
                             record_created: false,

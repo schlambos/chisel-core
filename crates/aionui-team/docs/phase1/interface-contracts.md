@@ -3,6 +3,7 @@
 > **原则**：所有模块的 Rust 签名在 Wave 1 开工前冻结；后续模块照此实现，Wave 2 串联时不改签名。
 >
 > **事实来源**：
+>
 > - [backend-audit.md](./backend-audit.md) §1.10 / §1.11 / §4.1–§4.8
 > - [aionui-audit.md](./aionui-audit.md) §2.1 / §3.1 / §4 / §7
 > - [mcp.md](../mcp.md) §4.5 / §4.6
@@ -15,22 +16,22 @@
 
 ## 0. 总览：改动面
 
-| 类型 | 目标 |
-|------|------|
-| 新增 | `aionui-api-types::team_mcp` 子模块（提升 `TeamMcpStdioConfig`） |
-| 新增 | `aionui-team::mcp::bridge` 新 struct `TeamMcpStdioServerSpec`（session/new 注入体） |
-| 新增 | `aionui-team::prompts` 4 份常量字符串（leader/teammate/guide/spawn tool desc）+ builder 新签名 |
-| 新增 | `aionui-team::mcp::tools` 两个工具 descriptor + handler：`team_list_models` / `team_describe_assistant` |
-| 新增 | `aionui-team::session::TeamSession::stdio_spec(slot_id)` 返回 `TeamMcpStdioServerSpec` |
-| 新增 | `aionui-team::session::TeamSession::on_agent_finish(conversation_id, is_error)` 供 Wave 2 转发 Finish |
-| 新增 | `aionui-app` 子命令 `mcp-bridge`（stdio bridge 入口，无新 trait） |
-| 修改 | `aionui-ai-agent::AcpBuildExtra` 加字段 `team_mcp_stdio_config: Option<TeamMcpStdioConfig>` |
-| 修改 | `aionui-ai-agent::acp_agent::session_new_and_prompt` 按 config 注入 mcp_servers |
-| 修改 | `aionui-team::service::TeamSessionService::new` 加 `task_manager: Arc<dyn IWorkerTaskManager>` 入参 |
-| 修改 | `aionui-team::service::ensure_session` 实现 kill+rebuild 闭环（写回 extra → kill → get_or_build_task） |
-| 修改 | `aionui-team::session::TeamSession::send_message / send_message_to_agent` 接 wake 路径 |
+| 类型 | 目标                                                                                                                                                                                     |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 新增 | `aionui-api-types::team_mcp` 子模块（提升 `TeamMcpStdioConfig`）                                                                                                                         |
+| 新增 | `aionui-team::mcp::bridge` 新 struct `TeamMcpStdioServerSpec`（session/new 注入体）                                                                                                      |
+| 新增 | `aionui-team::prompts` 4 份常量字符串（leader/teammate/guide/spawn tool desc）+ builder 新签名                                                                                           |
+| 新增 | `aionui-team::mcp::tools` 两个工具 descriptor + handler：`team_list_models` / `team_describe_assistant`                                                                                  |
+| 新增 | `aionui-team::session::TeamSession::stdio_spec(slot_id)` 返回 `TeamMcpStdioServerSpec`                                                                                                   |
+| 新增 | `aionui-team::session::TeamSession::on_agent_finish(conversation_id, is_error)` 供 Wave 2 转发 Finish                                                                                    |
+| 新增 | `aionui-app` 子命令 `mcp-bridge`（stdio bridge 入口，无新 trait）                                                                                                                        |
+| 修改 | `aionui-ai-agent::AcpBuildExtra` 加字段 `team_mcp_stdio_config: Option<TeamMcpStdioConfig>`                                                                                              |
+| 修改 | `aionui-ai-agent::acp_agent::session_new_and_prompt` 按 config 注入 mcp_servers                                                                                                          |
+| 修改 | `aionui-team::service::TeamSessionService::new` 加 `task_manager: Arc<dyn IWorkerTaskManager>` 入参                                                                                      |
+| 修改 | `aionui-team::service::ensure_session` 实现 kill+rebuild 闭环（写回 extra → kill → get_or_build_task）                                                                                   |
+| 修改 | `aionui-team::session::TeamSession::send_message / send_message_to_agent` 接 wake 路径                                                                                                   |
 | 修改 | `aionui-conversation::service::ConversationService::update_extra(conv_id, patch)` 【新增接口】供 `ensure_session` 写 `team_mcp_stdio_config`（extra 是 JSON 字符串列，不需 schema 迁移） |
-| 修改 | `aionui-app::state_builders::build_team_state` 传 worker_task_manager |
+| 修改 | `aionui-app::state_builders::build_team_state` 传 worker_task_manager                                                                                                                    |
 
 以下按模块给出签名。**字段命名对齐 aionui-backend Rust 规则（snake_case）；对外 JSON 字段按 backend-audit §1.10 的事实保持 snake_case（rebase 后已经全面去 `rename_all=camelCase`，见 commit `dae96f8`）。**
 
@@ -86,6 +87,7 @@ pub struct AcpBuildExtra {
 ```
 
 **兼容约束**：
+
 - `#[serde(default)]` + `Option` 保证旧 extra 无此字段反序列化为 `None`（单聊零影响，backend-audit §4.3 引用）
 - **字段命名规则**：新增字段统一 **snake_case**（本字段 `team_mcp_stdio_config` 即如此）；既有 `teamId` 字段（[`service.rs:73`](../../../crates/aionui-team/src/service.rs) 早期写入）**留作历史兼容**不动，但不再新增驼峰字段。conversation.extra 的 JSON 由后端自己写自己读，snake_case 自洽即可（commit `dae96f8` 方向）
 
@@ -338,11 +340,13 @@ active_wakes: DashSet<String>,  // slot_id 集合
 ```
 
 **与 D7 的交互**：
+
 - D7 的 `on_agent_finish` 调 `finalize_turn`（D8 提供）
 - D7 的 `compute_wake_input` 调 `acquire_wake_lock` + `try_wake` + `release_wake_lock`（D8 提供）
 - D8 不直接依赖 D7
 
 **测试策略**：
+
 - `mark_idle` 写 idle_notification 到 mailbox → 用真实内存 DB 断言
 - `maybe_wake_leader_when_all_idle` 对 settled 集合的 4 种状态组合 → 单元测试
 - `acquire_wake_lock` / `release_wake_lock` 并发安全 → tokio::spawn 两个并发 wake 断言只有一个成功
@@ -354,6 +358,7 @@ active_wakes: DashSet<String>,  // slot_id 集合
 **文件**：`crates/aionui-ai-agent/src/acp_agent.rs:448-458`
 
 **现状**：
+
 ```rust
 let session_response = self.protocol
     .new_session(NewSessionRequest::new(&self.workspace))
@@ -361,6 +366,7 @@ let session_response = self.protocol
 ```
 
 **phase1 改为**：
+
 ```rust
 let mut req = NewSessionRequest::new(&self.workspace);
 if let Some(cfg) = &self.config.team_mcp_stdio_config {
@@ -387,6 +393,7 @@ let session_response = self.protocol.new_session(req).await?;
 **文件**：`crates/aionui-app/src/lib.rs`（或新子模块 `bridge.rs`）
 
 **CLI 入口**：
+
 ```rust
 // main.rs
 if args.get(1).map(|s| s.as_str()) == Some("mcp-bridge") {
@@ -396,6 +403,7 @@ if args.get(1).map(|s| s.as_str()) == Some("mcp-bridge") {
 ```
 
 **bridge 函数签名**：
+
 ```rust
 /// 由 ACP CLI 通过 session/new.mcp_servers 拉起的 stdio bridge 子进程
 ///
@@ -408,9 +416,10 @@ pub async fn run_mcp_bridge() -> !;
 ```
 
 **关键决策**：
+
 - bridge **不重复**定义工具 descriptor：tools/list 直接转发到 TCP server 返回。
 - bridge **不做 caller 身份判定**：只负责透传 + 在每条 TCP 请求里附 `auth_token` + `slot_id`（或 `from_slot_id`）。
-- bridge 错误即退出（exit code 非零），ACP CLI 会把 MCP server 标为 broken，agent 继续跑只是 team_* 不可用（mcp.md §4.4 "稳定性保证 #3"）。
+- bridge 错误即退出（exit code 非零），ACP CLI 会把 MCP server 标为 broken，agent 继续跑只是 team\_\* 不可用（mcp.md §4.4 "稳定性保证 #3"）。
 
 **phase1 范围**：mcp_ready 握手"简化"为"tcp 连接建立成功即认为 ready"，不强制 phase1 做完整握手 —— AionUi 侧 waitForMcpReady 超时 graceful resolve（aionui-audit §8 #11），所以后端 phase1 先不接 server 端等待，后续 P1 再补。
 
@@ -492,6 +501,7 @@ pub fn build_team_state(
 **phase1 决定不改 `aionui-conversation::service::build_task_options`**。
 
 **理由**（backend-audit §4.5 "备选"）：
+
 - team 有自己的 send 路径（`TeamSessionService.send_message_to_agent`），**phase1 先不复用 `POST /api/conversations/{id}/messages`**
 - `ensure_session` 已经把 `team_mcp_stdio_config` 落到 `conversation.extra`，factory 反序列化 `AcpBuildExtra` 自然带上该字段 —— conversation service 无需感知 team
 - 避免下游 crate 依赖上游
@@ -529,39 +539,39 @@ impl TeamSessionService {
 
 ## 12. 冻结的跨模块调用矩阵
 
-| Wave | 模块 | 读（依赖） | 写（调用） |
-|------|------|-----------|-----------|
-| 1 | D1 team_mcp types | — | — |
-| 1 | D2 AcpBuildExtra | D1 | — |
-| 1 | D3 bridge spec | D1 | — |
-| 1 | D4 两个新工具 | — | — |
-| 1 | D5 prompts 模板 | types | — |
-| 1 | D6 mcp-bridge 子命令 | D1 常量 | — |
-| 2 | D7 TeamSession 新方法 + send 路径接 wake | D3/D5/D8 | task_manager.send_message |
-| 2 | D8 scheduler 签名扩展（§6.5） | D5/D7 | mailbox.write (idle_notification) |
-| 2 | D9 TeamSessionService.ensure_session | D7 + IWorkerTaskManager + D3 | conversation_service.update_extra **【新增接口】** |
-| 2 | D10 session_new 注入 | D2/D3 | — |
-| 2 | D11 app 装配 | 全部 | — |
-| 3 | W3-D12 user-scope 过滤 | auth middleware | repo 查询附加 user_id 过滤 |
-| 3 | W3-D13 get_team agent 修复 | conversation_repo | service.update（回写 agents） |
-| 3 | W3-D14 rename 规范化 | scheduler 内存 | scheduler.rename_agent 改造 + prompt builder 读 renamed_agents |
-| 3 | W3-D15 conversation 复用 | conversation_service | conversation_service.update_extra |
-| 3 | W3-D16 send_message 识别 team_id | ConversationRow.extra + ITeamMessageRouter | team_router.route_agent_message（新 trait） |
-| 3 | W3-D17 MCP 帧 + 超时 | common 常量 | tokio::time::timeout 外层包裹 |
-| 4 | W4-D25 stream chunk 底座 | AcpAgentManager 内部 stream | broadcast::Sender 覆盖全部 chunk |
-| 4 | W4-D18 active_wakes + wake_timeouts | W4-D25 订阅 | scheduler 内部 state |
-| 4 | W4-D19 finalized_turns | 无新依赖 | scheduler 内部 state |
-| 4 | W4-D20 crash recovery | W4-D25 订阅 + W4-D18 锁 | task_manager.kill + mailbox.write + wake |
-| 4 | W4-D21 429 识别 | W4-D25 订阅 | set_status(Failed) |
-| 4 | W4-D22 inactivity watchdog | W4-D18 timer | mailbox.write(idle_notification) + wake |
-| 4 | W4-D23 add_agent_locks | 无 | service.add_agent 外层 lock |
-| 4 | W4-D24 mcp_ready 握手 | D6 bridge + mcp.protocol | server.notify_mcp_ready + wait_for_mcp_ready |
-| 5 | W5-D26 Guide MCP server | W3-D15 conversation 复用 + D4 tool descriptors | TeamSessionService.create_team |
-| 5 | W5-D27 Guide bridge 分支 | D6 主 bridge | 无 |
-| 5 | W5-D28 Guide prompt 注入 | D5a + D2 + W5-D26 | AcpAgentManager instructions |
-| 5 | W5-D29 真实 spawn | W3-D14/D15 + W4-D18/D23 + D3 bridge spec | TeamSessionService.add_agent + task_manager.kill/get_or_build_task + wake |
-| 5 | W5-D30 真 kill + shutdown 协议 | W5-D29 + W4-D18/D19 | task_manager.kill + 清 scheduler 内部 state |
-| 5 | W5-D31 WS 事件 | 全 Wave 5 生命周期点 | broadcaster.broadcast |
+| Wave | 模块                                     | 读（依赖）                                     | 写（调用）                                                                |
+| ---- | ---------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------- |
+| 1    | D1 team_mcp types                        | —                                              | —                                                                         |
+| 1    | D2 AcpBuildExtra                         | D1                                             | —                                                                         |
+| 1    | D3 bridge spec                           | D1                                             | —                                                                         |
+| 1    | D4 两个新工具                            | —                                              | —                                                                         |
+| 1    | D5 prompts 模板                          | types                                          | —                                                                         |
+| 1    | D6 mcp-bridge 子命令                     | D1 常量                                        | —                                                                         |
+| 2    | D7 TeamSession 新方法 + send 路径接 wake | D3/D5/D8                                       | task_manager.send_message                                                 |
+| 2    | D8 scheduler 签名扩展（§6.5）            | D5/D7                                          | mailbox.write (idle_notification)                                         |
+| 2    | D9 TeamSessionService.ensure_session     | D7 + IWorkerTaskManager + D3                   | conversation_service.update_extra **【新增接口】**                        |
+| 2    | D10 session_new 注入                     | D2/D3                                          | —                                                                         |
+| 2    | D11 app 装配                             | 全部                                           | —                                                                         |
+| 3    | W3-D12 user-scope 过滤                   | auth middleware                                | repo 查询附加 user_id 过滤                                                |
+| 3    | W3-D13 get_team agent 修复               | conversation_repo                              | service.update（回写 agents）                                             |
+| 3    | W3-D14 rename 规范化                     | scheduler 内存                                 | scheduler.rename_agent 改造 + prompt builder 读 renamed_agents            |
+| 3    | W3-D15 conversation 复用                 | conversation_service                           | conversation_service.update_extra                                         |
+| 3    | W3-D16 send_message 识别 team_id         | ConversationRow.extra + ITeamMessageRouter     | team_router.route_agent_message（新 trait）                               |
+| 3    | W3-D17 MCP 帧 + 超时                     | common 常量                                    | tokio::time::timeout 外层包裹                                             |
+| 4    | W4-D25 stream chunk 底座                 | AcpAgentManager 内部 stream                    | broadcast::Sender 覆盖全部 chunk                                          |
+| 4    | W4-D18 active_wakes + wake_timeouts      | W4-D25 订阅                                    | scheduler 内部 state                                                      |
+| 4    | W4-D19 finalized_turns                   | 无新依赖                                       | scheduler 内部 state                                                      |
+| 4    | W4-D20 crash recovery                    | W4-D25 订阅 + W4-D18 锁                        | task_manager.kill + mailbox.write + wake                                  |
+| 4    | W4-D21 429 识别                          | W4-D25 订阅                                    | set_status(Failed)                                                        |
+| 4    | W4-D22 inactivity watchdog               | W4-D18 timer                                   | mailbox.write(idle_notification) + wake                                   |
+| 4    | W4-D23 add_agent_locks                   | 无                                             | service.add_agent 外层 lock                                               |
+| 4    | W4-D24 mcp_ready 握手                    | D6 bridge + mcp.protocol                       | server.notify_mcp_ready + wait_for_mcp_ready                              |
+| 5    | W5-D26 Guide MCP server                  | W3-D15 conversation 复用 + D4 tool descriptors | TeamSessionService.create_team                                            |
+| 5    | W5-D27 Guide bridge 分支                 | D6 主 bridge                                   | 无                                                                        |
+| 5    | W5-D28 Guide prompt 注入                 | D5a + D2 + W5-D26                              | AcpAgentManager instructions                                              |
+| 5    | W5-D29 真实 spawn                        | W3-D14/D15 + W4-D18/D23 + D3 bridge spec       | TeamSessionService.add_agent + task_manager.kill/get_or_build_task + wake |
+| 5    | W5-D30 真 kill + shutdown 协议           | W5-D29 + W4-D18/D19                            | task_manager.kill + 清 scheduler 内部 state                               |
+| 5    | W5-D31 WS 事件                           | 全 Wave 5 生命周期点                           | broadcaster.broadcast                                                     |
 
 **冻结规则**：签名在对应 Wave 开工前 merge；后续 Wave 任何模块想改前一 Wave 已冻签名必须先开 issue 让 leader 裁决。
 
@@ -637,6 +647,7 @@ pub trait IConversationRepository {
 ```
 
 **反推规则**：
+
 - `slot_id` 取 `extra.team_mcp_stdio_config.slot_id`（W2 已写入）；无则取 `extra.slot_id`（兜底）
 - `role` 第一个命中的 conversation 假定为 Lead（按 created_at asc 排序），其余 Teammate
 - 反推后 `repo.update(team, {agents, updated_at})` 持久化
@@ -746,6 +757,7 @@ impl TeamSessionService {
 ```
 
 **错误语义**：
+
 - `conversation_id` 不存在 → `NotFound`
 - `conversation_id` 属于别的 user → `NotFound`（越权不暴露）
 - `conversation_id` 的 `extra.team_id` 已经等于别的 team_id → `BadRequest("conversation already belongs to another team")`
@@ -1019,6 +1031,7 @@ impl TeammateManager {
 ```
 
 **集成点**：
+
 - `TeamSession::on_agent_finish(conv_id, is_error)` 第一步 `if !scheduler.begin_finalize(conv_id) { return; }`
 - W4-D18 的 wake 成功发出消息后 `scheduler.clear_finalized_turn(conv_id)`
 
@@ -1448,6 +1461,7 @@ pub struct SpawnAgentRequest {
 ```
 
 **实现步骤**（对应 modules.md §9 W5-D29 职责 a..g）：
+
 1. 校验 caller 是 Lead（scheduler `TeamMcpServer::handle_spawn_agent` 已有）
 2. `normalize_name(req.name)` 不冲突（复用 W3-D14）
 3. `agent_type` 默认继承 caller_agent.backend；校验在 `SPAWN_BACKEND_WHITELIST`
@@ -1543,6 +1557,7 @@ impl TeammateManager {
 ```
 
 **`handle_shutdown_approved`**：
+
 ```rust
 // caller 就是 teammate 自己（from_slot_id）
 scheduler.remove_agent(caller_slot_id).await?;
@@ -1552,6 +1567,7 @@ scheduler.wake(&lead);
 ```
 
 **`handle_shutdown_rejected`**：
+
 ```rust
 let lead = scheduler.find_lead_slot_id().ok_or(...)?;
 mailbox.write(to=lead, content=format!("Teammate '{}' declined shutdown: {}", name, reason));
@@ -1601,18 +1617,18 @@ pub struct TeammateMessagePayload {
 
 **事件发出点分布**（phase 生命周期）：
 
-| Phase | 发出点 | 模块 |
-|-------|--------|------|
-| `tcp_ready` | `TeamMcpServer::start` 成功 bind | W5-D31 |
-| `tcp_error` | `TeamMcpServer::start` 绑定失败 | W5-D31 |
-| `session_injecting` | `ensure_session` 开始遍历 agents | W5-D31 |
-| `session_ready` | `ensure_session` 成功 insert sessions | W5-D31 |
-| `session_error` | `ensure_session` 失败 stop MCP | W5-D31 |
-| `load_failed` | `get_or_build_task` 失败 | W5-D31 |
-| `degraded` | `wait_for_mcp_ready` timeout | W5-D31（hook W4-D24） |
-| `config_write_failed` | `update_extra` 失败 | W5-D31 |
-| `mcp_tools_waiting` | bridge connect 前 | W5-D31 |
-| `mcp_tools_ready` | bridge 发送 `mcp_ready` 成功 | W5-D31 |
+| Phase                 | 发出点                                | 模块                  |
+| --------------------- | ------------------------------------- | --------------------- |
+| `tcp_ready`           | `TeamMcpServer::start` 成功 bind      | W5-D31                |
+| `tcp_error`           | `TeamMcpServer::start` 绑定失败       | W5-D31                |
+| `session_injecting`   | `ensure_session` 开始遍历 agents      | W5-D31                |
+| `session_ready`       | `ensure_session` 成功 insert sessions | W5-D31                |
+| `session_error`       | `ensure_session` 失败 stop MCP        | W5-D31                |
+| `load_failed`         | `get_or_build_task` 失败              | W5-D31                |
+| `degraded`            | `wait_for_mcp_ready` timeout          | W5-D31（hook W4-D24） |
+| `config_write_failed` | `update_extra` 失败                   | W5-D31                |
+| `mcp_tools_waiting`   | bridge connect 前                     | W5-D31                |
+| `mcp_tools_ready`     | bridge 发送 `mcp_ready` 成功          | W5-D31                |
 
 **`teammate_message` 发出点**：
 

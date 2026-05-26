@@ -19,9 +19,7 @@
       },
       "avatar": "📝",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "officecli-docx"
-      ],
+      "enabled_skills": ["officecli-docx"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/word-creator.{locale}.md",
@@ -72,9 +70,7 @@
       },
       "avatar": "📊",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "officecli-pptx"
-      ],
+      "enabled_skills": ["officecli-pptx"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/ppt-creator.{locale}.md",
@@ -125,9 +121,7 @@
       },
       "avatar": "📈",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "officecli-xlsx"
-      ],
+      "enabled_skills": ["officecli-xlsx"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/excel-creator.{locale}.md",
@@ -178,9 +172,7 @@
       },
       "avatar": "✨",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "morph-ppt"
-      ],
+      "enabled_skills": ["morph-ppt"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/morph-ppt.{locale}.md",
@@ -227,10 +219,7 @@
       },
       "avatar": "🎬",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "morph-ppt-3d",
-        "morph-ppt"
-      ],
+      "enabled_skills": ["morph-ppt-3d", "morph-ppt"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/morph-ppt-3d.{locale}.md",
@@ -271,9 +260,7 @@
       },
       "avatar": "🎯",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "officecli-pitch-deck"
-      ],
+      "enabled_skills": ["officecli-pitch-deck"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/pitch-deck-creator.{locale}.md",
@@ -324,9 +311,7 @@
       },
       "avatar": "📊",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "officecli-data-dashboard"
-      ],
+      "enabled_skills": ["officecli-data-dashboard"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/dashboard-creator.{locale}.md",
@@ -377,9 +362,7 @@
       },
       "avatar": "📚",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "officecli-academic-paper"
-      ],
+      "enabled_skills": ["officecli-academic-paper"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/academic-paper.{locale}.md",
@@ -430,9 +413,7 @@
       },
       "avatar": "💰",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "officecli-financial-model"
-      ],
+      "enabled_skills": ["officecli-financial-model"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/financial-model-creator.{locale}.md",
@@ -483,9 +464,7 @@
       },
       "avatar": "📺",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "star-office-helper"
-      ],
+      "enabled_skills": ["star-office-helper"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/star-office-helper.{locale}.md",
@@ -500,11 +479,7 @@
           "Fix Unauthorized on Star Office page",
           "Connect Aion preview to http://127.0.0.1:19000"
         ],
-        "zh-CN": [
-          "帮我安装 Star Office",
-          "排查 Star Office Unauthorized",
-          "把 Aion 预览连接到 http://127.0.0.1:19000"
-        ],
+        "zh-CN": ["帮我安装 Star Office", "排查 Star Office Unauthorized", "把 Aion 预览连接到 http://127.0.0.1:19000"],
         "ru-RU": [
           "Настрой Star Office на моём компьютере",
           "Исправь ошибку Unauthorized на странице Star Office",
@@ -536,10 +511,7 @@
       },
       "avatar": "🦞",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "openclaw-setup",
-        "aionui-webui-setup"
-      ],
+      "enabled_skills": ["openclaw-setup", "aionui-webui-setup"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/openclaw-setup.{locale}.md",
@@ -554,11 +526,7 @@
           "My OpenClaw isn't working, please diagnose the issue",
           "Configure Telegram channel for OpenClaw integration"
         ],
-        "zh-CN": [
-          "帮我一步步安装 OpenClaw",
-          "我的 OpenClaw 出问题了，请帮我诊断",
-          "为 OpenClaw 配置 Telegram 渠道"
-        ],
+        "zh-CN": ["帮我一步步安装 OpenClaw", "我的 OpenClaw 出问题了，请帮我诊断", "为 OpenClaw 配置 Telegram 渠道"],
         "ru-RU": [
           "Помоги мне установить OpenClaw пошагово",
           "Мой OpenClaw не работает, пожалуйста, диагностируй проблему",
@@ -590,13 +558,7 @@
       },
       "avatar": "cowork.svg",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "skill-creator",
-        "officecli-pptx",
-        "officecli-docx",
-        "pdf",
-        "officecli-xlsx"
-      ],
+      "enabled_skills": ["skill-creator", "officecli-pptx", "officecli-docx", "pdf", "officecli-xlsx"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/cowork.{locale}.md",
@@ -611,11 +573,7 @@
           "Automate the build and deployment process",
           "Extract and summarize key information from all PDF files"
         ],
-        "zh-CN": [
-          "分析当前项目结构并建议改进方案",
-          "自动化构建和部署流程",
-          "提取并总结所有 PDF 文件的关键信息"
-        ],
+        "zh-CN": ["分析当前项目结构并建议改进方案", "自动化构建和部署流程", "提取并总结所有 PDF 文件的关键信息"],
         "ru-RU": [
           "Проанализируй структуру текущего проекта и предложи улучшения",
           "Автоматизируй процесс сборки и развёртывания",
@@ -663,11 +621,7 @@
           "Make a coin collection game with obstacles",
           "Build a 3D maze exploration game"
         ],
-        "zh-CN": [
-          "创建一个带跳跃机制的 3D 平台游戏",
-          "制作一个带障碍物的金币收集游戏",
-          "构建一个 3D 迷宫探索游戏"
-        ],
+        "zh-CN": ["创建一个带跳跃机制的 3D 平台游戏", "制作一个带障碍物的金币收集游戏", "构建一个 3D 迷宫探索游戏"],
         "ru-RU": [
           "Создай 3D-платформер с механикой прыжков",
           "Сделай игру со сбором монет и препятствиями",
@@ -714,11 +668,7 @@
           "Create a color palette for a nature-themed website",
           "Design a dashboard interface for a SaaS product"
         ],
-        "zh-CN": [
-          "为金融科技移动应用设计现代登录页",
-          "创建自然主题网站的配色方案",
-          "为 SaaS 产品设计仪表板界面"
-        ],
+        "zh-CN": ["为金融科技移动应用设计现代登录页", "创建自然主题网站的配色方案", "为 SaaS 产品设计仪表板界面"],
         "ru-RU": [
           "Разработай современную страницу входа для мобильного финтех-приложения",
           "Создай цветовую палитру для сайта в природной тематике",
@@ -765,11 +715,7 @@
           "Break down the feature implementation into actionable steps",
           "Create a project plan for migrating to a new framework"
         ],
-        "zh-CN": [
-          "规划一个包含里程碑的全面重构任务",
-          "将功能实现拆分为可执行的步骤",
-          "创建迁移到新框架的项目计划"
-        ],
+        "zh-CN": ["规划一个包含里程碑的全面重构任务", "将功能实现拆分为可执行的步骤", "创建迁移到新框架的项目计划"],
         "ru-RU": [
           "Спланируй комплексную задачу рефакторинга с вехами",
           "Разбей реализацию функции на конкретные шаги",
@@ -852,10 +798,7 @@
       },
       "avatar": "📣",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "xiaohongshu-recruiter",
-        "x-recruiter"
-      ],
+      "enabled_skills": ["xiaohongshu-recruiter", "x-recruiter"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/social-job-publisher.{locale}.md",
@@ -907,9 +850,7 @@
       },
       "avatar": "🦞",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "moltbook"
-      ],
+      "enabled_skills": ["moltbook"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/moltbook.{locale}.md",
@@ -924,11 +865,7 @@
           "Post an interesting update to moltbook",
           "Check for new direct messages"
         ],
-        "zh-CN": [
-          "查看我的 moltbook 最新动态",
-          "在 moltbook 发布一条有趣的动态",
-          "检查是否有新私信"
-        ],
+        "zh-CN": ["查看我的 moltbook 最新动态", "在 moltbook 发布一条有趣的动态", "检查是否有新私信"],
         "ru-RU": [
           "Проверь мою ленту moltbook на наличие новых обновлений",
           "Опубликуй интересное обновление в moltbook",
@@ -961,9 +898,7 @@
       },
       "avatar": "📈",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "mermaid"
-      ],
+      "enabled_skills": ["mermaid"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/beautiful-mermaid.{locale}.md",
@@ -978,11 +913,7 @@
           "Create an API sequence diagram for payment processing",
           "Create a system architecture diagram"
         ],
-        "zh-CN": [
-          "绘制详细的用户登录认证流程图",
-          "创建支付处理的 API 时序图",
-          "创建系统架构图"
-        ],
+        "zh-CN": ["绘制详细的用户登录认证流程图", "创建支付处理的 API 时序图", "创建系统架构图"],
         "ru-RU": [
           "Нарисуй подробную блок-схему аутентификации при входе пользователя",
           "Создай sequence-диаграмму API для обработки платежей",
@@ -1014,9 +945,7 @@
       },
       "avatar": "📖",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "story-roleplay"
-      ],
+      "enabled_skills": ["story-roleplay"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/story-roleplay.{locale}.md",
@@ -1067,9 +996,7 @@
       },
       "avatar": "📋",
       "preset_agent_type": "aionrs",
-      "enabled_skills": [
-        "officecli-word-form"
-      ],
+      "enabled_skills": ["officecli-word-form"],
       "custom_skill_names": [],
       "disabled_builtin_skills": [],
       "rule_file": "rules/word-form-creator.{locale}.md",

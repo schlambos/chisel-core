@@ -365,24 +365,23 @@ impl AgentInstance {
                 let model_info = merge_model_info(sdk_info, cc_switch_info);
                 Ok(GetModelInfoResponse { model_info })
             }
-            Self::Aionrs(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => {
-                Ok(GetModelInfoResponse { model_info: None })
-            }
+            Self::Remote(m) => m.get_model().await,
+            Self::Aionrs(_) | Self::OpenClaw(_) | Self::Nanobot(_) => Ok(GetModelInfoResponse { model_info: None }),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_model().await,
         }
     }
 
-    /// Switch the active model. Unsupported for variants other than ACP —
-    /// returns a `BadRequest` so the caller can surface an actionable
-    /// error rather than silently no-op.
+    /// Switch the active model. Supported for ACP and Remote (OpenCode protocol).
+    /// Returns `BadRequest` for unsupported agent types.
     pub async fn set_model(&self, model_id: &str) -> Result<(), AppError> {
         if model_id.trim().is_empty() {
             return Err(AppError::BadRequest("model_id must not be empty".into()));
         }
         match self {
             Self::Acp(m) => m.set_model(model_id).await,
-            Self::Aionrs(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Err(AppError::BadRequest(
+            Self::Remote(m) => m.set_model(model_id).await,
+            Self::Aionrs(_) | Self::OpenClaw(_) | Self::Nanobot(_) => Err(AppError::BadRequest(
                 "Model switching is not supported for this agent type".into(),
             )),
             #[cfg(any(test, feature = "test-support"))]

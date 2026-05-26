@@ -122,6 +122,27 @@ impl ConversationService {
             .get_task(conversation_id)
             .ok_or_else(|| AppError::NotFound(format!("No active agent for conversation '{conversation_id}'")))
     }
+
+    pub(crate) async fn get_or_build_agent(&self, conversation_id: &str) -> Result<AgentInstance, AppError> {
+        if let Some(agent) = self.task_manager.get_task(conversation_id) {
+            return Ok(agent);
+        }
+
+        let row = self
+            .conversation_repo
+            .get(conversation_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+
+        let build_opts = self.build_task_options(&row)?;
+        let stored_workspace = build_opts.workspace.clone();
+        let agent = self.task_manager.get_or_build_task(conversation_id, build_opts).await?;
+
+        self.maybe_persist_workspace(conversation_id, &stored_workspace, agent.workspace())
+            .await?;
+
+        Ok(agent)
+    }
 }
 
 // ── Conversation CRUD ───────────────────────────────────────────────

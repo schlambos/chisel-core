@@ -8,15 +8,15 @@
 
 AionUi 参考实现里，MCP 分成两套独立服务：
 
-| | Team Guide MCP | Team 内部 MCP |
-|---|---|---|
-| 作用域 | 全局单例 | 每个 team session 一个 |
-| 谁调 | **solo agent**（还没建团的普通单聊 agent） | **团内 agent**（lead / teammate） |
-| 目的 | 把"单聊 → 建团"能力注入到普通 agent | 团内协作（发消息、任务板、spawn） |
-| 关键工具 | `aion_create_team`, `aion_list_models` | 10 个 `team_*` 工具 |
-| 触发入口 | Solo agent 判断需要团队时主动调 | Agent 启动时注入 stdio config，agent 自行调用 |
-| 传输 | stdio MCP（CLI 进程 <-> 后端） | TCP + JSON-RPC 2.0 |
-| 后端状态 | ⚠️ **完全没有实现** | 已有（8 个工具，缺 2 个） |
+|          | Team Guide MCP                             | Team 内部 MCP                                 |
+| -------- | ------------------------------------------ | --------------------------------------------- |
+| 作用域   | 全局单例                                   | 每个 team session 一个                        |
+| 谁调     | **solo agent**（还没建团的普通单聊 agent） | **团内 agent**（lead / teammate）             |
+| 目的     | 把"单聊 → 建团"能力注入到普通 agent        | 团内协作（发消息、任务板、spawn）             |
+| 关键工具 | `aion_create_team`, `aion_list_models`     | 10 个 `team_*` 工具                           |
+| 触发入口 | Solo agent 判断需要团队时主动调            | Agent 启动时注入 stdio config，agent 自行调用 |
+| 传输     | stdio MCP（CLI 进程 <-> 后端）             | TCP + JSON-RPC 2.0                            |
+| 后端状态 | ⚠️ **完全没有实现**                        | 已有（8 个工具，缺 2 个）                     |
 
 ---
 
@@ -24,27 +24,27 @@ AionUi 参考实现里，MCP 分成两套独立服务：
 
 ### 2.1 Team Guide MCP（⚠️ 后端未实现）
 
-| 工具 | 作用 |
-|------|------|
+| 工具               | 作用                                                                                                                              |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
 | `aion_create_team` | 将当前单聊升级为团队：新建 team，把当前 agent 作为 lead，并可带一批初始 teammate spec。返回 team_id、lead slot_id、会话迁移指令。 |
-| `aion_list_models` | 返回可用 backend × model 列表，供 agent 决定 spawn 谁 |
+| `aion_list_models` | 返回可用 backend × model 列表，供 agent 决定 spawn 谁                                                                             |
 
 **触发场景**：用户在单聊里说"帮我拉一个团完成 X"，solo agent 看到后调 `aion_create_team`，后端建团、自动把当前 conversation 绑定到 lead slot、启动 session。前端感知方式：WS 推 `team.created` 或类似事件（⚠️ 事件也未定义）。
 
 ### 2.2 Team 内部 MCP
 
-| # | 工具 | 后端已实现 | 权限 | 作用 |
-|---|------|:---:|------|------|
-| 1 | `team_send_message` | ✅ | 任意 agent | 给某个 slot_id 发消息；`to="*"` 广播（排除自己） |
-| 2 | `team_spawn_agent` | ⚠️ 空壳 | Lead only | 动态拉起新 teammate（backend 白名单 `claude / codex`） |
-| 3 | `team_task_create` | ✅ | 任意 agent | 新建任务 |
-| 4 | `team_task_update` | ✅ | 任意 agent | 改状态 / owner / 依赖 |
-| 5 | `team_task_list` | ✅ | 任意 agent | 列所有任务 |
-| 6 | `team_members` | ✅ | 任意 agent | 列当前成员+状态 |
-| 7 | `team_rename_agent` | ✅ | 任意 agent | 改 slot 显示名 |
-| 8 | `team_shutdown_agent` | ✅ | Lead only | 请求某 teammate 下线（写 `shutdown_request` 到对方 mailbox） |
-| 9 | `team_describe_assistant` | ❌ | — | 描述某个自定义 assistant 的能力/限制（供 spawn 时参考）|
-| 10 | `team_list_models` | ❌ | — | 团内版本的 `aion_list_models` |
+| #   | 工具                      | 后端已实现 | 权限       | 作用                                                         |
+| --- | ------------------------- | :--------: | ---------- | ------------------------------------------------------------ |
+| 1   | `team_send_message`       |     ✅     | 任意 agent | 给某个 slot_id 发消息；`to="*"` 广播（排除自己）             |
+| 2   | `team_spawn_agent`        |  ⚠️ 空壳   | Lead only  | 动态拉起新 teammate（backend 白名单 `claude / codex`）       |
+| 3   | `team_task_create`        |     ✅     | 任意 agent | 新建任务                                                     |
+| 4   | `team_task_update`        |     ✅     | 任意 agent | 改状态 / owner / 依赖                                        |
+| 5   | `team_task_list`          |     ✅     | 任意 agent | 列所有任务                                                   |
+| 6   | `team_members`            |     ✅     | 任意 agent | 列当前成员+状态                                              |
+| 7   | `team_rename_agent`       |     ✅     | 任意 agent | 改 slot 显示名                                               |
+| 8   | `team_shutdown_agent`     |     ✅     | Lead only  | 请求某 teammate 下线（写 `shutdown_request` 到对方 mailbox） |
+| 9   | `team_describe_assistant` |     ❌     | —          | 描述某个自定义 assistant 的能力/限制（供 spawn 时参考）      |
+| 10  | `team_list_models`        |     ❌     | —          | 团内版本的 `aion_list_models`                                |
 
 后端缺 9、10。9 和 10 主要服务于 lead 做 spawn 决策，缺失会让 lead 只能按硬编码白名单 `["claude","codex"]` 盲选。
 
@@ -69,16 +69,19 @@ AionUi 参考实现里，MCP 分成两套独立服务：
 ### 3.2 JSON-RPC 2.0
 
 请求：
+
 ```json
 { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {...} }
 ```
 
 响应成功：
+
 ```json
 { "jsonrpc": "2.0", "id": 1, "result": {...} }
 ```
 
 响应错误：
+
 ```json
 { "jsonrpc": "2.0", "id": 1, "error": { "code": -32602, "message": "..." } }
 ```
@@ -88,6 +91,7 @@ AionUi 参考实现里，MCP 分成两套独立服务：
 **第一条请求必须是 `initialize`**，在此之前其它 method 全返回 `INVALID_REQUEST (-32600)`。
 
 请求：
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -101,6 +105,7 @@ AionUi 参考实现里，MCP 分成两套独立服务：
 ```
 
 响应：
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -117,12 +122,12 @@ AionUi 参考实现里，MCP 分成两套独立服务：
 
 ### 3.4 标准 method
 
-| method | 说明 |
-|--------|------|
-| `initialize` | 见上 |
-| `notifications/initialized` | 客户端无 id 通知，server 回空 result |
-| `tools/list` | 返回 `{ "tools": [ToolDescriptor, ...] }` |
-| `tools/call` | `params = { "name": "...", "arguments": {...} }`，返回 `{ "content": [{"type":"text","text":"..."}], "isError"?: true }` |
+| method                      | 说明                                                                                                                     |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `initialize`                | 见上                                                                                                                     |
+| `notifications/initialized` | 客户端无 id 通知，server 回空 result                                                                                     |
+| `tools/list`                | 返回 `{ "tools": [ToolDescriptor, ...] }`                                                                                |
+| `tools/call`                | `params = { "name": "...", "arguments": {...} }`，返回 `{ "content": [{"type":"text","text":"..."}], "isError"?: true }` |
 
 未知 method → `METHOD_NOT_FOUND (-32601)`。
 Tool 业务错误 **不走** JSON-RPC error，而是返回 `result.isError=true` + 文本内容（MCP 惯例）。
@@ -137,13 +142,13 @@ Tool 业务错误 **不走** JSON-RPC error，而是返回 `result.isError=true`
 
 后端有两套独立的 MCP 注入机制，team MCP 走第二种：
 
-| | 全局 MCP | 运行时 MCP（team 用这个） |
-|---|---|---|
-| 来源 | 用户在设置里配的 MCP servers（DB `mcp_servers` 表） | team session 启动时动态生成 |
-| 注入时机 | agent 首次创建 session 时（`session/new`） | team session 启动后，写入 conversation extra 或追加到 agent 启动参数 |
-| 管理模块 | `aionui-mcp` crate（`build_session_mcp_servers()`） | `aionui-team` crate（`TeamMcpStdioConfig`） |
-| 生命周期 | 跟用户配置走，持久化 | 跟 team session 走，session 停止即失效 |
-| 类型 | stdio / http / sse（取决于 ACP backend 能力） | 仅 stdio（TCP bridge） |
+|          | 全局 MCP                                            | 运行时 MCP（team 用这个）                                            |
+| -------- | --------------------------------------------------- | -------------------------------------------------------------------- |
+| 来源     | 用户在设置里配的 MCP servers（DB `mcp_servers` 表） | team session 启动时动态生成                                          |
+| 注入时机 | agent 首次创建 session 时（`session/new`）          | team session 启动后，写入 conversation extra 或追加到 agent 启动参数 |
+| 管理模块 | `aionui-mcp` crate（`build_session_mcp_servers()`） | `aionui-team` crate（`TeamMcpStdioConfig`）                          |
+| 生命周期 | 跟用户配置走，持久化                                | 跟 team session 走，session 停止即失效                               |
+| 类型     | stdio / http / sse（取决于 ACP backend 能力）       | 仅 stdio（TCP bridge）                                               |
 
 AionUi 参考实现中，两套在 agent 建 session 时合并注入（`userServers + presetServers + teamServer`）。后端需要在 `ConversationService.send_message` → agent factory → `session/new` 路径上做同样的合并。
 
@@ -178,14 +183,15 @@ agent 新进程 (session_id=def)    ← rebuild，带 team MCP config
 
 **复用现有 API，零侵入其他业务**：
 
-| 操作 | 现有 API | 位置 |
-|------|----------|------|
-| 杀旧进程 | `IWorkerTaskManager::kill(conv_id, reason)` | `crates/aionui-ai-agent/src/task_manager.rs` |
-| 重建进程 | `IWorkerTaskManager::get_or_build_task(conv_id, opts)` | 同上 |
+| 操作     | 现有 API                                               | 位置                                         |
+| -------- | ------------------------------------------------------ | -------------------------------------------- |
+| 杀旧进程 | `IWorkerTaskManager::kill(conv_id, reason)`            | `crates/aionui-ai-agent/src/task_manager.rs` |
+| 重建进程 | `IWorkerTaskManager::get_or_build_task(conv_id, opts)` | 同上                                         |
 
 不需要给 `IWorkerTaskManager` 加新方法（如 `skipCache`）。`kill` 从 DashMap 移除 + 杀进程，`get_or_build_task` 发现不存在就用 factory 重建——两步组合即 restart。
 
 **session resume**（agent 侧）：
+
 - Claude/CodeBuddy：`session/new` + `_meta.claudeCode.options.resume: true` + 旧 `sessionId`
 - Codex：`session/load` + 旧 `sessionId`
 - 其他：`session/new` + `resumeSessionId`
@@ -193,6 +199,7 @@ agent 新进程 (session_id=def)    ← rebuild，带 team MCP config
 resume 逻辑已在 `AcpAgentManager::session_resume_and_send`（`acp_agent.rs`）实现。rebuild 后的第一条 `send_message` 自动走 resume 路径——**不需要 team 做额外处理**。
 
 **边界隔离**：
+
 - `kill` + `get_or_build_task` 是通用 agent 生命周期 API，单聊也在用
 - team 只是调用方之一，不修改这两个方法的任何逻辑
 - 普通单聊不会触发这个组合——只有 team session 启动时才会对 team agent 执行 kill+rebuild
@@ -241,17 +248,17 @@ agent 可调 team_* 工具
 
 **需要改动的文件**（最小侵入）：
 
-| 文件 | 改动 | 影响范围 |
-|------|------|----------|
-| `aionui-ai-agent/src/types.rs` | `AcpBuildExtra` 加 `#[serde(default)] team_mcp_stdio_config: Option<TeamMcpStdioConfig>` | 旧 extra 无此字段 → `None`，零影响 |
-| `aionui-ai-agent/src/acp_agent.rs :: session_new()` | 如果 `team_mcp_stdio_config.is_some()`，构造 `mcpServers` 数组追加到 payload | 单聊 config 为 `None` → 不追加，零影响 |
-| `aionui-mcp/src/session_injection.rs` | team MCP 作为额外一项 append 到 `build_session_mcp_servers()` 结果里（或在 `session_new` 里直接 merge） | 视实现选择 |
+| 文件                                                | 改动                                                                                                    | 影响范围                               |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| `aionui-ai-agent/src/types.rs`                      | `AcpBuildExtra` 加 `#[serde(default)] team_mcp_stdio_config: Option<TeamMcpStdioConfig>`                | 旧 extra 无此字段 → `None`，零影响     |
+| `aionui-ai-agent/src/acp_agent.rs :: session_new()` | 如果 `team_mcp_stdio_config.is_some()`，构造 `mcpServers` 数组追加到 payload                            | 单聊 config 为 `None` → 不追加，零影响 |
+| `aionui-mcp/src/session_injection.rs`               | team MCP 作为额外一项 append 到 `build_session_mcp_servers()` 结果里（或在 `session_new` 里直接 merge） | 视实现选择                             |
 
 **稳定性保证**：
 
 1. **`Option` + `#[serde(default)]`**：旧 conversation extra 缺这个字段 → 反序列化为 `None` → 不注入 → 单聊完全不受影响
 2. **`mcpServers` 是 ACP 标准字段**：ACP CLI 本来就支持（claude / codex 都有 `mcpCapabilities.stdio`），不是自定义协议
-3. **bridge 崩溃不影响 agent**：ACP CLI 对 MCP server stdio pipe broken 有容错，tool 调用返回 error，agent 继续工作只是 team_* 工具不可用
+3. **bridge 崩溃不影响 agent**：ACP CLI 对 MCP server stdio pipe broken 有容错，tool 调用返回 error，agent 继续工作只是 team\_\* 工具不可用
 4. **全局 MCP 和 team MCP 合并**：`session/new` 的 `mcpServers` 是数组，全局 MCP servers（用户设置里的）和 team MCP server 并列放入即可，互不干扰
 
 ### 4.5 stdio config 结构
@@ -275,6 +282,7 @@ aionui-backend mcp-bridge
 ```
 
 agent CLI spawn 时的 MCP server 配置：
+
 ```json
 {
   "name": "aionui-team",
@@ -289,6 +297,7 @@ agent CLI spawn 时的 MCP server 配置：
 ```
 
 bridge 职责（代码量极小）：
+
 1. 从 env 读 `TEAM_MCP_PORT` / `TEAM_MCP_TOKEN` / `TEAM_AGENT_SLOT_ID`
 2. stdin/stdout 端：接 agent CLI 的 MCP client（JSON-RPC 2.0 over stdio）
 3. TCP 端：连 `127.0.0.1:<port>`，帧格式 4 字节大端长度 + JSON
@@ -301,24 +310,24 @@ bridge 职责（代码量极小）：
 
 ## 5. 后端 vs AionUi GAP 分析
 
-| # | 能力 | AionUi | 后端 | 备注 |
-|---|------|:---:|:---:|------|
-| 1 | Team 内 MCP TCP server | ✅ | ✅ | `TeamMcpServer` 已就绪 |
-| 2 | JSON-RPC 2.0 + initialize 鉴权 | ✅ | ✅ | 协议一致 |
-| 3 | `team_send_message` | ✅ | ✅ | 行为一致 |
-| 4 | `team_task_*` 4 件套 | ✅ | ✅ | 四个全齐 |
-| 5 | `team_members` | ✅ | ✅ | |
-| 6 | `team_rename_agent` | ✅ | ✅ | |
-| 7 | `team_shutdown_agent` | ✅ | ✅ | |
-| 8 | `team_spawn_agent` 工具声明 | ✅ | ✅ | 工具能调 |
-| 9 | `team_spawn_agent` 真实执行 | ✅ | ⚠️ **空壳** | `SpawnAgent` action 只打 log，不创 agent |
-| 10 | `team_describe_assistant` | ✅ | ❌ | 缺 |
-| 11 | `team_list_models` | ✅ | ❌ | 缺 |
-| 12 | Team Guide MCP (单例) | ✅ | ❌ | **完全没做** |
-| 13 | `aion_create_team` | ✅ | ❌ | 无法从单聊升级到团 |
-| 14 | `aion_list_models` (全局) | ✅ | ❌ | 无 |
-| 15 | stdio bridge 二进制 | ✅ | ❌ | 只有数据结构 |
-| 16 | MCP 写 mailbox 后主动 wake | ✅ | ❌ | 导致 agent-to-agent 消息可能悬停（见 internals.md bug #2）|
+| #   | 能力                           | AionUi |    后端     | 备注                                                       |
+| --- | ------------------------------ | :----: | :---------: | ---------------------------------------------------------- |
+| 1   | Team 内 MCP TCP server         |   ✅   |     ✅      | `TeamMcpServer` 已就绪                                     |
+| 2   | JSON-RPC 2.0 + initialize 鉴权 |   ✅   |     ✅      | 协议一致                                                   |
+| 3   | `team_send_message`            |   ✅   |     ✅      | 行为一致                                                   |
+| 4   | `team_task_*` 4 件套           |   ✅   |     ✅      | 四个全齐                                                   |
+| 5   | `team_members`                 |   ✅   |     ✅      |                                                            |
+| 6   | `team_rename_agent`            |   ✅   |     ✅      |                                                            |
+| 7   | `team_shutdown_agent`          |   ✅   |     ✅      |                                                            |
+| 8   | `team_spawn_agent` 工具声明    |   ✅   |     ✅      | 工具能调                                                   |
+| 9   | `team_spawn_agent` 真实执行    |   ✅   | ⚠️ **空壳** | `SpawnAgent` action 只打 log，不创 agent                   |
+| 10  | `team_describe_assistant`      |   ✅   |     ❌      | 缺                                                         |
+| 11  | `team_list_models`             |   ✅   |     ❌      | 缺                                                         |
+| 12  | Team Guide MCP (单例)          |   ✅   |     ❌      | **完全没做**                                               |
+| 13  | `aion_create_team`             |   ✅   |     ❌      | 无法从单聊升级到团                                         |
+| 14  | `aion_list_models` (全局)      |   ✅   |     ❌      | 无                                                         |
+| 15  | stdio bridge 二进制            |   ✅   |     ❌      | 只有数据结构                                               |
+| 16  | MCP 写 mailbox 后主动 wake     |   ✅   |     ❌      | 导致 agent-to-agent 消息可能悬停（见 internals.md bug #2） |
 
 ### 5.1 GAP 影响面
 
@@ -377,19 +386,19 @@ Scheduler.try_wake(target) ──── 目前只有单聊 API 触发时才会�
 
 ## 7. 关键代码索引
 
-| 内容 | 位置 |
-|------|------|
-| TCP server 启停 | `crates/aionui-team/src/mcp/server.rs :: TeamMcpServer` |
-| 握手 + 鉴权 | `crates/aionui-team/src/mcp/server.rs :: handle_initialize` |
-| Tool dispatch | `crates/aionui-team/src/mcp/server.rs :: dispatch_tool` |
-| Tool descriptor（tools/list 返回） | `crates/aionui-team/src/mcp/tools.rs :: all_tool_descriptors` |
-| Backend 白名单 | `crates/aionui-team/src/mcp/tools.rs :: SPAWN_BACKEND_WHITELIST` |
-| 帧 + JSON-RPC 类型 | `crates/aionui-team/src/mcp/protocol.rs` |
-| Stdio config 结构 | `crates/aionui-team/src/mcp/bridge.rs :: TeamMcpStdioConfig` |
-| Session 与 server 生命周期绑定 | `crates/aionui-team/src/session.rs :: TeamSession::start` |
-| Scheduler 对 MCP action 的执行 | `crates/aionui-team/src/scheduler.rs :: execute_action` |
-| `SpawnAgent` 空壳位置 | `crates/aionui-team/src/scheduler.rs`（搜 `"spawn_agent action — requires TeamSession to complete"`）|
-| Mailbox 写入 | `crates/aionui-team/src/scheduler.rs :: handle_send_message` |
+| 内容                               | 位置                                                                                                  |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| TCP server 启停                    | `crates/aionui-team/src/mcp/server.rs :: TeamMcpServer`                                               |
+| 握手 + 鉴权                        | `crates/aionui-team/src/mcp/server.rs :: handle_initialize`                                           |
+| Tool dispatch                      | `crates/aionui-team/src/mcp/server.rs :: dispatch_tool`                                               |
+| Tool descriptor（tools/list 返回） | `crates/aionui-team/src/mcp/tools.rs :: all_tool_descriptors`                                         |
+| Backend 白名单                     | `crates/aionui-team/src/mcp/tools.rs :: SPAWN_BACKEND_WHITELIST`                                      |
+| 帧 + JSON-RPC 类型                 | `crates/aionui-team/src/mcp/protocol.rs`                                                              |
+| Stdio config 结构                  | `crates/aionui-team/src/mcp/bridge.rs :: TeamMcpStdioConfig`                                          |
+| Session 与 server 生命周期绑定     | `crates/aionui-team/src/session.rs :: TeamSession::start`                                             |
+| Scheduler 对 MCP action 的执行     | `crates/aionui-team/src/scheduler.rs :: execute_action`                                               |
+| `SpawnAgent` 空壳位置              | `crates/aionui-team/src/scheduler.rs`（搜 `"spawn_agent action — requires TeamSession to complete"`） |
+| Mailbox 写入                       | `crates/aionui-team/src/scheduler.rs :: handle_send_message`                                          |
 
 ---
 

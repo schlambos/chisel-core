@@ -17,72 +17,72 @@
 
 ### 基础能力（Wave 1–3）
 
-| 能力 | 状态 | 说明 |
-|------|:---:|------|
-| Team CRUD（建/删/改名/加减 agent） | ✅ | |
-| 用户→agent 发消息（走单聊 API） | ✅ | `POST /api/conversations/{conv_id}/messages` |
-| Agent 间 MCP 通信（team_send_message 等工具） | ✅ | HTTP transport，agent 主动连接 |
-| Agent wake 机制（发消息后 agent 自动响应） | ✅ | |
-| 建团自动起 session（MCP 自动注入） | ✅ | `POST /api/teams` 后自动 ensure_session，前端无需额外调用 |
-| WS 事件推送（team.agent.status 等） | ✅ | |
-| user_id 权限隔离（list/get/remove 按用户过滤） | ✅ | Wave 3 |
-| 单聊→建团（conversation 复用） | ✅ | agents 里传 `conversation_id` 可复用 |
-| rename 规范化 | ✅ | Wave 3 |
-| MCP 协议加固（64MB 帧 + 300s 超时） | ✅ | Wave 3 |
+| 能力                                           | 状态 | 说明                                                      |
+| ---------------------------------------------- | :--: | --------------------------------------------------------- |
+| Team CRUD（建/删/改名/加减 agent）             |  ✅  |                                                           |
+| 用户→agent 发消息（走单聊 API）                |  ✅  | `POST /api/conversations/{conv_id}/messages`              |
+| Agent 间 MCP 通信（team_send_message 等工具）  |  ✅  | HTTP transport，agent 主动连接                            |
+| Agent wake 机制（发消息后 agent 自动响应）     |  ✅  |                                                           |
+| 建团自动起 session（MCP 自动注入）             |  ✅  | `POST /api/teams` 后自动 ensure_session，前端无需额外调用 |
+| WS 事件推送（team.agent.status 等）            |  ✅  |                                                           |
+| user_id 权限隔离（list/get/remove 按用户过滤） |  ✅  | Wave 3                                                    |
+| 单聊→建团（conversation 复用）                 |  ✅  | agents 里传 `conversation_id` 可复用                      |
+| rename 规范化                                  |  ✅  | Wave 3                                                    |
+| MCP 协议加固（64MB 帧 + 300s 超时）            |  ✅  | Wave 3                                                    |
 
 ### Wave 4 — MCP 传输 + 回合健壮性
 
-| 模块 | 状态 | 说明 |
-|------|:---:|------|
-| MCP 注入（HTTP transport） | ✅ | commit 6c334a9（替代 stdio bridge） |
-| D19a finalize dedup 存储 | ✅ | 5s 去重表 |
-| D19b finalize dedup 接入 | ✅ | `on_agent_finish` 已用上 |
-| D20a crash 检测 | ✅ | `detect_crash` 纯函数 |
-| D20b-1 crash testament | ✅ | 写遗言到 lead mailbox |
-| D20b-2 crash handler 编排 | ✅ | `handle_agent_crash`（testament + kill + wake leader） |
-| D20c leader-crash 分支 | ✅ | |
-| D21 429 限流识别 | ✅ | `is_rate_limited` |
-| D22 inactivity watchdog | 🔄 | handler 写完待合（scheduler 有 pending 注释） |
-| D23 add_agent 并发锁 | ✅ | |
-| D24a MCP ready 协议类型 | ✅ | |
-| D24b/c stdio ready 握手 | ~~SKIPPED~~ | HTTP transport 不需要 |
-| D25a AgentStreamChunk enum | ✅ | |
-| D25b `subscribe_stream()` trait 默认方法 | ✅ | |
-| D25c-1 broadcast channel 挂在 AcpAgentManager | ✅ | |
-| D25c-2 ACP dispatch 各点 emit | ✅ | `subscribe_stream` 能收到 Text / Thought / ToolUse / Finish / Error |
-| D18b-1 wake_timeouts 存储 | ✅ | |
-| D18b-2 `arm_wake_timeout` 任务 | ✅ | |
-| D18c wake lock 接入 | ✅ | |
+| 模块                                          |    状态     | 说明                                                                |
+| --------------------------------------------- | :---------: | ------------------------------------------------------------------- |
+| MCP 注入（HTTP transport）                    |     ✅      | commit 6c334a9（替代 stdio bridge）                                 |
+| D19a finalize dedup 存储                      |     ✅      | 5s 去重表                                                           |
+| D19b finalize dedup 接入                      |     ✅      | `on_agent_finish` 已用上                                            |
+| D20a crash 检测                               |     ✅      | `detect_crash` 纯函数                                               |
+| D20b-1 crash testament                        |     ✅      | 写遗言到 lead mailbox                                               |
+| D20b-2 crash handler 编排                     |     ✅      | `handle_agent_crash`（testament + kill + wake leader）              |
+| D20c leader-crash 分支                        |     ✅      |                                                                     |
+| D21 429 限流识别                              |     ✅      | `is_rate_limited`                                                   |
+| D22 inactivity watchdog                       |     🔄      | handler 写完待合（scheduler 有 pending 注释）                       |
+| D23 add_agent 并发锁                          |     ✅      |                                                                     |
+| D24a MCP ready 协议类型                       |     ✅      |                                                                     |
+| D24b/c stdio ready 握手                       | ~~SKIPPED~~ | HTTP transport 不需要                                               |
+| D25a AgentStreamChunk enum                    |     ✅      |                                                                     |
+| D25b `subscribe_stream()` trait 默认方法      |     ✅      |                                                                     |
+| D25c-1 broadcast channel 挂在 AcpAgentManager |     ✅      |                                                                     |
+| D25c-2 ACP dispatch 各点 emit                 |     ✅      | `subscribe_stream` 能收到 Text / Thought / ToolUse / Finish / Error |
+| D18b-1 wake_timeouts 存储                     |     ✅      |                                                                     |
+| D18b-2 `arm_wake_timeout` 任务                |     ✅      |                                                                     |
+| D18c wake lock 接入                           |     ✅      |                                                                     |
 
 ### Wave 5 — spawn / shutdown / Guide MCP
 
-| 模块 | 状态 | 说明 |
-|------|:---:|------|
-| D26a GuideMcpServer 骨架 | ✅ | 应用级单例，暴露 `aion_create_team` / `aion_list_models` 给 solo agent |
-| D26b-1 `aion_create_team` 参数解析 | ✅ | |
-| D26b-2 `handle_aion_create_team` handler | ✅ | 调 service + 返回结构化 |
-| D26c `aion_list_models` 处理器 | ✅ | |
-| D28a `is_team_capable_backend` 白名单 | ✅ | `guide/capability.rs`，白名单 `claude / codex / gemini / aionrs` |
-| D28b Guide prompt 注入（solo 互斥） | ✅ | solo agent 首轮消息注入 Team Guide prompt |
-| D28c Guide MCP guard（solo 互斥） | ✅ | team 模式下不注入 Guide |
-| D29a-1 `SpawnAgentRequest` + 方法骨架 | ✅ | |
-| D29a-2 caller role==Lead 校验 | ✅ | |
-| D29a-3 name normalize + 唯一性 | ✅ | |
-| D29a-4 backend 白名单校验 | ✅ | |
-| **D29b spawn_agent 真实落地** | ✅ | **已合入** — conversation 创建 + slot 分配 + kill/warmup agent |
-| D29d-1 `team.agent.spawned` WS 事件 | ✅ | spawn 成功后广播 |
-| D29e MCP dispatch 接通 session | ✅ | `exec_spawn_agent` 改成调 `TeamSession::spawn_agent` |
-| D30a-1 shutdown_approved/rejected 字符串拦截 | ✅ | |
-| D30a-2 `team.agent.shutdown` WS 事件 | ✅ | shutdown_approved 后广播通知前端 |
-| D30b `shutdown_rejected:<reason>` 处理 | ✅ | `mcp/server.rs` 已拦截 |
-| D30c `shutdown_agent` target=Lead 校验 | ✅ | 拒绝关 lead |
-| D30d-1 `remove_agent` 真 kill agent 进程 | ✅ | |
-| D30d-2 `remove_agent` 清 active_wakes / wake_timeouts / finalized_turns | ✅ | |
-| D30d-3 `remove_agent` 测试加强 | ✅ | 二次 remove → AgentNotFound + 精确 slot 匹配 |
-| D31a TeamMcpPhase enum + WS payload 类型 | ✅ | 10-phase，见下文 |
-| D31b-1 `team.mcpStatus` TCP 就绪广播 | ✅ | `TcpReady` / `TcpError` |
-| D31b-2 service-layer `team.mcpStatus` 广播 | ✅ | 5 点广播（LoadFailed/SessionError/Injecting/ConfigWriteFailed/Ready） |
-| e2e smoke（真实链路） | ✅ | 4 个 scenario 全绿：REST→MCP→Agent→DB |
+| 模块                                                                    | 状态 | 说明                                                                   |
+| ----------------------------------------------------------------------- | :--: | ---------------------------------------------------------------------- |
+| D26a GuideMcpServer 骨架                                                |  ✅  | 应用级单例，暴露 `aion_create_team` / `aion_list_models` 给 solo agent |
+| D26b-1 `aion_create_team` 参数解析                                      |  ✅  |                                                                        |
+| D26b-2 `handle_aion_create_team` handler                                |  ✅  | 调 service + 返回结构化                                                |
+| D26c `aion_list_models` 处理器                                          |  ✅  |                                                                        |
+| D28a `is_team_capable_backend` 白名单                                   |  ✅  | `guide/capability.rs`，白名单 `claude / codex / gemini / aionrs`       |
+| D28b Guide prompt 注入（solo 互斥）                                     |  ✅  | solo agent 首轮消息注入 Team Guide prompt                              |
+| D28c Guide MCP guard（solo 互斥）                                       |  ✅  | team 模式下不注入 Guide                                                |
+| D29a-1 `SpawnAgentRequest` + 方法骨架                                   |  ✅  |                                                                        |
+| D29a-2 caller role==Lead 校验                                           |  ✅  |                                                                        |
+| D29a-3 name normalize + 唯一性                                          |  ✅  |                                                                        |
+| D29a-4 backend 白名单校验                                               |  ✅  |                                                                        |
+| **D29b spawn_agent 真实落地**                                           |  ✅  | **已合入** — conversation 创建 + slot 分配 + kill/warmup agent         |
+| D29d-1 `team.agent.spawned` WS 事件                                     |  ✅  | spawn 成功后广播                                                       |
+| D29e MCP dispatch 接通 session                                          |  ✅  | `exec_spawn_agent` 改成调 `TeamSession::spawn_agent`                   |
+| D30a-1 shutdown_approved/rejected 字符串拦截                            |  ✅  |                                                                        |
+| D30a-2 `team.agent.shutdown` WS 事件                                    |  ✅  | shutdown_approved 后广播通知前端                                       |
+| D30b `shutdown_rejected:<reason>` 处理                                  |  ✅  | `mcp/server.rs` 已拦截                                                 |
+| D30c `shutdown_agent` target=Lead 校验                                  |  ✅  | 拒绝关 lead                                                            |
+| D30d-1 `remove_agent` 真 kill agent 进程                                |  ✅  |                                                                        |
+| D30d-2 `remove_agent` 清 active_wakes / wake_timeouts / finalized_turns |  ✅  |                                                                        |
+| D30d-3 `remove_agent` 测试加强                                          |  ✅  | 二次 remove → AgentNotFound + 精确 slot 匹配                           |
+| D31a TeamMcpPhase enum + WS payload 类型                                |  ✅  | 10-phase，见下文                                                       |
+| D31b-1 `team.mcpStatus` TCP 就绪广播                                    |  ✅  | `TcpReady` / `TcpError`                                                |
+| D31b-2 service-layer `team.mcpStatus` 广播                              |  ✅  | 5 点广播（LoadFailed/SessionError/Injecting/ConfigWriteFailed/Ready）  |
+| e2e smoke（真实链路）                                                   |  ✅  | 4 个 scenario 全绿：REST→MCP→Agent→DB                                  |
 
 ## MCP Transport 变更（Wave 4）
 
@@ -100,25 +100,25 @@
 
 agent 连接 MCP server 后，以下工具对 agent 可见且可调用：
 
-| 工具 | 状态 | 说明 |
-|------|:---:|------|
-| `team_send_message` | ✅ Working | agent 间发消息；新增 `shutdown_approved` / `shutdown_rejected:<reason>` 字符串语义（Wave 5 D30a/b） |
-| `team_spawn_agent` | ✅ Working | caller=Lead 校验 + backend 白名单 + name normalize + 真实创建 conversation + slot 分配 + agent 启动。MCP dispatch 已接通 |
-| `team_task_create` | ✅ Working | 创建任务 |
-| `team_task_update` | ✅ Working | 更新任务状态 |
-| `team_task_list` | ✅ Working | 列出所有任务 |
-| `team_members` | ✅ Working | 列出当前成员 |
-| `team_rename_agent` | ✅ Working | 改名 |
-| `team_shutdown_agent` | ✅ Working | Lead 请求 teammate 下线；**已加 target=Lead 校验**（D30c，拒绝关 lead） |
+| 工具                  |    状态    | 说明                                                                                                                     |
+| --------------------- | :--------: | ------------------------------------------------------------------------------------------------------------------------ |
+| `team_send_message`   | ✅ Working | agent 间发消息；新增 `shutdown_approved` / `shutdown_rejected:<reason>` 字符串语义（Wave 5 D30a/b）                      |
+| `team_spawn_agent`    | ✅ Working | caller=Lead 校验 + backend 白名单 + name normalize + 真实创建 conversation + slot 分配 + agent 启动。MCP dispatch 已接通 |
+| `team_task_create`    | ✅ Working | 创建任务                                                                                                                 |
+| `team_task_update`    | ✅ Working | 更新任务状态                                                                                                             |
+| `team_task_list`      | ✅ Working | 列出所有任务                                                                                                             |
+| `team_members`        | ✅ Working | 列出当前成员                                                                                                             |
+| `team_rename_agent`   | ✅ Working | 改名                                                                                                                     |
+| `team_shutdown_agent` | ✅ Working | Lead 请求 teammate 下线；**已加 target=Lead 校验**（D30c，拒绝关 lead）                                                  |
 
 ### Team Guide MCP（全局 / Wave 5 新增，落地中）
 
 > 这是 **solo agent**（普通单聊）用来"单聊 → 自动建团"的独立 MCP server，与上面 per-team MCP 不是同一个。
 
-| 工具 | 状态 | 说明 |
-|------|:---:|------|
-| `aion_create_team` | ✅ | handler 已落地（D26b-2），调 service.create_team + 返回结构化 JSON |
-| `aion_list_models` | ✅ | D26c handler 已合入，返回可用 backend + models 列表 |
+| 工具               | 状态 | 说明                                                               |
+| ------------------ | :--: | ------------------------------------------------------------------ |
+| `aion_create_team` |  ✅  | handler 已落地（D26b-2），调 service.create_team + 返回结构化 JSON |
+| `aion_list_models` |  ✅  | D26c handler 已合入，返回可用 backend + models 列表                |
 
 前端一般不直接感知这个 MCP；但当用户在单聊里说"帮我起一个团队"时，agent 会执行以下流程（由 Team Guide prompt 强制）：
 
@@ -146,8 +146,8 @@ Lead 调 `team_shutdown_agent` 后，teammate 可以在下一个回合里用 `te
 
 ### 新 WS 事件（Wave 5 D31）
 
-| Event | 何时触发 | Payload 关键字段 |
-|-------|---------|----------------|
+| Event            | 何时触发                                                  | Payload 关键字段                                                       |
+| ---------------- | --------------------------------------------------------- | ---------------------------------------------------------------------- |
 | `team.mcpStatus` | per-team MCP server 生命周期阶段变化（当前只广播 TCP 层） | `team_id, slot_id (TCP 阶段为空), phase, port?, error?, server_count?` |
 
 `phase` 是 `TeamMcpPhase` 枚举（snake_case）：
@@ -204,10 +204,10 @@ POST /api/teams
 
 ## 必须走 REST 的操作
 
-| 动作 | 端点 |
-|------|------|
+| 动作                           | 端点                                     |
+| ------------------------------ | ---------------------------------------- |
 | 建 team / 加 agent / 改名 / 删 | `/api/teams/**`（见 [api.md](./api.md)） |
-| 关闭 session | `DELETE /api/teams/{id}/session` |
+| 关闭 session                   | `DELETE /api/teams/{id}/session`         |
 
 > **注意**：`POST /api/teams` 建团后，后端**自动**起 session 并注入 MCP。前端不需要单独调 `POST /api/teams/{id}/session`。但如果后端重启了，需要在进入 team 页时调一次 `POST /api/teams/{id}/session`（幂等）重新激活。
 
@@ -227,14 +227,14 @@ Team 模块不再提供 `POST /api/teams/{id}/messages` 或 `POST /api/teams/{id
 
 后端通过 `/ws` 推，event name 格式 `team.agent.<action>`：
 
-| Event | 何时触发 | Payload 关键字段 |
-|-------|---------|----------------|
-| `team.agent.status` | Agent 状态迁移（Idle/Working/...） | `team_id, slot_id, status` |
-| `team.agent.spawned` | 新增 agent（REST 或 MCP spawn） | `team_id, agent` |
-| `team.agent.shutdown` | Teammate 批准下线（remove 之前） | `team_id, slot_id` |
-| `team.agent.removed` | 移除 agent（kill + 清状态完成后） | `team_id, slot_id` |
-| `team.agent.renamed` | 改名 | `team_id, slot_id, name` |
-| `team.mcpStatus` | per-team MCP server 生命周期 | `team_id, slot_id?, phase, port?, error?, server_count?` |
+| Event                 | 何时触发                           | Payload 关键字段                                         |
+| --------------------- | ---------------------------------- | -------------------------------------------------------- |
+| `team.agent.status`   | Agent 状态迁移（Idle/Working/...） | `team_id, slot_id, status`                               |
+| `team.agent.spawned`  | 新增 agent（REST 或 MCP spawn）    | `team_id, agent`                                         |
+| `team.agent.shutdown` | Teammate 批准下线（remove 之前）   | `team_id, slot_id`                                       |
+| `team.agent.removed`  | 移除 agent（kill + 清状态完成后）  | `team_id, slot_id`                                       |
+| `team.agent.renamed`  | 改名                               | `team_id, slot_id, name`                                 |
+| `team.mcpStatus`      | per-team MCP server 生命周期       | `team_id, slot_id?, phase, port?, error?, server_count?` |
 
 Payload 类型定义在 `crates/aionui-api-types/src/team.rs`（含 `TeamMcpPhase`、`TeamMcpStatusPayload`、`TeammateMessagePayload`）。**HTTP 没有状态轮询端点**，想知道 agent 现在在干啥只能靠 WS。
 

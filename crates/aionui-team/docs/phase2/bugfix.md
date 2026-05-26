@@ -17,6 +17,7 @@ Leader prompt (`lead.txt`) 规则 9/10 和 87-88 行要求先提方案等确认�
 ### 修复
 
 **双保险：**
+
 1. `crates/aionui-team/src/guide/server.rs:156` — send_message 追加 `[SYSTEM NOTE]` 明确指示直接 spawn
 2. `crates/aionui-team/src/prompts/prompt_templates/lead.txt` — 规则 9/10/88 增加 SYSTEM NOTE 例外
 
@@ -52,6 +53,7 @@ Team 成员 conversation extra 里没有 `session_mode`。Claude Code 默认 def
 ### 修复
 
 在 team 成员创建时强制写入 `"session_mode": "bypassPermissions"` 到 conversation extra：
+
 - `crates/aionui-team/src/service.rs` — `rebuild_agent_processes` 的 patch 加 `session_mode`
 - `crates/aionui-team/src/session.rs` — `attach_spawned_agent_process_bg` 的 patch 加 `session_mode`
 
@@ -153,38 +155,38 @@ WebSocket 事件 payload 中增加 `msg_id` 字段，供前端去重。前端应
 
 ## 已修复的问题汇总
 
-| # | Issue | Commit/状态 | Status |
-|---|-------|--------|--------|
-| 1 | spawn_agent 缺 finish_subscriber | PR #140 | ✅ |
-| 2 | finalize_turn 去重窗口丢事件 | PR #140 | ✅ |
-| 3 | wake/finish 竞态 | PR #140 | ✅ |
-| 4 | 单聊转群聊会话复用 | bcc89b2 | ✅ |
-| 5 | guide server user_id | bcc89b2 | ✅ |
-| 6 | MCP 工具权限白名单 | bcc89b2 | ✅ |
-| 7 | MCP bridge 缺 JSON-RPC id → 死锁 | bcc89b2 | ✅ |
-| 8 | Guide HTTP 大 body 读取不完整 | a3b6cb9 | ✅ |
-| 9 | spawn_agent warmup 阻塞 MCP 响应 | 9f31504 | ✅ |
-| 10 | Leader 不 spawn（prompt 规则） | 本次未提交 | ✅ |
-| 11 | 成员 session_mode 缺失卡权限 | 本次未提交 | ✅ |
-| 12 | 后端无 team.created WebSocket 事件 | 本次未提交 | ✅ |
-| 13 | Leader 无限 working（wake_lock 竞态） | 本次未提交 | ✅ |
-| 14 | Leader 输出不可见（缺 StreamRelay） | 本次未提交 | ✅ |
-| 15 | shutdown_request 未 wake 目标 | 本次未提交 | ✅ |
-| 16 | ensure_session 竞态端口错配 | 本次未提交 | ✅ |
-| 17 | Guide MCP 偶发连接失败 | 本次未提交 | ✅ |
-| 18 | 成员面板消息重复（mirror + WS 双写） | 本次未提交 | ✅ |
-| 19 | conversation.listChanged 缺失 | 本次未提交 | ✅ |
-| 20 | leader mirror 跳过（成员给 leader 消息不可见） | 本次未提交 | ✅ |
+| #   | Issue                                          | Commit/状态 | Status |
+| --- | ---------------------------------------------- | ----------- | ------ |
+| 1   | spawn_agent 缺 finish_subscriber               | PR #140     | ✅     |
+| 2   | finalize_turn 去重窗口丢事件                   | PR #140     | ✅     |
+| 3   | wake/finish 竞态                               | PR #140     | ✅     |
+| 4   | 单聊转群聊会话复用                             | bcc89b2     | ✅     |
+| 5   | guide server user_id                           | bcc89b2     | ✅     |
+| 6   | MCP 工具权限白名单                             | bcc89b2     | ✅     |
+| 7   | MCP bridge 缺 JSON-RPC id → 死锁               | bcc89b2     | ✅     |
+| 8   | Guide HTTP 大 body 读取不完整                  | a3b6cb9     | ✅     |
+| 9   | spawn_agent warmup 阻塞 MCP 响应               | 9f31504     | ✅     |
+| 10  | Leader 不 spawn（prompt 规则）                 | 本次未提交  | ✅     |
+| 11  | 成员 session_mode 缺失卡权限                   | 本次未提交  | ✅     |
+| 12  | 后端无 team.created WebSocket 事件             | 本次未提交  | ✅     |
+| 13  | Leader 无限 working（wake_lock 竞态）          | 本次未提交  | ✅     |
+| 14  | Leader 输出不可见（缺 StreamRelay）            | 本次未提交  | ✅     |
+| 15  | shutdown_request 未 wake 目标                  | 本次未提交  | ✅     |
+| 16  | ensure_session 竞态端口错配                    | 本次未提交  | ✅     |
+| 17  | Guide MCP 偶发连接失败                         | 本次未提交  | ✅     |
+| 18  | 成员面板消息重复（mirror + WS 双写）           | 本次未提交  | ✅     |
+| 19  | conversation.listChanged 缺失                  | 本次未提交  | ✅     |
+| 20  | leader mirror 跳过（成员给 leader 消息不可见） | 本次未提交  | ✅     |
 
 ---
 
 ## 未修复/待前端处理
 
-| # | Issue | 状态 |
-|---|-------|------|
-| 21 | 前端不自动跳转/刷新边栏 | 后端就绪，前端 issue #2734 |
-| 22 | 成员消息气泡缺头像+名称 | 后端已提供数据，前端 issue #2734 |
-| 23 | 单聊第一条消息重复 | 前端 bug，issue #2734 |
+| #   | Issue                   | 状态                             |
+| --- | ----------------------- | -------------------------------- |
+| 21  | 前端不自动跳转/刷新边栏 | 后端就绪，前端 issue #2734       |
+| 22  | 成员消息气泡缺头像+名称 | 后端已提供数据，前端 issue #2734 |
+| 23  | 单聊第一条消息重复      | 前端 bug，issue #2734            |
 
 ---
 

@@ -22,6 +22,7 @@ hex.workspace = true
 dirs.workspace = true
 getrandom.workspace = true
 regex.workspace = true
+reqwest.workspace = true
 dashmap.workspace = true
 futures-util.workspace = true
 serde.workspace = true
@@ -35,7 +36,14 @@ aion-protocol.workspace = true
 aion-config.workspace = true
 aion-mcp.workspace = true
 uuid.workspace = true
-agent-client-protocol = { version = "0.11.1", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage", "unstable_session_fork", "unstable_session_additional_directories", "unstable_session_resume"] }
+agent-client-protocol = { version = "0.11.1", features = [
+  "unstable_session_model",
+  "unstable_session_close",
+  "unstable_session_usage",
+  "unstable_session_fork",
+  "unstable_session_additional_directories",
+  "unstable_session_resume",
+] }
 tokio-util = { version = "0.7", features = ["compat"] }
 rusqlite.workspace = true
 

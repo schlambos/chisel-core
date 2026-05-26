@@ -13,6 +13,7 @@ Project-specific rules and conventions for AI assistants and contributors.
 `AcpAgentManager` (in `crates/aionui-ai-agent/src/acp_agent.rs`) is already large and carries multiple overlapping state holders (e.g. `runtime_snapshot`, `state`, `preferred_mode`, `config`). New fields tend to duplicate semantics that `AcpRuntimeSnapshot` or `AcpState` already model, which fragments the source of truth and makes resume/new paths diverge.
 
 Before adding a field:
+
 1. Can the value live in `AcpRuntimeSnapshot`? (runtime/session-scoped state, including user-selected current_mode/current_model/config_selections)
 2. Can it be derived from existing fields (`metadata`, `config`, `runtime_snapshot`, `state`)?
 3. Can it be persisted via `acp_session.session_config` + `preload_persisted` instead of a new in-memory field?
@@ -23,6 +24,7 @@ Only after exhausting the above — and explicitly documenting why each option i
 ### Logging
 
 When changing a critical path, explicitly evaluate whether logs are needed for development diagnosis and production troubleshooting. Add structured logs with appropriate levels:
+
 - `debug` for detailed, high-frequency internal flow that helps verify behavior and diagnose issues in development
 - `info` for low-volume lifecycle boundaries useful in production
 - `warn` for malformed or unexpected data that is safely handled
@@ -47,6 +49,7 @@ Cargo workspace organized in four layers: Foundation → Capability → Domain �
 ### Domain Crate Structure
 
 Every domain crate must follow:
+
 - `lib.rs` — module exports only, no business logic
 - `routes.rs` — export `domain_routes(state) -> Router`, handlers do request/response transformation only
 - `service.rs` — sole location for business logic, must not import axum
@@ -145,6 +148,7 @@ Supports the same arguments as `git push` (e.g. `just push -u origin feat/branch
 **Happy Path (Critical Paths)**
 
 Every new or modified feature must have integration tests covering its normal flow. Critical paths that always require test coverage:
+
 - Authentication flow (login, token refresh, permission checks)
 - Message sending and retrieval
 - Agent session creation and interaction
@@ -154,6 +158,7 @@ Every new or modified feature must have integration tests covering its normal fl
 **Bad Path (Error Paths)**
 
 New endpoints or business logic must include tests for these scenarios:
+
 - Invalid input (missing fields, wrong types, oversized content)
 - Resource not found (404)
 - Insufficient permissions (unauthenticated, accessing another user's resources)
@@ -164,6 +169,7 @@ Bad path tests must assert specific error codes or error messages — asserting 
 **Security Tests**
 
 Endpoints involving authentication, authorization, or data isolation must include security tests:
+
 - Unauthenticated requests are rejected (401)
 - Cross-user data isolation (user A cannot access user B's resources)
 - State-changing requests are rejected when CSRF token is missing or invalid
@@ -172,6 +178,7 @@ Endpoints involving authentication, authorization, or data isolation must includ
 **WebSocket Event Tests**
 
 New WebSocket events must verify:
+
 - The event is emitted after the correct business operation
 - Event payload conforms to `WebSocketMessage<T>` structure
 - Events are only delivered to authorized subscribers (no leakage to unrelated users)
@@ -187,17 +194,20 @@ When a test fails, do NOT modify the test to make it pass. First determine:
 3. **Uncertain** → stop, trace back the change, clarify before proceeding
 
 Prohibited:
+
 - ❌ Deleting failing tests to "fix" the problem
 - ❌ Weakening specific assertions to vague ones (e.g., `assert_eq!(status, 201)` → `assert!(status.is_success())`)
 
 ## Verification Strategy
 
 > ⚠️ **When to run what:**
+>
 > - During development: only test the crate you're working on → `cargo test -p aionui-<crate>`
 > - After implementation complete: full verification → `cargo test --workspace`
 > - Do NOT run `cargo test --workspace` at the start of a task.
 >
 > ⚠️ **Performance:**
+>
 > - `cargo clippy --workspace` takes several minutes — use `run_in_background: true`.
 > - `cargo test --workspace` takes 10+ minutes. MUST use `run_in_background: true` when calling via Bash tool, otherwise it will timeout.
 > - `cargo clippy -p aionui-<crate>` and `cargo test -p aionui-<crate>` typically complete in under 1 minute.

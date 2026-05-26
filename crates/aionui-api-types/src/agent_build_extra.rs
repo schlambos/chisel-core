@@ -70,6 +70,13 @@ pub struct OpenClawBuildExtra {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteBuildExtra {
     pub remote_agent_id: String,
+    /// Initial model selection forwarded from the Guid (New Chat) page.
+    /// Format matches what `RemoteAgentManager::set_model` expects:
+    /// `"<providerID>::<modelID>"` for OpenCode.  Optional — when absent,
+    /// the manager falls back to its existing default-discovery path on
+    /// first send.
+    #[serde(default)]
+    pub current_model_id: Option<String>,
 }
 
 /// Aionrs-specific fields extracted from `extra` in build task options.

@@ -1,17 +1,21 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use aionui_common::{
     AgentKillReason, AgentType, AppError, Confirmation, ConversationStatus, ErrorChain, RemoteAgentStatus, TimestampMs,
 };
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_util::{SinkExt, StreamExt};
+use reqwest::header::AUTHORIZATION;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
 use crate::agent_runtime::AgentRuntime;
-use crate::protocol::events::AgentStreamEvent;
+use crate::protocol::events::{AgentStreamEvent, FinishEventData, StartEventData, TextEventData, ThinkingEventData};
 use crate::types::SendMessageData;
 
 /// Internal mutable state for the Remote agent.
@@ -21,23 +25,45 @@ struct RemoteState {
     has_messages: bool,
     approval_memory: HashMap<String, bool>,
     connection_status: RemoteAgentStatus,
+    opencode_session_id: Option<String>,
+    /// Track which part IDs are reasoning (thinking) parts.
+    reasoning_parts: HashSet<String>,
+    /// The desired model for the next prompt (opencode format: `{"providerID":"...","id":"...","variant":"..."}`).
+    desired_model: Option<Value>,
 }
 
 /// Configuration for connecting to a remote agent.
 #[derive(Debug, Clone)]
 pub struct RemoteAgentConfig {
     pub remote_agent_id: String,
+    pub protocol: String,
     pub url: String,
     pub auth_type: String,
     pub auth_token: Option<String>,
     pub allow_insecure: bool,
 }
 
-/// Manages a Remote Agent via WebSocket connection.
+fn is_opencode_protocol(protocol: &str) -> bool {
+    protocol == "opencode"
+}
+
+fn normalize_base_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
+}
+
+fn build_auth_header(auth_type: &str, auth_token: Option<&str>) -> Option<String> {
+    let token = auth_token.filter(|t| !t.is_empty())?;
+    let value = match auth_type {
+        "bearer" | "Bearer" => format!("Bearer {token}"),
+        "password" | "Password" => format!("Basic {}", BASE64.encode(format!("opencode:{token}"))),
+        _ => return None,
+    };
+    Some(value)
+}
+
+/// Manages a Remote Agent via WebSocket or HTTP/SSE transport.
 ///
-/// Remote agents communicate over WebSocket, reusing the OpenClaw Gateway
-/// connection protocol. The Rust implementation owns the WebSocket connection
-/// directly (no CLI subprocess).
+/// OpenClaw / ACP protocols use WebSocket. OpenCode uses HTTP POST + SSE.
 pub struct RemoteAgentManager {
     runtime: AgentRuntime,
     remote_config: RemoteAgentConfig,
@@ -53,10 +79,12 @@ pub struct RemoteAgentManager {
     >,
     /// Handle to the WebSocket reader task.
     _reader_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// HTTP client for OpenCode transport.
+    http_client: reqwest::Client,
 }
 
 impl RemoteAgentManager {
-    /// Create a new Remote agent by establishing a WebSocket connection.
+    /// Create a new Remote agent.
     pub async fn new(
         conversation_id: String,
         workspace: String,
@@ -64,7 +92,12 @@ impl RemoteAgentManager {
     ) -> Result<Self, AppError> {
         let runtime = AgentRuntime::new(conversation_id, workspace, 256);
 
-        let manager = Self {
+        let http_client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(remote_config.allow_insecure)
+            .build()
+            .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))?;
+
+        Ok(Self {
             runtime,
             remote_config,
             state: RwLock::new(RemoteState {
@@ -73,16 +106,306 @@ impl RemoteAgentManager {
                 has_messages: false,
                 approval_memory: HashMap::new(),
                 connection_status: RemoteAgentStatus::Unknown,
+                opencode_session_id: None,
+                reasoning_parts: HashSet::new(),
+                desired_model: None,
             }),
             ws_sink: Mutex::new(None),
             _reader_handle: Mutex::new(None),
-        };
-
-        Ok(manager)
+            http_client,
+        })
     }
 
-    /// Connect to the remote WebSocket endpoint and start the reader task.
+    /// Connect to the remote endpoint.
+    /// OpenCode uses HTTP health check + SSE reader; other protocols use WebSocket.
     pub async fn connect(self: &Arc<Self>) -> Result<(), AppError> {
+        if is_opencode_protocol(&self.remote_config.protocol) {
+            self.connect_opencode().await
+        } else {
+            self.connect_ws().await
+        }
+    }
+
+    async fn connect_opencode(self: &Arc<Self>) -> Result<(), AppError> {
+        let base_url = normalize_base_url(&self.remote_config.url);
+
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+
+        let mut req = self
+            .http_client
+            .get(format!("{base_url}/global/health"))
+            .timeout(Duration::from_secs(10));
+        if let Some(ref h) = auth_header {
+            req = req.header(AUTHORIZATION, h.as_str());
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("OpenCode health check failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(AppError::Internal(format!(
+                "OpenCode health check returned {}",
+                resp.status()
+            )));
+        }
+
+        {
+            let mut state = self.state.write().await;
+            state.connection_status = RemoteAgentStatus::Connected;
+        }
+
+        info!(
+            conversation_id = %self.runtime.conversation_id(),
+            base_url = %base_url,
+            "Connected to OpenCode server"
+        );
+
+        let this = Arc::clone(self);
+        let event_url = format!("{base_url}/event");
+        let client = self.http_client.clone();
+        let auth = auth_header.clone();
+        let conversation_id = self.runtime.conversation_id().to_string();
+        let workspace = self.runtime.workspace().to_string();
+
+        let reader_handle = tokio::spawn(async move {
+            let mut req_builder = client
+                .get(&event_url)
+                .query(&[("directory", workspace.as_str())])
+                .header("Accept", "text/event-stream");
+            if let Some(ref h) = auth {
+                req_builder = req_builder.header(AUTHORIZATION, h.as_str());
+            }
+
+            let resp = match req_builder.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(
+                        conversation_id = %conversation_id,
+                        error = %ErrorChain(&e),
+                        "OpenCode SSE connection failed"
+                    );
+                    return;
+                }
+            };
+
+            let mut stream = resp.bytes_stream();
+            let mut buffer = String::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(chunk) => {
+                        let text = String::from_utf8_lossy(&chunk);
+                        buffer.push_str(&text);
+
+                        while let Some(pos) = buffer.find("\n\n") {
+                            let event_text = buffer[..pos].to_string();
+                            buffer = buffer[pos + 2..].to_string();
+
+                            for line in event_text.lines() {
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    this.handle_opencode_sse_event(data).await;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            conversation_id = %conversation_id,
+                            error = %ErrorChain(&e),
+                            "OpenCode SSE stream error"
+                        );
+                        break;
+                    }
+                }
+            }
+
+            let mut state = this.state.write().await;
+            state.connection_status = RemoteAgentStatus::Error;
+            if this.runtime.status() == Some(ConversationStatus::Running) {
+                this.runtime.transition_to(ConversationStatus::Finished);
+            }
+        });
+
+        *self._reader_handle.lock().await = Some(reader_handle);
+
+        Ok(())
+    }
+
+    async fn handle_opencode_sse_event(&self, data: &str) {
+        let raw: Value = match serde_json::from_str(data) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let event_type = match raw.get("type").and_then(|v| v.as_str()) {
+            Some(t) => t,
+            None => return,
+        };
+
+        let props = match raw.get("properties") {
+            Some(p) => p,
+            None => return,
+        };
+
+        let session_id = props.get("sessionID").and_then(|v| v.as_str()).map(String::from);
+
+        match event_type {
+            "session.status" => {
+                let status_type = props.get("status").and_then(|v| v.get("type")).and_then(|v| v.as_str());
+                match status_type {
+                    Some("busy") => {
+                        self.runtime.bump_activity();
+                        self.runtime.emit(AgentStreamEvent::Start(StartEventData {
+                            session_id: session_id.clone(),
+                        }));
+                        {
+                            let mut state = self.state.write().await;
+                            if let Some(ref sid) = session_id {
+                                state.session_key = Some(sid.clone());
+                            }
+                            state.connection_status = RemoteAgentStatus::Connected;
+                        }
+                    }
+                    Some("idle") => {
+                        self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
+                            session_id: session_id.clone(),
+                        }));
+                        self.runtime.transition_to(ConversationStatus::Finished);
+                    }
+                    _ => {}
+                }
+            }
+            "session.idle" => {
+                self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
+                    session_id: session_id.clone(),
+                }));
+                self.runtime.transition_to(ConversationStatus::Finished);
+            }
+            "session.error" => {
+                // OpenCode sends errors as { name: "...", data: { message: "..." } }
+                // in the "error" field of properties.
+                let message = props
+                    .get("error")
+                    .and_then(|e| {
+                        e.get("data")
+                            .and_then(|d| d.get("message"))
+                            .or_else(|| e.get("message"))
+                    })
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        // Last resort: the error may be a plain string
+                        props.get("error").and_then(|v| v.as_str())
+                    })
+                    .unwrap_or("OpenCode session error");
+                warn!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    error = message,
+                    "OpenCode session error"
+                );
+                self.runtime
+                    .emit(AgentStreamEvent::Error(crate::protocol::events::ErrorEventData {
+                        message: message.to_string(),
+                        code: None,
+                    }));
+                self.runtime.transition_to(ConversationStatus::Finished);
+            }
+            "session.next.model.switched" => {
+                let provider_id = props
+                    .get("model")
+                    .and_then(|m| m.get("providerID"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("opencode-go");
+                let model_id = props
+                    .get("model")
+                    .and_then(|m| m.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let variant = props
+                    .get("model")
+                    .and_then(|m| m.get("variant"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default");
+                let display_label = format!("{provider_id}/{model_id}");
+                let normalized = json!({
+                    "modelID": model_id,
+                    "providerID": provider_id,
+                    "variant": variant,
+                });
+                {
+                    let mut state = self.state.write().await;
+                    state.desired_model = Some(normalized);
+                }
+                self.runtime.emit(AgentStreamEvent::AcpModelInfo(json!({
+                    "current_model_id": model_id,
+                    "current_model_label": display_label,
+                })));
+            }
+            "session.next.agent.switched" => {
+                let agent = props.get("agent").and_then(|v| v.as_str()).unwrap_or("build");
+                self.runtime.emit(AgentStreamEvent::AcpModeInfo(json!({"mode": agent})));
+            }
+            "message.part.delta" => {
+                let field = match props.get("field").and_then(|v| v.as_str()) {
+                    Some(f) => f,
+                    None => return,
+                };
+                let delta = match props.get("delta").and_then(|v| v.as_str()) {
+                    Some(d) => d,
+                    None => return,
+                };
+                if field != "text" {
+                    return;
+                }
+                let part_id = props.get("partID").and_then(|v| v.as_str()).unwrap_or("");
+                let is_reasoning = self.state.read().await.reasoning_parts.contains(part_id);
+                if is_reasoning {
+                    self.runtime.emit(AgentStreamEvent::Thinking(ThinkingEventData {
+                        content: delta.to_string(),
+                        subject: None,
+                        duration: None,
+                        status: None,
+                    }));
+                } else {
+                    self.runtime.emit(AgentStreamEvent::Text(TextEventData {
+                        content: delta.to_string(),
+                    }));
+                }
+            }
+            "message.part.updated" => {
+                if let Some(part) = props.get("part") {
+                    if let Some(part_type) = part.get("type").and_then(|v| v.as_str()) {
+                        if part_type == "reasoning" {
+                            if let Some(part_id) = part.get("id").and_then(|v| v.as_str()) {
+                                self.state.write().await.reasoning_parts.insert(part_id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            "message.updated" => {
+                if let Some(info) = props.get("info") {
+                    if info.get("finish").and_then(|v| v.as_str()) == Some("stop")
+                        && info.get("role").and_then(|v| v.as_str()) == Some("assistant")
+                    {
+                        self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
+                            session_id: session_id.clone(),
+                        }));
+                    }
+                }
+            }
+            _ => {
+                debug!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    event_type = event_type,
+                    "Unhandled OpenCode event"
+                );
+            }
+        }
+    }
+
+    async fn connect_ws(self: &Arc<Self>) -> Result<(), AppError> {
         let url = &self.remote_config.url;
 
         let (ws_stream, _response) = tokio_tungstenite::connect_async(url).await.map_err(|e| {
@@ -93,21 +416,18 @@ impl RemoteAgentManager {
         info!(
             conversation_id = %self.runtime.conversation_id(),
             url = url,
-            "Connected to remote agent"
+            "Connected to remote agent via WebSocket"
         );
 
         let (sink, stream) = ws_stream.split();
 
-        // Store the sink for sending messages
         *self.ws_sink.lock().await = Some(sink);
 
-        // Update connection status
         {
             let mut state = self.state.write().await;
             state.connection_status = RemoteAgentStatus::Connected;
         }
 
-        // Start reader task
         let this = Arc::clone(self);
         let reader_handle = tokio::spawn(async move {
             this.run_ws_reader(stream).await;
@@ -116,6 +436,25 @@ impl RemoteAgentManager {
         *self._reader_handle.lock().await = Some(reader_handle);
 
         Ok(())
+    }
+
+    /// Fetch available models from OpenCode and emit them to the frontend.
+    async fn emit_model_info(&self) {
+        let models = self.fetch_opencode_models().await.unwrap_or_default();
+        info!(
+            conversation_id = %self.runtime.conversation_id(),
+            model_count = models.len(),
+            "Emitting OpenCode model info"
+        );
+        if models.is_empty() {
+            return;
+        }
+        let info = json!({
+            "current_model_id": null,
+            "current_model_label": null,
+            "available_models": models,
+        });
+        self.runtime.emit(AgentStreamEvent::AcpModelInfo(info));
     }
 
     /// Read messages from the WebSocket and process them.
@@ -159,7 +498,6 @@ impl RemoteAgentManager {
             }
         }
 
-        // Connection closed — update connection_status and ensure terminal agent status.
         {
             let mut state = self.state.write().await;
             state.connection_status = RemoteAgentStatus::Error;
@@ -238,9 +576,218 @@ impl RemoteAgentManager {
         })
     }
 
+    async fn opencode_create_session(&self, base_url: &str) -> Result<String, AppError> {
+        let url = format!("{base_url}/session");
+        let workspace = self.runtime.workspace();
+
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+
+        let mut req = self
+            .http_client
+            .post(&url)
+            .query(&[("directory", workspace)])
+            .header("Content-Type", "application/json")
+            .body("{}")
+            .timeout(Duration::from_secs(10));
+
+        if let Some(ref h) = auth_header {
+            req = req.header(AUTHORIZATION, h.as_str());
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("OpenCode create session failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(AppError::Internal(format!(
+                "OpenCode create session returned {status}: {body_text}"
+            )));
+        }
+
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Internal(format!("OpenCode create session response was not JSON: {e}")))?;
+
+        body.get("id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| AppError::Internal(format!("OpenCode create session response missing id: {body}")))
+    }
+
+    /// Send a message via OpenCode HTTP prompt_async.
+    async fn opencode_send(&self, content: &str) -> Result<(), AppError> {
+        let base_url = normalize_base_url(&self.remote_config.url);
+
+        let session_id = {
+            let mut state = self.state.write().await;
+            if state.opencode_session_id.is_none() {
+                let id = self.opencode_create_session(&base_url).await?;
+                state.opencode_session_id = Some(id);
+            }
+            state.opencode_session_id.clone().unwrap()
+        };
+
+        let url = format!("{base_url}/session/{session_id}/prompt_async");
+        let workspace = self.runtime.workspace();
+
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+
+        let model = self.state.read().await.desired_model.clone();
+
+        let mut body = json!({
+            "parts": [{"type": "text", "text": content}]
+        });
+        if let Some(ref m) = model {
+            if let Some(id) = m.get("id") {
+                body["model"] = json!({
+                    "providerID": m.get("providerID").and_then(|v| v.as_str()).unwrap_or("opencode-go"),
+                    "modelID": id,
+                    "variant": m.get("variant").and_then(|v| v.as_str()).unwrap_or("default"),
+                });
+            } else {
+                body["model"] = m.clone();
+            }
+        }
+
+        let mut req = self
+            .http_client
+            .post(&url)
+            .query(&[("directory", workspace)])
+            .json(&body)
+            .timeout(Duration::from_secs(120));
+
+        if let Some(ref h) = auth_header {
+            req = req.header(AUTHORIZATION, h.as_str());
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("OpenCode prompt_async failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(AppError::Internal(format!(
+                "OpenCode prompt_async returned {status}: {body_text}"
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Get the connection status.
     pub async fn connection_status(&self) -> RemoteAgentStatus {
         self.state.read().await.connection_status
+    }
+
+    /// Set the desired model for OpenCode protocol.
+    pub async fn set_model(&self, model_id: &str) -> Result<(), AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Ok(());
+        }
+        // model_id may be "providerID::modelID" (from fetch_opencode_models)
+        // or just "modelID" (from other sources).
+        let (provider_id, actual_model_id) = if let Some((p, m)) = model_id.split_once("::") {
+            (p.to_string(), m.to_string())
+        } else {
+            let existing_provider = self
+                .state
+                .read()
+                .await
+                .desired_model
+                .as_ref()
+                .and_then(|m| m.get("providerID"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("opencode-go")
+                .to_string();
+            (existing_provider, model_id.to_string())
+        };
+        let mut state = self.state.write().await;
+        state.desired_model = Some(json!({
+            "modelID": actual_model_id,
+            "providerID": provider_id,
+            "variant": "default"
+        }));
+        Ok(())
+    }
+
+    /// Get the current model info for display.
+    pub async fn get_model(&self) -> Result<aionui_api_types::GetModelInfoResponse, AppError> {
+        let guard = self.state.read().await;
+        let current = guard.desired_model.as_ref();
+        let available = self.fetch_opencode_models().await.unwrap_or_default();
+        Ok(aionui_api_types::GetModelInfoResponse {
+            model_info: Some(aionui_api_types::ModelInfoPayload {
+                current_model_id: current
+                    .and_then(|m| m.get("modelID"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                current_model_label: current
+                    .and_then(|m| m.get("modelID"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                available_models: available,
+            }),
+        })
+    }
+
+    async fn fetch_opencode_models(&self) -> Result<Vec<aionui_api_types::ModelInfoEntry>, AppError> {
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+
+        let mut req = self
+            .http_client
+            .get(format!("{base_url}/provider"))
+            .timeout(Duration::from_secs(10));
+        if let Some(ref h) = auth_header {
+            req = req.header(AUTHORIZATION, h.as_str());
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(_) => return Ok(Vec::new()),
+        };
+        if !resp.status().is_success() {
+            return Ok(Vec::new());
+        }
+
+        let body: Value = match resp.json().await {
+            Ok(v) => v,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let mut entries = Vec::new();
+        if let Some(all) = body.get("all").and_then(|v| v.as_array()) {
+            // Only include models from connected (authenticated) providers.
+            let connected: std::collections::HashSet<&str> = body
+                .get("connected")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+
+            for provider in all {
+                let provider_id = match provider.get("id").and_then(|v| v.as_str()) {
+                    Some(id) if connected.contains(id) => id,
+                    _ => continue,
+                };
+                if let Some(models) = provider.get("models").and_then(|v| v.as_object()) {
+                    for (model_id, model) in models {
+                        let label = model.get("name").and_then(|v| v.as_str()).unwrap_or(model_id);
+                        // Encode as "providerID::modelID" so set_model can split it correctly.
+                        entries.push(aionui_api_types::ModelInfoEntry {
+                            id: format!("{provider_id}::{model_id}"),
+                            label: format!("[{provider_id}] {label}"),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(entries)
     }
 }
 
@@ -283,8 +830,12 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
         };
         self.runtime.transition_to(ConversationStatus::Running);
 
-        if is_first {
-            // First message: create new session via sessionsReset
+        if is_opencode_protocol(&self.remote_config.protocol) {
+            if is_first {
+                self.emit_model_info().await;
+            }
+            self.opencode_send(&data.content).await
+        } else if is_first {
             let payload = json!({
                 "type": "sessionsReset",
                 "data": {
@@ -295,7 +846,6 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             });
             self.ws_send(&payload).await
         } else {
-            // Subsequent messages: try to resume session
             let session_key = self.state.read().await.session_key.clone();
             let mut payload = json!({
                 "type": "sendMessage",
@@ -315,6 +865,9 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
     }
 
     async fn cancel(&self) -> Result<(), AppError> {
+        if is_opencode_protocol(&self.remote_config.protocol) {
+            return Ok(());
+        }
         if self.ws_sink.lock().await.is_none() {
             return Err(AppError::Conflict("WebSocket not connected; nothing to cancel".into()));
         }
@@ -333,10 +886,6 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             "Killing Remote agent"
         );
 
-        // Drop the WebSocket sink to close the connection.
-        // We can't move the Mutex into a spawned task, so we clear it inline
-        // using try_lock (non-blocking). If the lock is held, the connection
-        // will close when the holder drops it.
         if let Ok(mut guard) = self.ws_sink.try_lock() {
             *guard = None;
         }
@@ -366,8 +915,10 @@ impl RemoteAgentManager {
             state.confirmations.retain(|c| c.call_id != call_id);
         }
 
-        // WebSocket send for confirmation will be fully wired in Phase 6.15 integration
-        // via a command channel that avoids &self lifetime issues in spawned tasks.
+        if is_opencode_protocol(&self.remote_config.protocol) {
+            return Ok(());
+        }
+
         warn!(
             conversation_id = %self.runtime.conversation_id(),
             call_id = call_id,
@@ -398,25 +949,76 @@ impl RemoteAgentManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_task::IAgentTask;
 
     #[test]
-    fn approval_key_formats_correctly() {
-        assert_eq!(approval_key(Some("exec"), Some("curl")), "exec:curl");
-        assert_eq!(approval_key(Some("exec"), None), "exec");
-        assert_eq!(approval_key(None, None), "");
+    fn normalize_url_strips_trailing_slash() {
+        assert_eq!(normalize_base_url("http://127.0.0.1:4096/"), "http://127.0.0.1:4096");
+        assert_eq!(normalize_base_url("http://127.0.0.1:4096"), "http://127.0.0.1:4096");
     }
 
     #[test]
-    fn remote_agent_config_clone() {
+    fn is_opencode_detects_protocol() {
+        assert!(is_opencode_protocol("opencode"));
+        assert!(!is_opencode_protocol("openclaw"));
+        assert!(!is_opencode_protocol("acp"));
+    }
+
+    #[test]
+    fn auth_header_bearer() {
+        let h = build_auth_header("bearer", Some("secret"));
+        assert_eq!(h, Some("Bearer secret".to_string()));
+    }
+
+    #[test]
+    fn auth_header_password() {
+        let h = build_auth_header("password", Some("secret"));
+        let expected = format!("Basic {}", BASE64.encode("opencode:secret"));
+        assert_eq!(h, Some(expected));
+    }
+
+    #[test]
+    fn auth_header_none_returns_none() {
+        let h = build_auth_header("none", Some("secret"));
+        assert_eq!(h, None);
+    }
+
+    #[test]
+    fn auth_header_empty_token_returns_none() {
+        let h = build_auth_header("bearer", Some(""));
+        assert_eq!(h, None);
+        let h = build_auth_header("bearer", None);
+        assert_eq!(h, None);
+    }
+
+    #[tokio::test]
+    async fn config_includes_protocol() {
         let config = RemoteAgentConfig {
-            remote_agent_id: "ra-1".into(),
-            url: "wss://example.com".into(),
-            auth_type: "bearer".into(),
-            auth_token: Some("token".into()),
+            remote_agent_id: "ra_test".to_string(),
+            protocol: "opencode".to_string(),
+            url: "http://127.0.0.1:4096".to_string(),
+            auth_type: "none".to_string(),
+            auth_token: None,
             allow_insecure: false,
         };
-        let cloned = config.clone();
-        assert_eq!(cloned.remote_agent_id, "ra-1");
-        assert_eq!(cloned.url, "wss://example.com");
+        assert_eq!(config.protocol, "opencode");
+    }
+
+    #[tokio::test]
+    async fn new_creates_agent_without_connect() {
+        let config = RemoteAgentConfig {
+            remote_agent_id: "ra_test".to_string(),
+            protocol: "opencode".to_string(),
+            url: "http://127.0.0.1:4096".to_string(),
+            auth_type: "none".to_string(),
+            auth_token: None,
+            allow_insecure: false,
+        };
+        let agent = RemoteAgentManager::new("conv1".to_string(), "/ws".to_string(), config)
+            .await
+            .unwrap();
+        assert_eq!(agent.agent_type(), AgentType::Remote);
+        assert_eq!(agent.conversation_id(), "conv1");
+        assert_eq!(agent.status(), None);
     }
 }

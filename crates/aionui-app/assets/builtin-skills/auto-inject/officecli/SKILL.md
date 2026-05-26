@@ -52,6 +52,7 @@ Format aliases: `word`→`docx`, `excel`→`xlsx`, `ppt`/`powerpoint`→`pptx`. 
 ## Performance: Resident Mode
 
 **Every command auto-starts a resident on first access** (60s idle timeout) — file-lock conflicts are automatically avoided. Explicit `open`/`close` is still recommended for longer sessions (12min idle):
+
 ```bash
 officecli open report.docx       # explicitly keep in memory
 officecli set report.docx ...    # no file I/O overhead
@@ -65,6 +66,7 @@ Opt out of auto-start: `OFFICECLI_NO_AUTO_RESIDENT=1`.
 ## Quick Start
 
 **PPT:**
+
 ```bash
 officecli create slides.pptx
 officecli add slides.pptx / --type slide --prop title="Q4 Report" --prop background=1A1A2E
@@ -72,6 +74,7 @@ officecli add slides.pptx '/slide[1]' --type shape --prop text="Revenue grew 25%
 ```
 
 **Word:**
+
 ```bash
 officecli create report.docx
 officecli add report.docx /body --type paragraph --prop text="Executive Summary" --prop style=Heading1
@@ -79,6 +82,7 @@ officecli add report.docx /body --type paragraph --prop text="Revenue increased 
 ```
 
 **Excel:**
+
 ```bash
 officecli create data.xlsx
 officecli set data.xlsx /Sheet1/A1 --prop value="Name" --prop bold=true
@@ -99,14 +103,14 @@ officecli validate <file>             # Validate against OpenXML schema
 
 ### view modes
 
-| Mode | Description | Useful flags |
-|------|-------------|-------------|
-| `outline` | Document structure | |
-| `stats` | Statistics (pages, words, shapes) | |
-| `issues` | Formatting/content/structure problems | `--type format\|content\|structure`, `--limit N` |
-| `text` | Plain text extraction | `--start N --end N`, `--max-lines N` |
-| `annotated` | Text with formatting annotations | |
-| `html` | Static HTML snapshot — same renderer as `watch`, no server needed | `--browser`, `--page N` (docx), `--start N --end N` (pptx) |
+| Mode        | Description                                                       | Useful flags                                               |
+| ----------- | ----------------------------------------------------------------- | ---------------------------------------------------------- |
+| `outline`   | Document structure                                                |                                                            |
+| `stats`     | Statistics (pages, words, shapes)                                 |                                                            |
+| `issues`    | Formatting/content/structure problems                             | `--type format\|content\|structure`, `--limit N`           |
+| `text`      | Plain text extraction                                             | `--start N --end N`, `--max-lines N`                       |
+| `annotated` | Text with formatting annotations                                  |                                                            |
+| `html`      | Static HTML snapshot — same renderer as `watch`, no server needed | `--browser`, `--page N` (docx), `--start N --end N` (pptx) |
 
 Use `view html` for one-shot snapshots (CI artifacts, archival, diffing); use `watch` when you need live refresh or browser-side click-to-select.
 
@@ -204,11 +208,11 @@ officecli set <file> <path> --prop key=value [--prop ...]
 
 **Value formats:**
 
-| Type | Format | Examples |
-|------|--------|---------|
-| Colors | Hex (with/without `#`), named, RGB, theme | `FF0000`, `#FF0000`, `red`, `rgb(255,0,0)`, `accent1`..`accent6` |
-| Spacing | Unit-qualified | `12pt`, `0.5cm`, `1.5x`, `150%` |
-| Dimensions | EMU or suffixed | `914400`, `2.54cm`, `1in`, `72pt`, `96px` |
+| Type       | Format                                    | Examples                                                         |
+| ---------- | ----------------------------------------- | ---------------------------------------------------------------- |
+| Colors     | Hex (with/without `#`), named, RGB, theme | `FF0000`, `#FF0000`, `red`, `rgb(255,0,0)`, `accent1`..`accent6` |
+| Spacing    | Unit-qualified                            | `12pt`, `0.5cm`, `1.5x`, `150%`                                  |
+| Dimensions | EMU or suffixed                           | `914400`, `2.54cm`, `1in`, `72pt`, `96px`                        |
 
 **Dotted-attr aliases** — `font.<attr>` forms accepted on shape/run/paragraph/table/row/cell/section/styles, e.g. `--prop font.color=red --prop font.bold=true --prop font.size=14pt`. Run `officecli help <fmt> <element>` for the full list.
 
@@ -233,6 +237,7 @@ officecli set slides.pptx / --prop find=draft --prop replace=final
 **Path controls search scope:** `/` = whole document, `/body/p[1]` or `/slide[N]/shape[M]` = specific element, `/header[1]` / `/footer[1]` = headers/footers.
 
 **Notes:**
+
 - Case-sensitive by default. Case-insensitive: `--prop 'find=(?i)error' --prop regex=true`
 - Matches work across run boundaries
 - No match = silent success. `--json` includes `"matched": N`
@@ -252,11 +257,11 @@ officecli add <file> <parent> --from <path>                               # clon
 
 **Element types (with aliases):**
 
-| Format | Types |
-|--------|-------|
-| **pptx** | slide (incl. hidden), shape (textbox — font.latin/ea/cs, direction=rtl), picture (SVG, brightness/contrast/glow/shadow), chart (direction=rtl), table (cell direction=rtl), row (tr), connector (connection/line), group, video (audio/media, trim), equation (formula/math), notes (direction=rtl, lang), comment (RTL via U+200F bidi mark; full CRUD via /slide[N]/comment[M]), paragraph (para), run, zoom (slidezoom), ole (oleobject/object/embed), placeholder (phType=title/body/subtitle/footer/...). slideLayout/slideMaster direction inheritance. |
+| Format   | Types                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **pptx** | slide (incl. hidden), shape (textbox — font.latin/ea/cs, direction=rtl), picture (SVG, brightness/contrast/glow/shadow), chart (direction=rtl), table (cell direction=rtl), row (tr), connector (connection/line), group, video (audio/media, trim), equation (formula/math), notes (direction=rtl, lang), comment (RTL via U+200F bidi mark; full CRUD via /slide[N]/comment[M]), paragraph (para), run, zoom (slidezoom), ole (oleobject/object/embed), placeholder (phType=title/body/subtitle/footer/...). slideLayout/slideMaster direction inheritance.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | **docx** | paragraph (para — direction/font.latin/ea/cs, bold.cs/italic.cs/size.cs for RTL/CJK; lang.latin/ea/cs BCP-47 tags on run; wordWrap toggle), run, table (direction=rtl → bidiVisual), row (tr), cell (td), image (picture/img — SVG supported), header (direction), footer (direction), section (pageNumFmt full ECMA-376 enum incl. Hindi/Arabic/Thai/CJK numerals; direction=rtl on Add/Set; rtlGutter; pgBorders=box shorthand), bookmark, comment, footnote, endnote, formfield (text/checkbox/dropdown), sdt (contentcontrol), chart, equation, field (28 types incl. mergefield/ref/seq/styleref/docproperty/if), hyperlink, style (direction round-trip), toc, watermark, break (pagebreak/columnbreak), ole, **num / abstractNum / lvl** (numbering/list system), **tab** (paragraph or paragraph/table style tab stops). docDefaults.rtl document-wide override; `get /` exposes `locale`. Document protection: `set / --prop protection=forms\|readOnly\|comments\|trackedChanges\|none` |
-| **xlsx** | sheet (visible/hidden/veryHidden, print margins, printTitleRows/Cols, rightToLeft sheetView, cascade-aware rename), row, cell (type=richtext+runs, merge=range/sweep, direction=rtl, phonetic guide on add), chart (direction=rtl on per-axis txPr / title; incl. pareto), image (picture — SVG), comment (direction=rtl), table (listobject), namedrange (definedname, volatile, `[@name=X]` selector), pivottable (pivot, calculatedField), sparkline, validation (datavalidation), autofilter, shape, textbox, databar/colorscale/iconset/formulacf/cellIs/topN/aboveAverage (conditional formatting), ole, csv (tsv). Query supports `merge`/`mergedrange` aliases for `mergeCell`. Workbook: password. `value="=SUM(...)"` auto-detects as formula. Chart/picture/shape/slicer accept `anchor=A1:E10`. |
+| **xlsx** | sheet (visible/hidden/veryHidden, print margins, printTitleRows/Cols, rightToLeft sheetView, cascade-aware rename), row, cell (type=richtext+runs, merge=range/sweep, direction=rtl, phonetic guide on add), chart (direction=rtl on per-axis txPr / title; incl. pareto), image (picture — SVG), comment (direction=rtl), table (listobject), namedrange (definedname, volatile, `[@name=X]` selector), pivottable (pivot, calculatedField), sparkline, validation (datavalidation), autofilter, shape, textbox, databar/colorscale/iconset/formulacf/cellIs/topN/aboveAverage (conditional formatting), ole, csv (tsv). Query supports `merge`/`mergedrange` aliases for `mergeCell`. Workbook: password. `value="=SUM(...)"` auto-detects as formula. Chart/picture/shape/slicer accept `anchor=A1:E10`.                                                                                                                                                                                       |
 
 ### Pivot tables (xlsx)
 
@@ -351,16 +356,16 @@ officecli add-part <file> <parent>                   # create new document part 
 
 ## Common Pitfalls
 
-| Pitfall | Correct Approach |
-|---------|-----------------|
-| `--name "foo"` | Use `--prop name="foo"` — all attributes go through `--prop` |
-| Unquoted `[N]` paths in zsh/bash | Always quote: `'/slide[1]'` or `"/slide[1]"` (shell glob-expands brackets) |
-| PPT `shape[1]` for content | `shape[1]` is typically the title placeholder. Use `shape[2]+` for content shapes |
-| `/shape[myname]` | Name indexing not supported. Use numeric index or `@name=` (PPT only) |
-| Guessing property names | Run `officecli help <format> <element>` to see exact names |
-| Modifying an open file | Close the file in PowerPoint/WPS first |
-| `\n` in shell strings | Use `\\n` for newlines in `--prop text="..."` |
-| `$` in shell text | `--prop text="$15M"` strips `$15`. Use single quotes: `--prop text='$15M'`, or heredoc batch |
+| Pitfall                          | Correct Approach                                                                             |
+| -------------------------------- | -------------------------------------------------------------------------------------------- |
+| `--name "foo"`                   | Use `--prop name="foo"` — all attributes go through `--prop`                                 |
+| Unquoted `[N]` paths in zsh/bash | Always quote: `'/slide[1]'` or `"/slide[1]"` (shell glob-expands brackets)                   |
+| PPT `shape[1]` for content       | `shape[1]` is typically the title placeholder. Use `shape[2]+` for content shapes            |
+| `/shape[myname]`                 | Name indexing not supported. Use numeric index or `@name=` (PPT only)                        |
+| Guessing property names          | Run `officecli help <format> <element>` to see exact names                                   |
+| Modifying an open file           | Close the file in PowerPoint/WPS first                                                       |
+| `\n` in shell strings            | Use `\\n` for newlines in `--prop text="..."`                                                |
+| `$` in shell text                | `--prop text="$15M"` strips `$15`. Use single quotes: `--prop text='$15M'`, or heredoc batch |
 
 ---
 
@@ -369,6 +374,7 @@ officecli add-part <file> <parent>                   # create new document part 
 `officecli load_skill <name>` — output is a SKILL.md, follow its rules.
 
 **Loading rule**:
+
 - Pick the most specific match in "When to use"; if none fits, load the format default (`word` / `pptx` / `excel`).
 - Scenes already contain the format default's rules — load **one** skill per artifact, never stack.
 - Loaded rules persist across turns; don't re-load each reply.
@@ -376,27 +382,27 @@ officecli add-part <file> <parent>                   # create new document part 
 
 ### Word (.docx)
 
-| Name | When to use |
-|------|-------------|
-| `word` | Reports, letters, memos, proposals, generic documents |
+| Name             | When to use                                                                                                                                                                                                      |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `word`           | Reports, letters, memos, proposals, generic documents                                                                                                                                                            |
 | `academic-paper` | Journal / conference / thesis: APA / Chicago / IEEE / MLA citations, equations, SEQ + PAGEREF cross-refs, multi-column journal layout, bibliography. NOT for business reports or letters (route those to `word`) |
 
 ### PowerPoint (.pptx)
 
-| Name | When to use |
-|------|-------------|
-| `pptx` | Generic decks: board reviews, sales decks, all-hands, product launches |
-| `pitch-deck` | **Fundraising only** — seed / Series A-C / SAFE / convertible / strategic raise. NOT for sales / product / board decks (route those to `pptx`) |
-| `morph-ppt` | Cinematic Morph-animated presentations. NOT for static decks (route those to `pptx`) |
-| `morph-ppt-3d` | 3D Morph: GLB models, camera moves, depth. NOT for 2D-only Morph (route those to `morph-ppt`) |
+| Name           | When to use                                                                                                                                    |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pptx`         | Generic decks: board reviews, sales decks, all-hands, product launches                                                                         |
+| `pitch-deck`   | **Fundraising only** — seed / Series A-C / SAFE / convertible / strategic raise. NOT for sales / product / board decks (route those to `pptx`) |
+| `morph-ppt`    | Cinematic Morph-animated presentations. NOT for static decks (route those to `pptx`)                                                           |
+| `morph-ppt-3d` | 3D Morph: GLB models, camera moves, depth. NOT for 2D-only Morph (route those to `morph-ppt`)                                                  |
 
 ### Excel (.xlsx)
 
-| Name | When to use |
-|------|-------------|
-| `excel` | Generic workbooks, formulas, pivots, trackers |
-| `financial-model` | Financial models, scenarios, projections. NOT for general data analysis (route those to `excel`) |
-| `data-dashboard` | CSV/tabular data → KPI / analytics / executive dashboards with charts and sparklines. NOT for raw data tracking (route those to `excel`) |
+| Name              | When to use                                                                                                                              |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `excel`           | Generic workbooks, formulas, pivots, trackers                                                                                            |
+| `financial-model` | Financial models, scenarios, projections. NOT for general data analysis (route those to `excel`)                                         |
+| `data-dashboard`  | CSV/tabular data → KPI / analytics / executive dashboards with charts and sparklines. NOT for raw data tracking (route those to `excel`) |
 
 Example: a fundraising deck task → `officecli load_skill pitch-deck` → use the printed rules.
 

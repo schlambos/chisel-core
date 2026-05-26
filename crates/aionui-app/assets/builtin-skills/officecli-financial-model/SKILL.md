@@ -51,11 +51,11 @@ Stay in **xlsx base** for: budget trackers, CSV-to-report dumps, operational KPI
 
 Every model in this skill builds on three zones. **Name them, tab-color them, and enforce them with executable audits.** Breaking the zone rule is the single most common cause of an unauditable model.
 
-| Zone | Sheet names (convention) | Tab color | Content | Hardcodes | Formulas |
-|---|---|---|---|---|---|
-| **Inputs** | `Assumptions`, `Inputs`, `Drivers` | Yellow `FFC000` | Raw drivers: growth rates, margins, tax, WACC, FTE, pricing, working-capital days | Blue `0000FF` on every cell | Allowed only for derived assumptions (e.g. `=MonthlyARPU*12`) |
-| **Calc** | `P&L`, `Balance Sheet`, `Cash Flow`, `DCF`, `Debt`, `ARR` | Blue `4472C4` | All derivations and statements | **Zero** (enforced by Gate 6) | Black `000000` for same-sheet, green `008000` for cross-sheet |
-| **Outputs** | `Summary`, `Dashboard`, `Sensitivity`, `Returns` | Green `70AD47` | KPIs, sensitivity grids, charts, returns waterfall | Only for labels (non-numeric); Gate 6 counts numeric hardcodes → 0 | Black / green per above |
+| Zone        | Sheet names (convention)                                  | Tab color       | Content                                                                           | Hardcodes                                                          | Formulas                                                      |
+| ----------- | --------------------------------------------------------- | --------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------- |
+| **Inputs**  | `Assumptions`, `Inputs`, `Drivers`                        | Yellow `FFC000` | Raw drivers: growth rates, margins, tax, WACC, FTE, pricing, working-capital days | Blue `0000FF` on every cell                                        | Allowed only for derived assumptions (e.g. `=MonthlyARPU*12`) |
+| **Calc**    | `P&L`, `Balance Sheet`, `Cash Flow`, `DCF`, `Debt`, `ARR` | Blue `4472C4`   | All derivations and statements                                                    | **Zero** (enforced by Gate 6)                                      | Black `000000` for same-sheet, green `008000` for cross-sheet |
+| **Outputs** | `Summary`, `Dashboard`, `Sensitivity`, `Returns`          | Green `70AD47`  | KPIs, sensitivity grids, charts, returns waterfall                                | Only for labels (non-numeric); Gate 6 counts numeric hardcodes → 0 | Black / green per above                                       |
 
 **Build order is cross-zone-aware.** Assumptions first, then Calc bottom-up on the dependency chain (`IS → BS → CF` for 3-statement; `FCF → WACC → NPV` for DCF), then Outputs last. Building Outputs first caches `0` everywhere and downstream inherits zeros.
 
@@ -92,6 +92,7 @@ Delete any `Print_Area` set on Calc sheets — conflicting scopes emit multi-pag
 Three facts cause silent wrong numbers: (1) new formulas ship without cached values — Excel recomputes on open, HTML preview / older viewers do not; (2) downstream written in the same sequence as upstream caches `0` from upstream's pre-cache state; (3) cross-sheet `batch` while resident is open deadlocks at 3–5 ops.
 
 **Discipline (every recipe):**
+
 - Build order follows the data chain: `P&L → BS → CF` (3-statement); `FCF → WACC → NPV → Sensitivity` (DCF); `S&U → Debt → P&L → CF → Returns` (LBO).
 - After the cross-sheet chain, **cache-refresh pass:** re-issue `set` on every summary / valuation / balance-check cell, non-resident.
 - Spot-check: `officecli get "$FILE" /Summary/B2 --json | jq .format.cachedValue` returns non-zero non-null. `null` ≠ `0`: `null` means Excel will compute on open (OK for delivery); `0` is a cached lie. If `0` persists: close residents, re-set; still `0` → cache-fallback (§Financial function patterns).
@@ -314,9 +315,11 @@ officecli add "$FILE" /Debt --type comment --prop ref=C7 --prop text='cash sweep
 ```
 
 **Revolver capacity cap.** If your deal uses a revolver tranche, the revolver balance each period is bounded by the commitment ceiling:
+
 ```
 Revolver_Balance = MIN(Assumptions!RevolverCapacity, MAX(0, prior_revolver + draw − paydown))
 ```
+
 Without the `MIN(capacity, ...)` outer, a shortfall quarter silently over-draws the facility.
 
 Adjust row indices to your layout. Repeat for each tranche (senior / mezz / revolver) and each year.
@@ -353,6 +356,7 @@ officecli add "$FILE" /Returns --type comment --prop ref=B4 --prop text='IRR —
 ```
 
 **Callout — labels: `comment` element vs Notes column vs `formula` (three distinct mechanics).**
+
 - **Hover tooltip** → `officecli add ... --type comment --prop ref=<cell> --prop text='...'`. The **`comment` key is NOT a valid prop on `set cell`** (not in `officecli help xlsx cell` on v1.0.63) — it silently drops when embedded inside a `set cell` props dict. Use the dedicated element.
 - **Visible text in an adjacent Notes column** → `{"command":"set","path":"/DCF/D3","props":{"value":"TV = FCF × (1+g) / (WACC−g)"}}` — **`value`, not `formula`**, plain quoted string.
 - **Formula-style prose written as a real formula** → NEVER. `{"formula":"FCF10*(1+g)/(WACC-g)"}` produces `#NAME?` in Excel (`FCF10`, `g`, `WACC` are unbound identifiers in that cell context).
@@ -374,6 +378,7 @@ officecli query "$FILE" 'cell:contains("#REF!")' --json | jq '.data.results | le
 ## Sensitivity & scenarios
 
 **Three patterns, pick one:**
+
 - **(a) Base / Upside / Downside columns** on Assumptions — side-by-side scenarios, dropdown-less switch via an "Active" column + `INDEX/MATCH`.
 - **(b) Dropdown + `INDEX/MATCH` switch** — one validation dropdown on Summary drives every driver via `INDEX(Base:Downside, MATCH(Dropdown, ScenLabels, 0))`.
 - **(c) 2-axis sensitivity grid** — 5×5 or 7×7, one self-contained formula per cell, row/col headers are the two drivers. See Recipe B Step 5 for WACC × g.
@@ -403,13 +408,13 @@ Every `Assumptions` driver row gets the same `INDEX/MATCH`. Base / Upside / Down
 
 Terse reference — not a finance textbook. If you don't know what these do, pause and ask the user.
 
-| Function | Prefer over | Why |
-|---|---|---|
-| `XNPV(rate, values, dates)` | `NPV` | Irregular cash flow dates (M&A close mid-year, staggered tranches) |
-| `XIRR(values, dates)` | `IRR` | Irregular dates; multiple sign changes handled better |
-| `INDEX(range, MATCH(lookup, key, 0))` | `VLOOKUP` | Insert-safe (VLOOKUP breaks when a column is inserted in the source range) |
-| `IFERROR(x/y, 0)` or `IF(y=0, 0, x/y)` | bare division | Guard every `/` in a financial model — `#DIV/0!` shipped = delivery failure |
-| `MIRR(values, financeRate, reinvestRate)` | `IRR` with sign flips | When cash-flow pattern has 2+ sign changes |
+| Function                                            | Prefer over               | Why                                                                                                       |
+| --------------------------------------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `XNPV(rate, values, dates)`                         | `NPV`                     | Irregular cash flow dates (M&A close mid-year, staggered tranches)                                        |
+| `XIRR(values, dates)`                               | `IRR`                     | Irregular dates; multiple sign changes handled better                                                     |
+| `INDEX(range, MATCH(lookup, key, 0))`               | `VLOOKUP`                 | Insert-safe (VLOOKUP breaks when a column is inserted in the source range)                                |
+| `IFERROR(x/y, 0)` or `IF(y=0, 0, x/y)`              | bare division             | Guard every `/` in a financial model — `#DIV/0!` shipped = delivery failure                               |
+| `MIRR(values, financeRate, reinvestRate)`           | `IRR` with sign flips     | When cash-flow pattern has 2+ sign changes                                                                |
 | `SUMIFS(sumRange, criteriaRange1, criterion1, ...)` | `SUMPRODUCT((...))` array | Avoids the cached-value trap on array formulas (→ xlsx v2 §Common Workflow Step 5 array-formula fallback) |
 
 **`SUMPRODUCT(1/COUNTIF(...))` distinct-count trap.** The CLI engine caches the inner division per-row → `1/N` (e.g. `0.001543`) rather than the true distinct count. `SUMPRODUCT(--((range<>"")/COUNTIF(range,range&"")))` pattern is likewise affected. **Fallback (from xlsx v2):** hardcode the correct distinct count with a blue font + adjacent comment `"hardcoded distinct count; update if rows change"`, and disclose at delivery. LBO deal-count or portfolio headcount from a transactions list is the typical pattern that hits this.
@@ -433,6 +438,7 @@ officecli set "$FILE" / --prop calc.iterate=true --prop calc.iterateCount=100 --
 `calc.iterate` controls recalc, not write-phase. Appending the closing leg of an already-wired cross-sheet ring (Debt.Interest ↔ CF.Cash ↔ Debt.CashSweep) deadlocks at 100% CPU; `view html` / `get` also hang on a non-converged ring.
 
 **3-step playbook:**
+
 1. **De-ring** — write Debt with the 10–20 ring cells set to literal `0` (e.g. `C7=0`, not `=-MIN(...)`). Removes the ring.
 2. **Write downstream** — build all non-circular chains (P&L, CF, Exit, Returns, Summary, grid) non-resident, one heredoc per sheet. Everything caches against the zeroed cells.
 3. **Re-ring** — close all residents, re-set each circular cell with its real formula, one `set` per cell, non-resident.

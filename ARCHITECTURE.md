@@ -5,13 +5,13 @@ It provides HTTP REST APIs and WebSocket real-time events for the AionUi desktop
 
 ## Tech Stack
 
-| Component | Technology |
-|-----------|------------|
-| Web framework | Axum 0.8 |
-| Async runtime | Tokio |
-| Database | SQLite (via sqlx, async) |
+| Component      | Technology                        |
+| -------------- | --------------------------------- |
+| Web framework  | Axum 0.8                          |
+| Async runtime  | Tokio                             |
+| Database       | SQLite (via sqlx, async)          |
 | Authentication | JWT + CSRF (Double Submit Cookie) |
-| Real-time | WebSocket + event broadcasting |
+| Real-time      | WebSocket + event broadcasting    |
 
 ## High-Level Architecture
 
@@ -45,46 +45,46 @@ The project is organized as a Cargo workspace with 20 crates across four layers:
 
 Depended on by nearly all other crates. Changes require careful impact assessment.
 
-| Crate | Responsibility |
-|-------|----------------|
-| `aionui-common` | Shared error types (AppError), enums, ID generation, crypto utilities, timestamps, pagination |
-| `aionui-api-types` | All HTTP/WebSocket request and response types — the single source of truth for API contracts |
-| `aionui-db` | SQLite database layer, defines Repository traits and implementations |
-| `aionui-assets` | Embedded static assets (agent metadata, prompts) |
-| `aionui-runtime` | Subprocess spawning, bun runtime resolution, PATH enhancement |
+| Crate              | Responsibility                                                                                |
+| ------------------ | --------------------------------------------------------------------------------------------- |
+| `aionui-common`    | Shared error types (AppError), enums, ID generation, crypto utilities, timestamps, pagination |
+| `aionui-api-types` | All HTTP/WebSocket request and response types — the single source of truth for API contracts  |
+| `aionui-db`        | SQLite database layer, defines Repository traits and implementations                          |
+| `aionui-assets`    | Embedded static assets (agent metadata, prompts)                                              |
+| `aionui-runtime`   | Subprocess spawning, bun runtime resolution, PATH enhancement                                 |
 
 ### Capability
 
 Cross-cutting capabilities used by domain crates.
 
-| Crate | Responsibility |
-|-------|----------------|
-| `aionui-auth` | JWT authentication, password hashing, CSRF protection, cookie management, auth middleware |
-| `aionui-realtime` | WebSocket connection management, event broadcasting (BroadcastEventBus), message routing |
+| Crate             | Responsibility                                                                            |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| `aionui-auth`     | JWT authentication, password hashing, CSRF protection, cookie management, auth middleware |
+| `aionui-realtime` | WebSocket connection management, event broadcasting (BroadcastEventBus), message routing  |
 
 ### Domain
 
 Each crate owns an independent business domain. They remain loosely coupled from each other.
 
-| Crate | Responsibility |
-|-------|----------------|
-| `aionui-conversation` | Conversation management, messaging, confirmations, streaming responses |
-| `aionui-channel` | Multi-channel integration (WeChat, DingTalk, Lark), plugin system, pairing sessions |
-| `aionui-team` | Team collaboration, task scheduling, mailbox system |
-| `aionui-cron` | Scheduled job execution, cron expressions, event triggering |
-| `aionui-file` | File operations, watching, snapshots, git operations, compression |
-| `aionui-office` | Office document handling (Excel, PPT, Word), preview, conversion |
-| `aionui-system` | System settings, provider management, version checking, model fetching |
-| `aionui-mcp` | MCP protocol integration, OAuth, multi-platform adapters |
-| `aionui-ai-agent` | Agent lifecycle management, worker task queues, ACP/auxiliary skills |
-| `aionui-extension` | Extension registry, hub management, skill discovery and installation |
-| `aionui-shell` | Shell command execution, speech-to-text |
-| `aionui-assistant` | Assistant configuration and management |
+| Crate                 | Responsibility                                                                      |
+| --------------------- | ----------------------------------------------------------------------------------- |
+| `aionui-conversation` | Conversation management, messaging, confirmations, streaming responses              |
+| `aionui-channel`      | Multi-channel integration (WeChat, DingTalk, Lark), plugin system, pairing sessions |
+| `aionui-team`         | Team collaboration, task scheduling, mailbox system                                 |
+| `aionui-cron`         | Scheduled job execution, cron expressions, event triggering                         |
+| `aionui-file`         | File operations, watching, snapshots, git operations, compression                   |
+| `aionui-office`       | Office document handling (Excel, PPT, Word), preview, conversion                    |
+| `aionui-system`       | System settings, provider management, version checking, model fetching              |
+| `aionui-mcp`          | MCP protocol integration, OAuth, multi-platform adapters                            |
+| `aionui-ai-agent`     | Agent lifecycle management, worker task queues, ACP/auxiliary skills                |
+| `aionui-extension`    | Extension registry, hub management, skill discovery and installation                |
+| `aionui-shell`        | Shell command execution, speech-to-text                                             |
+| `aionui-assistant`    | Assistant configuration and management                                              |
 
 ### Composition
 
-| Crate | Responsibility |
-|-------|----------------|
+| Crate        | Responsibility                                                          |
+| ------------ | ----------------------------------------------------------------------- |
 | `aionui-app` | Top-level binary entry point, assembles all crates into the Axum server |
 
 ### Dependency Direction Rules
@@ -119,21 +119,25 @@ crates/aionui-conversation/src/
 ### File Responsibilities
 
 **lib.rs** — Crate entry point, only module declarations and public API exports:
+
 - Exports the `domain_routes()` function
 - Exports `Service` and `RouterState`
 - Contains no business logic
 
 **routes.rs** — HTTP route definitions and handler functions:
+
 - Exports a single `domain_routes(state: RouterState) -> Router` function
 - Each handler: extract parameters → call service → construct response
 - Handlers contain no business logic, only request/response transformation
 
 **service.rs** — The sole location for business logic:
+
 - Dependencies injected via constructor (Repository trait objects, EventBroadcaster, etc.)
 - All business rules, validation, and orchestration logic lives here
 - Does not import axum or touch HTTP types directly
 
 **state.rs** — Router state, the carrier for dependency injection:
+
 - Holds service instances and Arc references to other dependencies
 - Implements Clone (required by Axum)
 
@@ -151,11 +155,13 @@ async fn handler(
 ### When to Create a New Crate vs. Extend an Existing One
 
 **Create a new crate when:**
+
 - It represents an independent business domain (with its own data models and lifecycle)
 - It needs an independent route prefix (e.g., `/api/new-domain/...`)
 - It has no strong coupling with existing domains
 
 **Extend an existing crate when:**
+
 - The feature is a sub-feature of an existing domain
 - It shares the same data models
 - Routes are sub-paths of an existing prefix
@@ -172,6 +178,7 @@ async fn handler(
 ```
 
 Rules:
+
 - Always use the `/api/` prefix
 - Resource names and path segments use kebab-case (e.g., `ai-agents`, `qr-login`)
 - Action routes use verbs or verb phrases (e.g., `reset`, `stop`, `run`)
@@ -179,6 +186,7 @@ Rules:
 ### Unified Response Format
 
 **Success response (`ApiResponse<T>`):**
+
 ```json
 {
   "success": true,
@@ -186,9 +194,11 @@ Rules:
   "message": "optional message"
 }
 ```
+
 Both `data` and `message` are optional fields, omitted from serialization when null.
 
 **Error response (`ErrorResponse`):**
+
 ```json
 {
   "success": false,
@@ -201,18 +211,18 @@ All response types are defined in `aionui-api-types` — the single source of tr
 
 ### HTTP Status Code Mapping
 
-| AppError Variant | Status Code | Error Code | Use Case |
-|------------------|-------------|------------|----------|
-| BadRequest | 400 | BAD_REQUEST | Invalid request parameters |
-| Unauthorized | 401 | UNAUTHORIZED | Not authenticated or token expired |
-| Forbidden | 403 | FORBIDDEN | No permission to access |
-| NotFound | 404 | NOT_FOUND | Resource does not exist |
-| Conflict | 409 | CONFLICT | Resource conflict |
-| UnprocessableEntity | 422 | UNPROCESSABLE_ENTITY | Semantic error |
-| RateLimited | 429 | RATE_LIMITED | Request rate exceeded |
-| Internal | 500 | INTERNAL_ERROR | Internal server error |
-| BadGateway | 502 | BAD_GATEWAY | Upstream service failure |
-| Timeout | 502 | TIMEOUT | Upstream service timeout |
+| AppError Variant    | Status Code | Error Code           | Use Case                           |
+| ------------------- | ----------- | -------------------- | ---------------------------------- |
+| BadRequest          | 400         | BAD_REQUEST          | Invalid request parameters         |
+| Unauthorized        | 401         | UNAUTHORIZED         | Not authenticated or token expired |
+| Forbidden           | 403         | FORBIDDEN            | No permission to access            |
+| NotFound            | 404         | NOT_FOUND            | Resource does not exist            |
+| Conflict            | 409         | CONFLICT             | Resource conflict                  |
+| UnprocessableEntity | 422         | UNPROCESSABLE_ENTITY | Semantic error                     |
+| RateLimited         | 429         | RATE_LIMITED         | Request rate exceeded              |
+| Internal            | 500         | INTERNAL_ERROR       | Internal server error              |
+| BadGateway          | 502         | BAD_GATEWAY          | Upstream service failure           |
+| Timeout             | 502         | TIMEOUT              | Upstream service timeout           |
 
 ### Pagination
 
@@ -227,6 +237,7 @@ Uses offset-based pagination (`PaginatedResult<T>`):
 ```
 
 Field descriptions:
+
 - `items` — Current page data
 - `total` — Total record count
 - `hasMore` — Whether more data is available
@@ -238,6 +249,7 @@ Note: JSON field names use camelCase (via `#[serde(rename_all = "camelCase")]`).
 **Entry point:** Single `/ws` endpoint
 
 **Message format (`WebSocketMessage<T>`):**
+
 ```json
 {
   "name": "domain.actionName",
@@ -246,6 +258,7 @@ Note: JSON field names use camelCase (via `#[serde(rename_all = "camelCase")]`).
 ```
 
 **Event naming convention:**
+
 - Format: `{domain}.{actionName}`, two-level structure
 - domain uses camelCase (e.g., `conversation`, `fileWatch`)
 - actionName uses camelCase (e.g., `listChanged`, `statusChanged`)
@@ -274,6 +287,7 @@ pub trait IConversationRepository: Send + Sync {
 ```
 
 Rules:
+
 - Each domain entity has a corresponding Repository trait (e.g., `IConversationRepository`, `IUserRepository`)
 - Trait names are prefixed with `I` to denote an interface
 - Concrete implementations use the `Sqlite` prefix (e.g., `SqliteConversationRepository`)
@@ -283,11 +297,11 @@ Rules:
 
 The project has three categories of data types, each with its own home:
 
-| Type | Location | Purpose | Example |
-|------|----------|---------|---------|
-| Row models | `aionui-db/src/models/` | Database row mapping | `ConversationRow` |
-| Params objects | `aionui-db/src/repository/` | Database write parameters | `UpdateConversationParams` |
-| Request/response types | `aionui-api-types` | API contracts and shared DTOs | `CreateConversationRequest`, `ConversationResponse` |
+| Type                   | Location                    | Purpose                       | Example                                             |
+| ---------------------- | --------------------------- | ----------------------------- | --------------------------------------------------- |
+| Row models             | `aionui-db/src/models/`     | Database row mapping          | `ConversationRow`                                   |
+| Params objects         | `aionui-db/src/repository/` | Database write parameters     | `UpdateConversationParams`                          |
+| Request/response types | `aionui-api-types`          | API contracts and shared DTOs | `CreateConversationRequest`, `ConversationResponse` |
 
 **The service layer may directly use types from `aionui-api-types`.** This crate contains
 pure data structure definitions with no HTTP framework dependencies, essentially serving as a shared DTO layer.
@@ -307,6 +321,7 @@ Handlers do not make business decisions, Services do not handle HTTP concerns.
 ### Migration Management
 
 Using sqlx's embedded migrations (`sqlx::migrate!()`):
+
 - Migration files are located in `crates/aionui-db/migrations/`
 - Naming format: `NNN_descriptive_name.sql` (sequential numbering)
 - Migrations run automatically on application startup
@@ -324,6 +339,7 @@ HTTP response (status code + ErrorResponse JSON)
 ```
 
 Mapping rules:
+
 - `DbError::NotFound` → `AppError::NotFound` (preserves semantics)
 - `DbError::Conflict` → `AppError::Conflict` (preserves semantics)
 - `DbError::Query` / `Migration` / `Init` → `AppError::Internal` (hides internal details)
@@ -417,6 +433,7 @@ CORS (local mode only)
 ```
 
 Key points:
+
 - Auth middleware is not global — it is selectively applied per route group via `route_layer()`
 - Public routes (login, status check) do not have auth middleware attached
 - The WebSocket `/ws` route does not use HTTP auth middleware — it uses independent token validation callbacks
@@ -457,6 +474,7 @@ CORS (local mode only, allows any origin)
 ### CSRF Protection
 
 Uses the Double Submit Cookie pattern:
+
 - Cookie name: `aionui-csrf-token` (not HttpOnly — JavaScript must read it)
 - Request header: `x-csrf-token`
 - Validation: cookie value must exactly match header value
@@ -471,24 +489,25 @@ Uses the Double Submit Cookie pattern:
 
 ### Cookie Configuration
 
-| Cookie | HttpOnly | Secure | SameSite | Max-Age |
-|--------|----------|--------|----------|---------|
-| `aionui-session` | ✅ | When HTTPS | Strict(HTTPS) / Lax(HTTP) | 30 days |
-| `aionui-csrf-token` | ❌ | When HTTPS | Strict(HTTPS) / Lax(HTTP) | 30 days |
+| Cookie              | HttpOnly | Secure     | SameSite                  | Max-Age |
+| ------------------- | -------- | ---------- | ------------------------- | ------- |
+| `aionui-session`    | ✅       | When HTTPS | Strict(HTTPS) / Lax(HTTP) | 30 days |
+| `aionui-csrf-token` | ❌       | When HTTPS | Strict(HTTPS) / Lax(HTTP) | 30 days |
 
 ### Rate Limiting
 
-| Level | Limit | Window | Scope | Key |
-|-------|-------|--------|-------|-----|
-| Auth | 5 failures | 15 minutes | Login routes | Client IP |
-| API | 60 requests | 1 minute | Public endpoints | Client IP |
-| Action | 20 requests | 1 minute | Sensitive operations | User ID (falls back to IP) |
+| Level  | Limit       | Window     | Scope                | Key                        |
+| ------ | ----------- | ---------- | -------------------- | -------------------------- |
+| Auth   | 5 failures  | 15 minutes | Login routes         | Client IP                  |
+| API    | 60 requests | 1 minute   | Public endpoints     | Client IP                  |
+| Action | 20 requests | 1 minute   | Sensitive operations | User ID (falls back to IP) |
 
 IP extraction priority: `X-Forwarded-For` → `X-Real-IP` → "unknown"
 
 ### Local Mode
 
 Enabled via the `--local` startup flag, designed for Electron embedded scenarios:
+
 - Skips JWT verification, injects a fixed user (`system_default_user`)
 - Skips CSRF checking
 - Enables fully open CORS
@@ -506,15 +525,16 @@ Enabled via the `--local` startup flag, designed for Electron embedded scenarios
 
 ### Test Layers
 
-| Layer | Location | Database Strategy | Purpose |
-|-------|----------|-------------------|---------|
-| Unit tests | `#[cfg(test)]` inline in each `.rs` file | None or Mock | Function-level logic verification |
-| Integration tests | `crates/<crate>/tests/` | In-memory SQLite | Service and Repository behavior verification |
-| E2E tests | `crates/aionui-app/tests/` | In-memory SQLite | Full HTTP request chain verification |
+| Layer             | Location                                 | Database Strategy | Purpose                                      |
+| ----------------- | ---------------------------------------- | ----------------- | -------------------------------------------- |
+| Unit tests        | `#[cfg(test)]` inline in each `.rs` file | None or Mock      | Function-level logic verification            |
+| Integration tests | `crates/<crate>/tests/`                  | In-memory SQLite  | Service and Repository behavior verification |
+| E2E tests         | `crates/aionui-app/tests/`               | In-memory SQLite  | Full HTTP request chain verification         |
 
 ### In-Memory Database
 
 All tests requiring a database use `init_database_memory()`:
+
 - Creates an SQLite in-memory database (`sqlite::memory:`)
 - Single connection pool (`max_connections = 1`, ensures data consistency for in-memory DB)
 - Automatically runs migrations
@@ -547,6 +567,7 @@ let response = app.oneshot(
 ```
 
 Login flow:
+
 1. Create user directly via Repository (bypassing the API)
 2. GET `/api/auth/status` to extract the CSRF token
 3. POST `/login` to obtain the session token
@@ -554,11 +575,11 @@ Login flow:
 
 ### Test File Naming
 
-| Suffix | Purpose | Example |
-|--------|---------|---------|
-| `*_test.rs` | Unit/functional tests | `extension_loading_test.rs` |
-| `*_integration.rs` | Integration tests | `acp_agent_integration.rs` |
-| `*_e2e.rs` | End-to-end tests | `auth_e2e.rs`, `conversation_e2e.rs` |
+| Suffix             | Purpose               | Example                              |
+| ------------------ | --------------------- | ------------------------------------ |
+| `*_test.rs`        | Unit/functional tests | `extension_loading_test.rs`          |
+| `*_integration.rs` | Integration tests     | `acp_agent_integration.rs`           |
+| `*_e2e.rs`         | End-to-end tests      | `auth_e2e.rs`, `conversation_e2e.rs` |
 
 ### Test Failure Handling Rules
 
@@ -571,6 +592,7 @@ When a test fails, do NOT modify the test to make it pass. First determine:
 3. **Uncertain** → stop, trace back the change, clarify before proceeding
 
 Prohibited:
+
 - ❌ Deleting failing tests to "fix" the problem
 - ❌ Weakening specific assertions to vague ones (e.g., `assert_eq!(status, 201)` → `assert!(status.is_success())`)
 
@@ -579,11 +601,13 @@ Prohibited:
 ### When to Create a New Crate
 
 **Create a new crate when:**
+
 - It represents an independent business domain (with its own data models and lifecycle)
 - It needs an independent route prefix (`/api/new-domain/...`)
 - It has no strong coupling with existing domains
 
 **Extend an existing crate when:**
+
 - The feature is a sub-feature of an existing domain
 - It shares the same data models
 - Routes are sub-paths of an existing prefix
@@ -635,16 +659,19 @@ Define request/response types in `aionui-api-types` to keep API contracts centra
 **Step 5: Wire into aionui-app**
 
 1. Add dependency in `aionui-app/Cargo.toml`:
+
    ```toml
    aionui-my-feature.workspace = true
    ```
 
 2. Add field to `ModuleStates`:
+
    ```rust
    pub my_feature: MyFeatureRouterState,
    ```
 
 3. Write the `build_my_feature_state()` function:
+
    ```rust
    pub fn build_my_feature_state(services: &AppServices) -> MyFeatureRouterState {
        let pool = services.database.pool().clone();
@@ -656,15 +683,17 @@ Define request/response types in `aionui-api-types` to keep API contracts centra
    ```
 
 4. Call it in `build_module_states()`:
+
    ```rust
    my_feature: build_my_feature_state(services),
    ```
 
 5. Register routes in `create_router_with_all_state()`:
+
    ```rust
    let my_feature_authenticated = my_feature_routes(states.my_feature)
        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
-   
+
    let router = Router::new()
        // ... existing routes
        .merge(my_feature_authenticated)
@@ -674,6 +703,7 @@ Define request/response types in `aionui-api-types` to keep API contracts centra
 ### Checklist
 
 Before adding a new crate, confirm:
+
 - [ ] Crate internal structure follows the standard pattern (lib/routes/service/state)
 - [ ] Dependency direction is correct (does not depend on upper-layer or same-layer concrete implementations)
 - [ ] Repository trait defined in aionui-db, implementation uses Sqlite prefix
