@@ -3,6 +3,7 @@ pub(crate) mod agent_runtime;
 pub mod agent_task;
 pub mod capability;
 pub mod cc_switch;
+pub mod connector;
 pub mod factory;
 pub(crate) mod idle_scanner;
 pub mod manager;
@@ -22,6 +23,9 @@ pub use agent_task::{AgentInstance, IAgentTask};
 pub use aionui_api_types::{
     AcpBuildExtra, AcpModelInfo, AionrsBuildExtra, OpenClawBuildExtra, OpenClawGatewayConfig, RemoteBuildExtra,
     SlashCommandItem,
+};
+pub use connector::{
+    ChunkPayload, ConnectorError, ConnectorEvent, ExitInfo, IAgentConnector, StopReason, ToolUsePayload, TurnSummary,
 };
 pub use capability::skill_manager::{
     AcpSkillManager, SkillDefinition, SkillIndex, build_skills_index_text, build_system_instructions,
