@@ -14,7 +14,7 @@ use aionui_common::{
     AgentKillReason, AgentType, AppError, Confirmation, ConversationStatus, ErrorChain, TimestampMs, now_ms,
 };
 use serde_json::Value;
-use tokio::sync::{Mutex, Notify, broadcast};
+use tokio::sync::{Mutex, Notify, broadcast, oneshot};
 use tracing::{debug, error, info};
 
 use crate::agent_runtime::AgentRuntime;
@@ -38,6 +38,13 @@ pub struct AionrsAgentManager {
     /// Signalled by `cancel()` to abort an in-flight `engine.run()` via
     /// `tokio::select!` in `send_message()`.
     cancel_notify: Arc<Notify>,
+    /// Receiver-side of the current turn's done-signal. Held in a
+    /// `Mutex<Option<..>>` so `cancel_current_turn` can take ownership and
+    /// await it. `None` means no turn is in flight. Writers: `begin_turn`
+    /// (sets) and `take_turn_done_rx` (clears). Readers: `cancel_current_turn`
+    /// awaits the receiver side; the sender is held inside a `TurnGuard` so
+    /// drop on the turn's exit path signals completion.
+    turn_done_rx: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 impl Drop for AionrsAgentManager {
@@ -146,7 +153,52 @@ impl AionrsAgentManager {
             approval_manager,
             confirmations,
             cancel_notify: Arc::new(Notify::new()),
+            turn_done_rx: Mutex::new(None),
         })
+    }
+}
+
+/// RAII guard that signals turn completion via a oneshot when dropped.
+///
+/// `_done_tx` is intentionally `Option<oneshot::Sender<()>>` so the field
+/// can be moved out of `Some(..)` into `None` on drop without unsafe code.
+/// The actual signalling happens through Drop on `oneshot::Sender`.
+pub struct TurnGuard {
+    _done_tx: Option<oneshot::Sender<()>>,
+}
+
+impl AionrsAgentManager {
+    /// Register a new turn-done pair. Returns a guard that signals on drop.
+    /// Returns `None` if a turn is already in flight (single-flight defence).
+    pub(crate) fn begin_turn(&self) -> Option<TurnGuard> {
+        let (done_tx, done_rx) = oneshot::channel();
+        let mut slot = self.turn_done_rx.try_lock().ok()?;
+        if slot.is_some() {
+            return None;
+        }
+        *slot = Some(done_rx);
+        Some(TurnGuard { _done_tx: Some(done_tx) })
+    }
+
+    /// Take the current turn's done-receiver, if any.
+    #[allow(dead_code)] // wired up by IAgentConnector::cancel_current_turn in Task 3
+    pub(crate) async fn take_turn_done_rx(&self) -> Option<oneshot::Receiver<()>> {
+        self.turn_done_rx.lock().await.take()
+    }
+
+    #[cfg(test)]
+    pub fn begin_turn_for_test(&self) -> Option<TurnGuard> {
+        self.begin_turn()
+    }
+
+    #[cfg(test)]
+    pub async fn cancel_for_test(&self) -> Result<(), AppError> {
+        // Mirrors connector cancel_current_turn semantics.
+        self.cancel_notify.notify_waiters();
+        if let Some(rx) = self.take_turn_done_rx().await {
+            let _ = rx.await;
+        }
+        Ok(())
     }
 }
 
@@ -183,6 +235,12 @@ impl crate::agent_task::IAgentTask for AionrsAgentManager {
             msg_id = %data.msg_id,
             "Aionrs send_message started"
         );
+
+        let _turn_guard = match self.begin_turn() {
+            Some(g) => g,
+            None => return Err(AppError::Conflict("Aionrs turn already in flight".into())),
+        };
+
         self.runtime.bump_activity();
         self.runtime.reset_for_new_turn(ConversationStatus::Running);
 
@@ -203,7 +261,9 @@ impl crate::agent_task::IAgentTask for AionrsAgentManager {
         let elapsed_ms = now_ms() - started_at;
         self.runtime.bump_activity();
 
-        match result {
+        // Drop turn_guard explicitly *after* status emit so cancel-waiter sees
+        // the runtime in its terminal state.
+        let outcome = match result {
             Some(Ok(_)) => {
                 info!(
                     conversation_id = %self.runtime.conversation_id(),
@@ -230,7 +290,10 @@ impl crate::agent_task::IAgentTask for AionrsAgentManager {
                 self.runtime.emit_finish(None);
                 Ok(())
             }
-        }
+        };
+
+        drop(_turn_guard);
+        outcome
     }
 
     async fn cancel(&self) -> Result<(), AppError> {
@@ -442,6 +505,56 @@ mod tests {
 
         assert_eq!(agent.status(), Some(ConversationStatus::Pending));
         assert!(matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn cancel_waits_for_in_flight_run_to_drop() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        use tokio::sync::Notify;
+
+        let agent = Arc::new(
+            AionrsAgentManager::new("conv-cancel".into(), "/project".into(), make_test_config(), None)
+                .await
+                .unwrap(),
+        );
+
+        // Spawn a fake turn: register a turn_done pair manually, then sleep.
+        // We can't drive a real engine.run() in unit tests (no provider), so we
+        // exercise the lifecycle hook directly.
+        let release = Arc::new(Notify::new());
+        let release_for_task = release.clone();
+        let agent_for_task = agent.clone();
+        let turn = tokio::spawn(async move {
+            let _guard = agent_for_task.begin_turn_for_test().expect("turn slot free");
+            release_for_task.notified().await;
+            // _guard is dropped here, signalling done_tx.
+        });
+
+        // Give the turn a moment to register.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // cancel must NOT return until the spawned turn completes.
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled_flag = cancelled.clone();
+        let agent_for_cancel = agent.clone();
+        let cancel_task = tokio::spawn(async move {
+            agent_for_cancel.cancel_for_test().await.unwrap();
+            cancelled_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        // After 50ms, cancel should still be waiting.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !cancelled.load(std::sync::atomic::Ordering::SeqCst),
+            "cancel returned before the in-flight turn dropped"
+        );
+
+        // Release the fake turn.
+        release.notify_one();
+        turn.await.unwrap();
+        cancel_task.await.unwrap();
+        assert!(cancelled.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
