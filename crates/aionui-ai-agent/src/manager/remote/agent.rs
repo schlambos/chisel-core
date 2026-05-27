@@ -15,8 +15,13 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
 use crate::agent_runtime::AgentRuntime;
-use crate::protocol::events::{AgentStreamEvent, FinishEventData, StartEventData, TextEventData, ThinkingEventData};
+use crate::manager::remote::local_fs_mcp::LocalFsMcpServer;
+use crate::manager::remote::opencode_mcp;
+use crate::protocol::events::{
+    AcpPermissionEventData, AgentStreamEvent, FinishEventData, StartEventData, TextEventData, ThinkingEventData,
+};
 use crate::types::SendMessageData;
+use aionui_common::ConfirmationOption;
 
 /// Internal mutable state for the Remote agent.
 struct RemoteState {
@@ -81,6 +86,12 @@ pub struct RemoteAgentManager {
     _reader_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// HTTP client for OpenCode transport.
     http_client: reqwest::Client,
+    /// Client-side MCP server vending fs tools scoped to
+    /// `runtime.workspace()`, bound to the LAN-routable interface so
+    /// the remote OpenCode can dial in. Some after a successful session
+    /// create + mcp.add. None before session create or after teardown.
+    /// Per-session — never shared across conversations.
+    local_fs_mcp: Mutex<Option<LocalFsMcpServer>>,
 }
 
 impl RemoteAgentManager {
@@ -113,6 +124,7 @@ impl RemoteAgentManager {
             ws_sink: Mutex::new(None),
             _reader_handle: Mutex::new(None),
             http_client,
+            local_fs_mcp: Mutex::new(None),
         })
     }
 
@@ -169,11 +181,15 @@ impl RemoteAgentManager {
         let conversation_id = self.runtime.conversation_id().to_string();
         let workspace = self.runtime.workspace().to_string();
 
+        // The remote OpenCode server has no access to the client's local
+        // filesystem, so do NOT advertise `workspace` as a `?directory=`
+        // query param — that path would be interpreted as a server-local
+        // path. Client filesystem access is routed through the local-fs
+        // MCP server registered at session-create time. `workspace` stays
+        // available as the local MCP project root via `self.runtime`.
+        let _ = workspace;
         let reader_handle = tokio::spawn(async move {
-            let mut req_builder = client
-                .get(&event_url)
-                .query(&[("directory", workspace.as_str())])
-                .header("Accept", "text/event-stream");
+            let mut req_builder = client.get(&event_url).header("Accept", "text/event-stream");
             if let Some(ref h) = auth {
                 req_builder = req_builder.header(AUTHORIZATION, h.as_str());
             }
@@ -395,6 +411,104 @@ impl RemoteAgentManager {
                     }
                 }
             }
+            "permission.asked" => {
+                // Map OpenCode's permission request to AionUi's Confirmation
+                // queue and emit the event the UI listens for. The user's
+                // reply flows back through `confirm()` → POST
+                // `/permission/{id}/reply` (see the IAgentTask impl below).
+                let request_id = match props.get("id").and_then(|v| v.as_str()) {
+                    Some(id) => id.to_string(),
+                    None => {
+                        warn!(
+                            conversation_id = %self.runtime.conversation_id(),
+                            "permission.asked missing id; cannot prompt user"
+                        );
+                        return;
+                    }
+                };
+                let permission = props
+                    .get("permission")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let metadata = props.get("metadata").cloned().unwrap_or_else(|| json!({}));
+                let patterns: Vec<String> = props
+                    .get("patterns")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|p| p.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+
+                let title = if permission.is_empty() {
+                    "OpenCode permission request".to_string()
+                } else {
+                    format!("OpenCode wants to: {permission}")
+                };
+
+                // Prefer the most user-readable field from metadata if present
+                // (e.g. shell command body, edit description); otherwise dump
+                // metadata JSON, otherwise fall back to the patterns list.
+                let description = metadata
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .or_else(|| metadata.get("description").and_then(|v| v.as_str()).map(String::from))
+                    .or_else(|| metadata.get("filePath").and_then(|v| v.as_str()).map(String::from))
+                    .unwrap_or_else(|| {
+                        if metadata.as_object().map(|m| !m.is_empty()).unwrap_or(false) {
+                            metadata.to_string()
+                        } else if patterns.is_empty() {
+                            String::new()
+                        } else {
+                            patterns.join(", ")
+                        }
+                    });
+
+                let confirmation = Confirmation {
+                    id: request_id.clone(),
+                    call_id: request_id.clone(),
+                    title: Some(title),
+                    action: Some(permission.clone()),
+                    description,
+                    command_type: Some(permission.clone()),
+                    options: vec![
+                        ConfirmationOption {
+                            label: "Allow once".to_string(),
+                            value: Value::String("once".to_string()),
+                            params: None,
+                        },
+                        ConfirmationOption {
+                            label: "Allow always".to_string(),
+                            value: Value::String("always".to_string()),
+                            params: None,
+                        },
+                        ConfirmationOption {
+                            label: "Reject".to_string(),
+                            value: Value::String("reject".to_string()),
+                            params: None,
+                        },
+                    ],
+                };
+
+                {
+                    let mut state = self.state.write().await;
+                    // Replace any prior entry with the same id so duplicate
+                    // events (OpenCode re-emits on reconnect) don't pile up.
+                    state.confirmations.retain(|c| c.call_id != confirmation.call_id);
+                    state.confirmations.push(confirmation.clone());
+                }
+
+                info!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    request_id = %request_id,
+                    permission = %permission,
+                    "queued OpenCode permission request for UI prompt"
+                );
+
+                self.runtime
+                    .emit(AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(
+                        confirmation,
+                    )));
+            }
             _ => {
                 debug!(
                     conversation_id = %self.runtime.conversation_id(),
@@ -576,16 +690,49 @@ impl RemoteAgentManager {
         })
     }
 
+    /// Ensure a `LocalFsMcpServer` is running and registered with the
+    /// remote OpenCode. Idempotent: returns immediately if already
+    /// registered. Failures here are logged but never returned — the
+    /// agent must still function (degraded) if MCP registration fails.
+    async fn ensure_local_fs_mcp(&self, base_url: &str, auth_header: Option<&str>) {
+        {
+            let guard = self.local_fs_mcp.lock().await;
+            if guard.is_some() {
+                return;
+            }
+        }
+        let workspace = self.runtime.workspace().to_string();
+        let conversation_id = self.runtime.conversation_id().to_string();
+        match opencode_mcp::start_and_register(&self.http_client, base_url, auth_header, &conversation_id, &workspace)
+            .await
+        {
+            Ok(server) => {
+                *self.local_fs_mcp.lock().await = Some(server);
+            }
+            Err(e) => {
+                warn!(
+                    conversation_id = %conversation_id,
+                    error = %e,
+                    "failed to start/register local fs MCP — agent will run without client-side fs"
+                );
+            }
+        }
+    }
+
     async fn opencode_create_session(&self, base_url: &str) -> Result<String, AppError> {
         let url = format!("{base_url}/session");
-        let workspace = self.runtime.workspace();
-
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+
+        // Register the client-side fs MCP with the remote OpenCode before
+        // creating the session, so any tool the agent emits on its first
+        // turn already sees our tools advertised. Best-effort: failure is
+        // logged but does not block session create — the agent will still
+        // function, just without client-side fs (matching prior behavior).
+        self.ensure_local_fs_mcp(base_url, auth_header.as_deref()).await;
 
         let mut req = self
             .http_client
             .post(&url)
-            .query(&[("directory", workspace)])
             .header("Content-Type", "application/json")
             .body("{}")
             .timeout(Duration::from_secs(10));
@@ -632,10 +779,7 @@ impl RemoteAgentManager {
         };
 
         let url = format!("{base_url}/session/{session_id}/prompt_async");
-        let workspace = self.runtime.workspace();
-
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
-
         let model = self.state.read().await.desired_model.clone();
 
         let mut body = json!({
@@ -656,7 +800,6 @@ impl RemoteAgentManager {
         let mut req = self
             .http_client
             .post(&url)
-            .query(&[("directory", workspace)])
             .json(&body)
             .timeout(Duration::from_secs(120));
 
@@ -890,6 +1033,29 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             *guard = None;
         }
 
+        // Take the MCP server out synchronously so the OS port frees
+        // immediately on Drop; the OpenCode disconnect runs on a
+        // detached task because kill() is sync.
+        if let Ok(mut guard) = self.local_fs_mcp.try_lock()
+            && let Some(server) = guard.take()
+        {
+            let http_client = self.http_client.clone();
+            let base_url = normalize_base_url(&self.remote_config.url);
+            let auth_header =
+                build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+            let conversation_id = self.runtime.conversation_id().to_string();
+            tokio::spawn(async move {
+                opencode_mcp::disconnect_from_opencode(
+                    &http_client,
+                    &base_url,
+                    auth_header.as_deref(),
+                    &conversation_id,
+                )
+                .await;
+                server.shutdown().await;
+            });
+        }
+
         Ok(())
     }
 }
@@ -906,7 +1072,7 @@ impl RemoteAgentManager {
 
 /// Remote-specific operations reached through `AgentInstance::Remote(..)`.
 impl RemoteAgentManager {
-    pub fn confirm(&self, _msg_id: &str, call_id: &str, _data: Value, always_allow: bool) -> Result<(), AppError> {
+    pub fn confirm(&self, _msg_id: &str, call_id: &str, data: Value, always_allow: bool) -> Result<(), AppError> {
         if let Ok(mut state) = self.state.try_write() {
             if always_allow && let Some(conf) = state.confirmations.iter().find(|c| c.call_id == call_id) {
                 let key = approval_key(conf.action.as_deref(), conf.command_type.as_deref());
@@ -916,6 +1082,77 @@ impl RemoteAgentManager {
         }
 
         if is_opencode_protocol(&self.remote_config.protocol) {
+            // Translate the UI's choice into the OpenCode reply string.
+            // Prefer the option value the frontend sent (we attached
+            // "once"/"always"/"reject" in the permission.asked handler).
+            // Fall back to the always_allow flag, then "once".
+            let reply = data
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| data.get("value").and_then(|v| v.as_str()).map(str::to_owned))
+                .unwrap_or_else(|| {
+                    if always_allow {
+                        "always".to_string()
+                    } else {
+                        "once".to_string()
+                    }
+                });
+            let reply = match reply.as_str() {
+                "once" | "always" | "reject" => reply,
+                _ => {
+                    if always_allow {
+                        "always".to_string()
+                    } else {
+                        "once".to_string()
+                    }
+                }
+            };
+
+            let base_url = normalize_base_url(&self.remote_config.url);
+            let auth_header =
+                build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+            let http_client = self.http_client.clone();
+            let conversation_id = self.runtime.conversation_id().to_string();
+            let call_id = call_id.to_string();
+            tokio::spawn(async move {
+                let url = format!("{base_url}/permission/{call_id}/reply");
+                let mut req = http_client
+                    .post(&url)
+                    .json(&json!({ "reply": reply }))
+                    .timeout(Duration::from_secs(10));
+                if let Some(h) = auth_header {
+                    req = req.header(AUTHORIZATION, h);
+                }
+                match req.send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        info!(
+                            conversation_id = %conversation_id,
+                            request_id = %call_id,
+                            reply = %reply,
+                            "OpenCode permission reply sent"
+                        );
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        warn!(
+                            conversation_id = %conversation_id,
+                            request_id = %call_id,
+                            status = %status,
+                            body = %body,
+                            "OpenCode permission reply returned non-success"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            conversation_id = %conversation_id,
+                            request_id = %call_id,
+                            error = %e,
+                            "OpenCode permission reply request failed"
+                        );
+                    }
+                }
+            });
             return Ok(());
         }
 

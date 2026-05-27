@@ -25,6 +25,7 @@ regex.workspace = true
 reqwest.workspace = true
 dashmap.workspace = true
 futures-util.workspace = true
+ignore.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
