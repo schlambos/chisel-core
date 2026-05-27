@@ -20,6 +20,7 @@ use crate::manager::remote::local_fs_mcp::LocalFsMcpServer;
 use crate::manager::remote::local_fs_mcp::project_tree::render_project_tree_default;
 use crate::manager::remote::opencode_commands::{self, OpenCodeCommand};
 use crate::manager::remote::opencode_mcp;
+use crate::manager::remote::opencode_models;
 use crate::protocol::events::{
     AcpPermissionEventData, AgentStreamEvent, FinishEventData, StartEventData, TextEventData, ThinkingEventData,
 };
@@ -60,6 +61,12 @@ struct RemoteState {
     /// `opencode_send` for template expansion. Lifetime: tied to this
     /// `RemoteAgentManager` instance — re-fetched only on reconnect.
     opencode_commands: Option<Vec<OpenCodeCommand>>,
+    /// Cached `model_id -> context_window` map (`GET /config/providers`).
+    /// `None` before the first fetch; `Some(map)` afterwards (empty map on
+    /// fetch failure is allowed so we don't retry every turn). Used to fill
+    /// the `size` field of the synthesized `acp_context_usage` event.
+    /// Lifetime: tied to this `RemoteAgentManager` instance.
+    model_context_limits: Option<HashMap<String, u64>>,
 }
 
 /// Configuration for connecting to a remote agent.
@@ -148,6 +155,7 @@ impl RemoteAgentManager {
                 desired_model: None,
                 desired_agent: None,
                 opencode_commands: None,
+                model_context_limits: None,
             }),
             ws_sink: Mutex::new(None),
             _reader_handle: Mutex::new(None),
@@ -427,14 +435,11 @@ impl RemoteAgentManager {
                 }
             }
             "message.part.updated" => {
-                if let Some(part) = props.get("part") {
-                    if let Some(part_type) = part.get("type").and_then(|v| v.as_str()) {
-                        if part_type == "reasoning" {
-                            if let Some(part_id) = part.get("id").and_then(|v| v.as_str()) {
-                                self.state.write().await.reasoning_parts.insert(part_id.to_string());
-                            }
-                        }
-                    }
+                if let Some(part) = props.get("part")
+                    && part.get("type").and_then(|v| v.as_str()) == Some("reasoning")
+                    && let Some(part_id) = part.get("id").and_then(|v| v.as_str())
+                {
+                    self.state.write().await.reasoning_parts.insert(part_id.to_string());
                 }
             }
             "message.updated" => {
@@ -466,6 +471,30 @@ impl RemoteAgentManager {
                         }
 
                         if info.get("finish").and_then(|v| v.as_str()) == Some("stop") {
+                            // OpenCode emits no native usage event, but the
+                            // finished assistant message carries `info.tokens`.
+                            // Pair it with the model's context window (from the
+                            // provider catalog) to synthesize the
+                            // `acp_context_usage` event the renderer's meter
+                            // already consumes (`{ used, size }`).
+                            //
+                            // This MUST be emitted before `Finish`: the stream
+                            // relay treats `Finish` as terminal and breaks its
+                            // loop, dropping any event emitted afterwards.
+                            if let Some(tokens) = info.get("tokens") {
+                                let used = opencode_models::context_tokens_used(tokens);
+                                if used > 0 {
+                                    let size = match info.get("modelID").and_then(|v| v.as_str()) {
+                                        Some(model_id) => self.context_limit_for(model_id).await,
+                                        None => 0,
+                                    };
+                                    self.runtime.emit(AgentStreamEvent::AcpContextUsage(json!({
+                                        "used": used,
+                                        "size": size,
+                                    })));
+                                }
+                            }
+
                             self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
                                 session_id: session_id.clone(),
                             }));
@@ -636,6 +665,31 @@ impl RemoteAgentManager {
         let mut guard = self.state.write().await;
         guard.opencode_commands = Some(fetched.clone());
         fetched
+    }
+
+    /// Resolve a model's context window (in tokens) from OpenCode's provider
+    /// catalog, fetching and caching it on first use. Returns `0` when the
+    /// model is unknown or the catalog can't be reached — the renderer then
+    /// falls back to its default context limit.
+    async fn context_limit_for(&self, model_id: &str) -> u64 {
+        {
+            let guard = self.state.read().await;
+            if let Some(ref cached) = guard.model_context_limits {
+                return cached.get(model_id).copied().unwrap_or(0);
+            }
+        }
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        let fetched = opencode_models::fetch_context_limits(&self.http_client, &base_url, auth_header.as_deref()).await;
+        debug!(
+            conversation_id = %self.runtime.conversation_id(),
+            model_count = fetched.len(),
+            "Populated OpenCode model context-limit cache"
+        );
+        let limit = fetched.get(model_id).copied().unwrap_or(0);
+        let mut guard = self.state.write().await;
+        guard.model_context_limits = Some(fetched);
+        limit
     }
 
     /// Slash-command list exposed via `IAgentTask::get_slash_commands`
