@@ -179,6 +179,7 @@ fn event_type_name(event: &AgentStreamEvent) -> &'static str {
         AgentStreamEvent::SkillSuggest(_) => "SkillSuggest",
         AgentStreamEvent::CronTrigger(_) => "CronTrigger",
         AgentStreamEvent::AcpModelInfo(_) => "AcpModelInfo",
+        AgentStreamEvent::AssistantModelInfo(_) => "AssistantModelInfo",
         AgentStreamEvent::AcpModeInfo(_) => "AcpModeInfo",
         AgentStreamEvent::AcpConfigOption(_) => "AcpConfigOption",
         AgentStreamEvent::AcpSessionInfo(_) => "AcpSessionInfo",

@@ -185,6 +185,7 @@ impl ChannelMessageService {
             | AgentStreamEvent::SkillSuggest(_)
             | AgentStreamEvent::CronTrigger(_)
             | AgentStreamEvent::AcpModelInfo(_)
+            | AgentStreamEvent::AssistantModelInfo(_)
             | AgentStreamEvent::AcpModeInfo(_)
             | AgentStreamEvent::AcpConfigOption(_)
             | AgentStreamEvent::AcpSessionInfo(_)

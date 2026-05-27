@@ -3,7 +3,7 @@ use std::sync::Arc;
 use aionui_ai_agent::{
     AgentStreamEvent,
     protocol::events::{
-        ThinkingEventData,
+        AssistantModelInfoEventData, ThinkingEventData,
         tool_call::{AcpToolCallSessionUpdateKind, AcpToolCallStatus, ToolCallStatus},
     },
 };
@@ -106,6 +106,12 @@ impl StreamRelay {
         let mut active_text: Option<TextSegmentState> = None;
         let mut active_thinking: Option<ThinkingSegmentState> = None;
         let mut used_primary_msg_id = false;
+        // Latest provider/model id for the assistant message currently being
+        // streamed. Captured from `AssistantModelInfo` events (OpenCode emits
+        // one per assistant message at creation, before any text deltas) and
+        // attached to every persisted text segment in this turn so the model
+        // tag survives history reload.
+        let mut current_model: Option<AssistantModelInfoEventData> = None;
 
         loop {
             match rx.recv().await {
@@ -116,8 +122,13 @@ impl StreamRelay {
                             continue;
                         }
 
-                        self.close_active_text_segment(&mut active_text, &mut text_segments, "finish")
-                            .await;
+                        self.close_active_text_segment(
+                            &mut active_text,
+                            &mut text_segments,
+                            "finish",
+                            current_model.as_ref(),
+                        )
+                        .await;
 
                         let segment = active_thinking.get_or_insert_with(|| ThinkingSegmentState {
                             id: Self::mint_segment_msg_id(&mut used_primary_msg_id, &self.msg_id),
@@ -130,6 +141,7 @@ impl StreamRelay {
                     AgentStreamEvent::Text(data) => {
                         self.complete_active_thinking(&mut active_thinking).await;
 
+                        let is_new_segment = active_text.is_none();
                         let segment = active_text.get_or_insert_with(|| TextSegmentState {
                             id: Self::mint_segment_msg_id(&mut used_primary_msg_id, &self.msg_id),
                             buffer: String::new(),
@@ -137,12 +149,30 @@ impl StreamRelay {
                             record_created: false,
                             flush_counter: 0,
                         });
+
+                        // When a text segment opens, re-emit AssistantModelInfo
+                        // bound to this segment's msg_id so the text bubble gets
+                        // stamped with the model. Required for reasoning-first
+                        // assistant messages: the thinking bubble claims the
+                        // primary msg_id and the text segment gets a fresh one,
+                        // so the original AssistantModelInfo (carried with the
+                        // primary id) lands on the wrong bubble. The renderer's
+                        // merge handles the duplicate harmlessly when text was
+                        // already first.
+                        if is_new_segment && let Some(model) = current_model.as_ref() {
+                            let rebind = AgentStreamEvent::AssistantModelInfo(AssistantModelInfoEventData {
+                                message_id: model.message_id.clone(),
+                                provider_id: model.provider_id.clone(),
+                                model_id: model.model_id.clone(),
+                            });
+                            self.forward_to_websocket_with_msg_id(&segment.id, &rebind);
+                        }
                         self.forward_to_websocket_with_msg_id(&segment.id, &event);
                         segment.buffer.push_str(&data.content);
                         full_text_buffer.push_str(&data.content);
                         segment.flush_counter += 1;
                         if segment.flush_counter >= FLUSH_INTERVAL {
-                            self.flush_text_segment(segment).await;
+                            self.flush_text_segment(segment, current_model.as_ref()).await;
                             segment.flush_counter = 0;
                         }
                     }
@@ -169,10 +199,13 @@ impl StreamRelay {
                             } else {
                                 "finish"
                             },
+                            current_model.as_ref(),
                         )
                         .await;
                         self.forward_to_websocket(&event);
-                        let outcome = self.finalize(&full_text_buffer, &text_segments, &event).await;
+                        let outcome = self
+                            .finalize(&full_text_buffer, &text_segments, &event, current_model.as_ref())
+                            .await;
                         if self.complete_turn {
                             Self::complete_conversation(&self.repo, &self.broadcaster, &self.conversation_id).await;
                         }
@@ -180,22 +213,45 @@ impl StreamRelay {
                     }
                     AgentStreamEvent::ToolCall(data) => {
                         self.complete_active_thinking(&mut active_thinking).await;
-                        self.close_active_text_segment(&mut active_text, &mut text_segments, "finish")
-                            .await;
+                        self.close_active_text_segment(
+                            &mut active_text,
+                            &mut text_segments,
+                            "finish",
+                            current_model.as_ref(),
+                        )
+                        .await;
                         self.forward_to_websocket(&event);
                         self.persist_tool_call(data).await;
                     }
                     AgentStreamEvent::AcpToolCall(data) => {
                         self.complete_active_thinking(&mut active_thinking).await;
-                        self.close_active_text_segment(&mut active_text, &mut text_segments, "finish")
-                            .await;
+                        self.close_active_text_segment(
+                            &mut active_text,
+                            &mut text_segments,
+                            "finish",
+                            current_model.as_ref(),
+                        )
+                        .await;
                         self.forward_to_websocket(&event);
                         self.persist_acp_tool_call(data).await;
                     }
+                    AgentStreamEvent::AssistantModelInfo(data) => {
+                        // Remember the model for this assistant message so
+                        // subsequent text segment flushes/finalizations can
+                        // persist it. Forward verbatim so the renderer can
+                        // also stamp the in-flight bubble.
+                        current_model = Some(data.clone());
+                        self.forward_to_websocket(&event);
+                    }
                     AgentStreamEvent::ToolGroup(entries) => {
                         self.complete_active_thinking(&mut active_thinking).await;
-                        self.close_active_text_segment(&mut active_text, &mut text_segments, "finish")
-                            .await;
+                        self.close_active_text_segment(
+                            &mut active_text,
+                            &mut text_segments,
+                            "finish",
+                            current_model.as_ref(),
+                        )
+                        .await;
                         self.forward_to_websocket(&event);
                         self.persist_tool_group(entries).await;
                     }
@@ -212,14 +268,20 @@ impl StreamRelay {
                     );
 
                     self.complete_active_thinking(&mut active_thinking).await;
-                    self.close_active_text_segment(&mut active_text, &mut text_segments, "finish")
-                        .await;
+                    self.close_active_text_segment(
+                        &mut active_text,
+                        &mut text_segments,
+                        "finish",
+                        current_model.as_ref(),
+                    )
+                    .await;
                     // Channel closed without finish/error — still finalize
                     let outcome = self
                         .finalize(
                             &full_text_buffer,
                             &text_segments,
                             &AgentStreamEvent::Finish(aionui_ai_agent::protocol::events::FinishEventData::default()),
+                            current_model.as_ref(),
                         )
                         .await;
                     if self.complete_turn {
@@ -276,12 +338,30 @@ impl StreamRelay {
 
     /// Flush an active text segment to the database (create or update).
     #[tracing::instrument(skip_all)]
-    async fn flush_text_segment(&self, segment: &mut TextSegmentState) {
+    /// Build the persisted JSON for a text segment, optionally embedding the
+    /// provider/model that produced this assistant message. Snake-case keys
+    /// here map 1:1 to the camelCase fields the renderer's
+    /// `normalizeDbMessage` reads back.
+    fn build_text_content_json(buffer: &str, model: Option<&AssistantModelInfoEventData>) -> String {
+        match model {
+            Some(m) => json!({
+                "content": buffer,
+                "model": {
+                    "provider_id": m.provider_id,
+                    "model_id": m.model_id,
+                }
+            })
+            .to_string(),
+            None => json!({ "content": buffer }).to_string(),
+        }
+    }
+
+    async fn flush_text_segment(&self, segment: &mut TextSegmentState, model: Option<&AssistantModelInfoEventData>) {
         if segment.buffer.is_empty() {
             return;
         }
 
-        let content = json!({ "content": segment.buffer }).to_string();
+        let content = Self::build_text_content_json(&segment.buffer, model);
 
         if segment.record_created {
             let update = aionui_db::MessageRowUpdate {
@@ -312,12 +392,17 @@ impl StreamRelay {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn finalize_text_segment(&self, segment: TextSegmentState, status: &str) -> Option<PersistedTextSegment> {
+    async fn finalize_text_segment(
+        &self,
+        segment: TextSegmentState,
+        status: &str,
+        model: Option<&AssistantModelInfoEventData>,
+    ) -> Option<PersistedTextSegment> {
         if segment.buffer.is_empty() {
             return None;
         }
 
-        let content = json!({ "content": segment.buffer }).to_string();
+        let content = Self::build_text_content_json(&segment.buffer, model);
         if segment.record_created {
             let update = aionui_db::MessageRowUpdate {
                 content: Some(content),
@@ -354,6 +439,7 @@ impl StreamRelay {
         text: &str,
         text_segments: &[PersistedTextSegment],
         event: &AgentStreamEvent,
+        model: Option<&AssistantModelInfoEventData>,
     ) -> RelayOutcome {
         let mut outcome = RelayOutcome::default();
         let status = match event {
@@ -368,7 +454,7 @@ impl StreamRelay {
 
             if let Some(primary_segment) = text_segments.first() {
                 if processed.message != text || hidden {
-                    let content = json!({ "content": final_text }).to_string();
+                    let content = Self::build_text_content_json(&final_text, model);
                     let update = aionui_db::MessageRowUpdate {
                         content: Some(content),
                         status: Some(Some(status.to_owned())),
@@ -408,7 +494,7 @@ impl StreamRelay {
                     conversation_id: self.conversation_id.clone(),
                     msg_id: Some(self.msg_id.clone()),
                     r#type: "text".into(),
-                    content: json!({ "content": final_text }).to_string(),
+                    content: Self::build_text_content_json(&final_text, model),
                     position: Some("left".into()),
                     status: Some(status.to_owned()),
                     hidden: false,
@@ -481,11 +567,12 @@ impl StreamRelay {
         active_text: &mut Option<TextSegmentState>,
         text_segments: &mut Vec<PersistedTextSegment>,
         status: &str,
+        model: Option<&AssistantModelInfoEventData>,
     ) {
         let Some(text_segment) = active_text.take() else {
             return;
         };
-        if let Some(segment) = self.finalize_text_segment(text_segment, status).await {
+        if let Some(segment) = self.finalize_text_segment(text_segment, status, model).await {
             text_segments.push(segment);
         }
     }

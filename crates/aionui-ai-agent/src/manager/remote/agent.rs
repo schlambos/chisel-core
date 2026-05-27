@@ -33,6 +33,14 @@ struct RemoteState {
     opencode_session_id: Option<String>,
     /// Track which part IDs are reasoning (thinking) parts.
     reasoning_parts: HashSet<String>,
+    /// Assistant message IDs we've already emitted `AssistantModelInfo` for in this
+    /// session. OpenCode's `message.updated` fires multiple times per message
+    /// (creation, every part update, finish); we only need the first to capture
+    /// `info.modelID` / `info.providerID`.
+    /// Lifecycle: written in the `message.updated` handler (`agent.rs` event
+    /// dispatch); read alongside. Set lives for the lifetime of this
+    /// `RemoteAgentManager` instance (same as `reasoning_parts`).
+    model_info_emitted: HashSet<String>,
     /// The desired model for the next prompt (opencode format: `{"providerID":"...","id":"...","variant":"..."}`).
     desired_model: Option<Value>,
 }
@@ -119,6 +127,7 @@ impl RemoteAgentManager {
                 connection_status: RemoteAgentStatus::Unknown,
                 opencode_session_id: None,
                 reasoning_parts: HashSet::new(),
+                model_info_emitted: HashSet::new(),
                 desired_model: None,
             }),
             ws_sink: Mutex::new(None),
@@ -402,12 +411,37 @@ impl RemoteAgentManager {
             }
             "message.updated" => {
                 if let Some(info) = props.get("info") {
-                    if info.get("finish").and_then(|v| v.as_str()) == Some("stop")
-                        && info.get("role").and_then(|v| v.as_str()) == Some("assistant")
-                    {
-                        self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
-                            session_id: session_id.clone(),
-                        }));
+                    let is_assistant = info.get("role").and_then(|v| v.as_str()) == Some("assistant");
+                    if is_assistant {
+                        // Emit AssistantModelInfo once per assistant message,
+                        // on the first `message.updated` that carries
+                        // `info.modelID` / `info.providerID`. This fires at
+                        // message creation, before any `message.part.delta`,
+                        // so the renderer can stamp the model onto the
+                        // in-flight bubble before text streams in.
+                        if let (Some(message_id), Some(model_id), Some(provider_id)) = (
+                            info.get("id").and_then(|v| v.as_str()),
+                            info.get("modelID").and_then(|v| v.as_str()),
+                            info.get("providerID").and_then(|v| v.as_str()),
+                        ) {
+                            let mut state = self.state.write().await;
+                            if state.model_info_emitted.insert(message_id.to_string()) {
+                                drop(state);
+                                self.runtime.emit(AgentStreamEvent::AssistantModelInfo(
+                                    crate::protocol::events::AssistantModelInfoEventData {
+                                        message_id: message_id.to_string(),
+                                        provider_id: provider_id.to_string(),
+                                        model_id: model_id.to_string(),
+                                    },
+                                ));
+                            }
+                        }
+
+                        if info.get("finish").and_then(|v| v.as_str()) == Some("stop") {
+                            self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
+                                session_id: session_id.clone(),
+                            }));
+                        }
                     }
                 }
             }
@@ -1258,6 +1292,156 @@ mod tests {
             allow_insecure: false,
         };
         assert_eq!(config.protocol, "opencode");
+    }
+
+    async fn opencode_test_agent() -> RemoteAgentManager {
+        let config = RemoteAgentConfig {
+            remote_agent_id: "ra_test".to_string(),
+            protocol: "opencode".to_string(),
+            url: "http://127.0.0.1:4096".to_string(),
+            auth_type: "none".to_string(),
+            auth_token: None,
+            allow_insecure: false,
+        };
+        RemoteAgentManager::new("conv_model_info".to_string(), "/ws".to_string(), config)
+            .await
+            .unwrap()
+    }
+
+    /// Drains all events currently buffered in `rx` (non-blocking).
+    fn drain_events(rx: &mut broadcast::Receiver<AgentStreamEvent>) -> Vec<AgentStreamEvent> {
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn message_updated_emits_assistant_model_info_once() {
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        // Two `message.updated` payloads for the same assistant message.
+        // OpenCode fires this event multiple times per message (creation,
+        // every part update, finish); we should only emit `AssistantModelInfo`
+        // on the first one.
+        let creation_event = json!({
+            "type": "message.updated",
+            "properties": {
+                "sessionID": "sess_1",
+                "info": {
+                    "id": "msg_01",
+                    "role": "assistant",
+                    "modelID": "claude-sonnet-4-5",
+                    "providerID": "anthropic",
+                }
+            }
+        })
+        .to_string();
+        let finish_event = json!({
+            "type": "message.updated",
+            "properties": {
+                "sessionID": "sess_1",
+                "info": {
+                    "id": "msg_01",
+                    "role": "assistant",
+                    "modelID": "claude-sonnet-4-5",
+                    "providerID": "anthropic",
+                    "finish": "stop",
+                }
+            }
+        })
+        .to_string();
+
+        agent.handle_opencode_sse_event(&creation_event).await;
+        agent.handle_opencode_sse_event(&finish_event).await;
+
+        let events = drain_events(&mut rx);
+        let model_info_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentStreamEvent::AssistantModelInfo(_)))
+            .count();
+        assert_eq!(
+            model_info_count, 1,
+            "expected exactly one AssistantModelInfo emission, got {model_info_count}"
+        );
+        let model_info = events
+            .iter()
+            .find_map(|e| match e {
+                AgentStreamEvent::AssistantModelInfo(d) => Some(d),
+                _ => None,
+            })
+            .expect("AssistantModelInfo not emitted");
+        assert_eq!(model_info.message_id, "msg_01");
+        assert_eq!(model_info.provider_id, "anthropic");
+        assert_eq!(model_info.model_id, "claude-sonnet-4-5");
+
+        // Finish should still be emitted on the second event.
+        assert!(
+            events.iter().any(|e| matches!(e, AgentStreamEvent::Finish(_))),
+            "Finish event not emitted on stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn message_updated_user_role_does_not_emit_model_info() {
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        let user_event = json!({
+            "type": "message.updated",
+            "properties": {
+                "sessionID": "sess_1",
+                "info": {
+                    "id": "msg_user_01",
+                    "role": "user",
+                }
+            }
+        })
+        .to_string();
+        agent.handle_opencode_sse_event(&user_event).await;
+
+        let events = drain_events(&mut rx);
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentStreamEvent::AssistantModelInfo(_))),
+            "AssistantModelInfo must not fire for user messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn message_updated_different_assistant_messages_each_emit_model_info() {
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        for (msg_id, model) in [("msg_01", "claude-sonnet-4-5"), ("msg_02", "claude-opus-4-7")] {
+            let ev = json!({
+                "type": "message.updated",
+                "properties": {
+                    "sessionID": "sess_1",
+                    "info": {
+                        "id": msg_id,
+                        "role": "assistant",
+                        "modelID": model,
+                        "providerID": "anthropic",
+                    }
+                }
+            })
+            .to_string();
+            agent.handle_opencode_sse_event(&ev).await;
+        }
+
+        let events = drain_events(&mut rx);
+        let model_infos: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentStreamEvent::AssistantModelInfo(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(model_infos.len(), 2, "expected one emission per distinct message id");
+        assert_eq!(model_infos[0].model_id, "claude-sonnet-4-5");
+        assert_eq!(model_infos[1].model_id, "claude-opus-4-7");
     }
 
     #[tokio::test]

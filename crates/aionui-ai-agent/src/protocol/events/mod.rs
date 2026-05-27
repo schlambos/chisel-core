@@ -39,6 +39,7 @@ pub enum AgentStreamEvent {
     SkillSuggest(SkillSuggestEventData),
     CronTrigger(CronTriggerEventData),
     AcpModelInfo(serde_json::Value),
+    AssistantModelInfo(AssistantModelInfoEventData),
     AcpModeInfo(serde_json::Value),
     AcpConfigOption(serde_json::Value),
     AcpSessionInfo(serde_json::Value),
@@ -70,6 +71,17 @@ pub struct SessionAssignedEventData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextEventData {
     pub content: String,
+}
+
+/// Data for the `AssistantModelInfo` event — the provider/model id that produced
+/// the upcoming assistant message. Emitted once per assistant message, before
+/// the first text delta, so the renderer can stamp the model onto the in-flight
+/// message bubble.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssistantModelInfoEventData {
+    pub message_id: String,
+    pub provider_id: String,
+    pub model_id: String,
 }
 
 /// Data for the `Tips` event.
@@ -128,6 +140,30 @@ mod tests {
             assert_eq!(data.content, "Hello world");
         } else {
             panic!("Expected Text event");
+        }
+    }
+
+    #[test]
+    fn assistant_model_info_event_roundtrip() {
+        let event = AgentStreamEvent::AssistantModelInfo(AssistantModelInfoEventData {
+            message_id: "msg_01".into(),
+            provider_id: "anthropic".into(),
+            model_id: "claude-sonnet-4-5".into(),
+        });
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "assistant_model_info");
+        assert_eq!(json["data"]["message_id"], "msg_01");
+        assert_eq!(json["data"]["provider_id"], "anthropic");
+        assert_eq!(json["data"]["model_id"], "claude-sonnet-4-5");
+
+        let parsed: AgentStreamEvent = serde_json::from_value(json).unwrap();
+        match parsed {
+            AgentStreamEvent::AssistantModelInfo(d) => {
+                assert_eq!(d.message_id, "msg_01");
+                assert_eq!(d.provider_id, "anthropic");
+                assert_eq!(d.model_id, "claude-sonnet-4-5");
+            }
+            _ => panic!("Expected AssistantModelInfo event"),
         }
     }
 
