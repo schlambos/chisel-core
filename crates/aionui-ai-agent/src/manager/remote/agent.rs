@@ -132,6 +132,7 @@ impl RemoteAgentManager {
         conversation_id: String,
         workspace: String,
         remote_config: RemoteAgentConfig,
+        resume_session_id: Option<String>,
     ) -> Result<Self, AppError> {
         let runtime = AgentRuntime::new(conversation_id, workspace, 256);
 
@@ -149,7 +150,12 @@ impl RemoteAgentManager {
                 has_messages: false,
                 approval_memory: HashMap::new(),
                 connection_status: RemoteAgentStatus::Unknown,
-                opencode_session_id: None,
+                // Seed from the persisted `conversation.extra.sessionKey` so
+                // `connect_opencode` can validate it and `opencode_send` reuses
+                // it instead of creating a fresh server-side session. `None` for
+                // a brand-new conversation. Only consumed on the OpenCode HTTP
+                // path; harmless for WS protocols, which never read this field.
+                opencode_session_id: resume_session_id,
                 reasoning_parts: HashSet::new(),
                 model_info_emitted: HashSet::new(),
                 desired_model: None,
@@ -209,6 +215,39 @@ impl RemoteAgentManager {
             base_url = %base_url,
             "Connected to OpenCode server"
         );
+
+        // Validate a resumed session id (seeded from persisted
+        // `conversation.extra.sessionKey`) before reuse. OpenCode persists
+        // sessions on disk, so the id usually survives our restart — but it
+        // may have been deleted/expired server-side. Probing `GET /session/{id}`
+        // here means a stale id is cleared up front; `opencode_send` then
+        // transparently creates a fresh session rather than failing the first
+        // `prompt_async`. Runs only on the OpenCode path (this fn is opencode-only).
+        let resume_id = { self.state.read().await.opencode_session_id.clone() };
+        if let Some(session_id) = resume_id {
+            let mut req = self
+                .http_client
+                .get(format!("{base_url}/session/{session_id}"))
+                .timeout(Duration::from_secs(10));
+            if let Some(ref h) = auth_header {
+                req = req.header(AUTHORIZATION, h.as_str());
+            }
+            let valid = matches!(req.send().await, Ok(resp) if resp.status().is_success());
+            if valid {
+                info!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    session_id = %session_id,
+                    "Resuming persisted OpenCode session"
+                );
+            } else {
+                warn!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    session_id = %session_id,
+                    "Persisted OpenCode session is no longer valid; starting a fresh session"
+                );
+                self.state.write().await.opencode_session_id = None;
+            }
+        }
 
         // Prime the slash-command cache eagerly so the menu is populated
         // before the user types `/`. Best-effort: on failure we cache
@@ -1466,6 +1505,16 @@ impl RemoteAgentManager {
             .unwrap_or_default()
     }
 
+    /// The OpenCode session id (`ses_...`) to persist for resume, if one has
+    /// been established. Read by the conversation service after each turn and
+    /// written to `conversation.extra.sessionKey`. Mirrors
+    /// `OpenClawAgentManager::get_session_key`. Returns `None` for non-OpenCode
+    /// protocols (the field is only ever set on the OpenCode HTTP path) and
+    /// before the first session is created.
+    pub fn get_session_key(&self) -> Option<String> {
+        self.state.try_read().ok().and_then(|g| g.opencode_session_id.clone())
+    }
+
     pub fn check_approval(&self, action: &str, command_type: Option<&str>) -> bool {
         self.state
             .try_read()
@@ -1544,7 +1593,7 @@ mod tests {
             auth_token: None,
             allow_insecure: false,
         };
-        RemoteAgentManager::new("conv_model_info".to_string(), "/ws".to_string(), config)
+        RemoteAgentManager::new("conv_model_info".to_string(), "/ws".to_string(), config, None)
             .await
             .unwrap()
     }
@@ -1695,11 +1744,40 @@ mod tests {
             auth_token: None,
             allow_insecure: false,
         };
-        let agent = RemoteAgentManager::new("conv1".to_string(), "/ws".to_string(), config)
+        let agent = RemoteAgentManager::new("conv1".to_string(), "/ws".to_string(), config, None)
             .await
             .unwrap();
         assert_eq!(agent.agent_type(), AgentType::Remote);
         assert_eq!(agent.conversation_id(), "conv1");
         assert_eq!(agent.status(), None);
+    }
+
+    #[tokio::test]
+    async fn new_seeds_resume_session_id_into_get_session_key() {
+        let config = RemoteAgentConfig {
+            remote_agent_id: "ra_test".to_string(),
+            protocol: "opencode".to_string(),
+            url: "http://127.0.0.1:4096".to_string(),
+            auth_type: "none".to_string(),
+            auth_token: None,
+            allow_insecure: false,
+        };
+        // Seeded id is exposed via get_session_key for persistence/reuse.
+        let resumed = RemoteAgentManager::new(
+            "conv_resume".to_string(),
+            "/ws".to_string(),
+            config.clone(),
+            Some("ses_resume_123".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed.get_session_key().as_deref(), Some("ses_resume_123"));
+
+        // A brand-new conversation (no seed) exposes no session key until the
+        // first send creates one.
+        let fresh = RemoteAgentManager::new("conv_fresh".to_string(), "/ws".to_string(), config, None)
+            .await
+            .unwrap();
+        assert_eq!(fresh.get_session_key(), None);
     }
 }

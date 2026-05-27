@@ -83,6 +83,14 @@ pub struct RemoteBuildExtra {
     /// chosen agent. Optional — when absent the server picks its default.
     #[serde(default)]
     pub session_mode: Option<String>,
+    /// Persisted OpenCode session id (`ses_...`) for resume. Written back to
+    /// `conversation.extra.sessionKey` after each send (see
+    /// `aionui-conversation` `persist_session_key`); reloaded by
+    /// `factory/remote.rs` and validated against the server on rebuild so a
+    /// stale id is discarded rather than producing a failed first prompt.
+    /// Mirrors `OpenClawBuildExtra::session_key`. OpenCode HTTP path only.
+    #[serde(default, rename = "sessionKey")]
+    pub session_key: Option<String>,
 }
 
 /// Aionrs-specific fields extracted from `extra` in build task options.
@@ -125,4 +133,30 @@ pub struct AcpModelInfo {
 pub struct SlashCommandItem {
     pub command: String,
     pub description: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_build_extra_session_key_uses_session_key_alias() {
+        // Reads from the persisted `conversation.extra.sessionKey` key.
+        let extra: RemoteBuildExtra =
+            serde_json::from_value(serde_json::json!({ "remote_agent_id": "ra_1", "sessionKey": "ses_abc" })).unwrap();
+        assert_eq!(extra.session_key.as_deref(), Some("ses_abc"));
+
+        // Serializes back to `sessionKey`, matching `persist_session_key`'s write.
+        let json = serde_json::to_value(&extra).unwrap();
+        assert_eq!(json["sessionKey"], "ses_abc");
+        assert!(json.get("session_key").is_none());
+    }
+
+    #[test]
+    fn remote_build_extra_session_key_defaults_to_none() {
+        // Absent on a brand-new conversation — must not fail deserialization.
+        let extra: RemoteBuildExtra =
+            serde_json::from_value(serde_json::json!({ "remote_agent_id": "ra_1" })).unwrap();
+        assert_eq!(extra.session_key, None);
+    }
 }

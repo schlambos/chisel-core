@@ -42,7 +42,15 @@ pub(super) async fn build(
         auth_token,
         allow_insecure: row.allow_insecure,
     };
-    let agent = RemoteAgentManager::new(ctx.conversation_id, ctx.workspace, config).await?;
+    // Reload the persisted OpenCode session id (written back to
+    // `conversation.extra.sessionKey` after each send) so a rebuild —
+    // app restart, conversation reopen, manager re-instantiation —
+    // resumes the same server-side session instead of discarding its
+    // history/token continuity. `connect()` validates it below; a stale
+    // id is discarded so the next send starts fresh. Mirrors
+    // `factory/openclaw.rs`.
+    let resume_session_id = extra.session_key.clone();
+    let agent = RemoteAgentManager::new(ctx.conversation_id, ctx.workspace, config, resume_session_id).await?;
     let arc = Arc::new(agent);
     arc.connect().await?;
 

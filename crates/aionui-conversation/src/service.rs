@@ -243,6 +243,15 @@ impl ConversationService {
                 let exclude = take_string_array(obj, &["exclude_auto_inject_skills", "exclude_builtin_skills"]);
                 // Strip the stale cache field if a clone copied it in.
                 obj.remove("loaded_skills");
+                // A freshly created conversation must never inherit a prior
+                // session. `sessionKey` (OpenClaw / Remote-OpenCode resume id)
+                // is only ever written back to an *existing* row after a send;
+                // resume happens by rebuilding that same row, never via create.
+                // So if a clone copied `extra.sessionKey` in, drop it here so
+                // the new conversation starts a fresh server-side session.
+                // Authoritative backend guard covering all `create`/`clone_create`
+                // callers, independent of frontend clearing.
+                obj.remove("sessionKey");
                 (preset, exclude)
             }
             None => (Vec::new(), Vec::new()),
