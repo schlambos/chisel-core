@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use aionui_ai_agent::manager::remote::{RemoteAgentConfig, RemoteAgentManager};
+use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -73,6 +74,99 @@ async fn resume_keeps_valid_persisted_session() {
     // Validated id is retained, so the next send reuses it (no new session).
     assert_eq!(arc.get_session_key().as_deref(), Some("ses_valid"));
     // `.expect(0)` on POST /session is asserted when `server` drops.
+}
+
+#[tokio::test]
+async fn resume_registers_local_fs_mcp_for_valid_session() {
+    // Regression: a resumed OpenCode session must re-register the client's
+    // local fs MCP. The previous process's `LocalFsMcpServer` is gone (its
+    // loopback/LAN port was process-scoped), but the resumed server-side
+    // session still holds the stale registration. Without re-registering on
+    // connect, the model's first `mcp__aionui-local-fs-*` tool call dials a
+    // dead URL and surfaces "Unable to connect. Is the computer able to
+    // access the url?" — exactly the production failure this test guards.
+    let server = MockServer::start().await;
+    mount_connect_basics(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path("/session/ses_valid_mcp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "ses_valid_mcp" })))
+        .mount(&server)
+        .await;
+    // The whole point of the regression: `POST /mcp` MUST be called exactly
+    // once on resume (mirroring the new-session path).
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // A rebuild that resumes must NOT create a new server-side session.
+    Mock::given(method("POST"))
+        .and(path("/session"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    // `LocalFsMcpServer::start` requires the workspace to be an existing
+    // directory, so use a real tempdir rather than a fake path string —
+    // otherwise registration would silently fall through to the
+    // `ensure_local_fs_mcp` warn-and-return branch and `POST /mcp` would
+    // never fire, masking the regression.
+    let workspace = TempDir::new().unwrap();
+
+    let manager = RemoteAgentManager::new(
+        "conv_resume_register_mcp".to_string(),
+        workspace.path().to_string_lossy().into_owned(),
+        opencode_config(server.uri()),
+        Some("ses_valid_mcp".to_string()),
+    )
+    .await
+    .unwrap();
+    let arc = Arc::new(manager);
+    arc.connect().await.unwrap();
+
+    assert_eq!(arc.get_session_key().as_deref(), Some("ses_valid_mcp"));
+    // `.expect(1)` on POST /mcp is asserted when `server` drops.
+}
+
+#[tokio::test]
+async fn resume_skips_mcp_registration_for_stale_session() {
+    // The mirror of the regression above: when the persisted session id is
+    // stale (server-side 404), the client should NOT register a fs MCP yet.
+    // Registration is bound to a live session — registering against a dead
+    // id leaks a port and confuses later teardown. The fresh session created
+    // on the next send (`opencode_create_session`) handles registration.
+    let server = MockServer::start().await;
+    mount_connect_basics(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path("/session/ses_stale_mcp"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let workspace = TempDir::new().unwrap();
+    let manager = RemoteAgentManager::new(
+        "conv_resume_stale_mcp".to_string(),
+        workspace.path().to_string_lossy().into_owned(),
+        opencode_config(server.uri()),
+        Some("ses_stale_mcp".to_string()),
+    )
+    .await
+    .unwrap();
+    let arc = Arc::new(manager);
+    arc.connect().await.unwrap();
+
+    assert_eq!(arc.get_session_key(), None);
+    // `.expect(0)` on POST /mcp is asserted when `server` drops.
 }
 
 #[tokio::test]

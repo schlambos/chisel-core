@@ -239,6 +239,17 @@ impl RemoteAgentManager {
                     session_id = %session_id,
                     "Resuming persisted OpenCode session"
                 );
+                // Re-register the client-side fs MCP on resume. The previous
+                // process's `LocalFsMcpServer` is gone (its loopback/LAN port
+                // was process-scoped), but the resumed OpenCode session may
+                // still hold the stale registration on the server side. Re-
+                // registering replaces the dead URL with the new one so
+                // `mcp__aionui-local-fs-*` tool calls dial a live local
+                // server. Without this, the very first prompt on a resumed
+                // session fails with "Unable to connect" from the model
+                // because `opencode_create_session` (the only other call
+                // site) is skipped when a session id already exists.
+                self.ensure_local_fs_mcp(&base_url, auth_header.as_deref()).await;
             } else {
                 warn!(
                     conversation_id = %self.runtime.conversation_id(),
@@ -1091,6 +1102,19 @@ impl RemoteAgentManager {
         }
         if let Some(ref a) = agent {
             body["agent"] = json!(a);
+        }
+
+        // Surface the silent failure mode where the system hint instructs the
+        // model to use `mcp__aionui-local-fs-*` tools but no local fs MCP is
+        // registered. The user-visible symptom is "Unable to connect" from the
+        // model; without this log there is nothing in production logs to
+        // explain why. Best-effort observability — never blocks the prompt.
+        if self.local_fs_mcp.lock().await.is_none() {
+            warn!(
+                conversation_id = %self.runtime.conversation_id(),
+                "dispatching OpenCode prompt without a local fs MCP registration — \
+                 client-side filesystem tools will not work this turn"
+            );
         }
 
         let mut req = self
