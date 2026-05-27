@@ -32,12 +32,14 @@ pub fn all_tool_descriptors() -> Vec<ToolDescriptor> {
         ToolDescriptor {
             name: "read_file",
             description: "Read a UTF-8 text file from the user's local project. \
-Path must be RELATIVE to the project root (e.g. \"src/main.rs\"). \
-Use this instead of any built-in read tools — the project lives on the user's machine, not yours.",
+Paths are RELATIVE to the project root (e.g. \"src/main.rs\"). \
+Do NOT prepend the workspace's absolute path that appears in session context. \
+Use this instead of any built-in read tools — the project lives on the user's machine, not yours. \
+If you're unsure whether a path exists, call list_dir first — never tell the user a file is missing without verifying.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Relative path inside the project root." }
+                    "path": { "type": "string", "description": "Relative path inside the project root (e.g. \"src/main.rs\"). Do not prepend the workspace's absolute path." }
                 },
                 "required": ["path"]
             }),
@@ -45,12 +47,13 @@ Use this instead of any built-in read tools — the project lives on the user's 
         ToolDescriptor {
             name: "write_file",
             description: "Create or overwrite a UTF-8 text file in the user's local project. \
-Path must be RELATIVE to the project root. \
+Paths are RELATIVE to the project root (e.g. \"src/main.rs\"). \
+Do NOT prepend the workspace's absolute path that appears in session context. \
 Use this instead of any built-in write tools — the project lives on the user's machine, not yours.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
+                    "path": { "type": "string", "description": "Relative path inside the project root. Do not prepend the workspace's absolute path." },
                     "content": { "type": "string" }
                 },
                 "required": ["path", "content"]
@@ -59,23 +62,27 @@ Use this instead of any built-in write tools — the project lives on the user's
         ToolDescriptor {
             name: "list_dir",
             description: "List directory entries in the user's local project. \
-Path must be RELATIVE to the project root; pass \"\" or \".\" for the root.",
+Pass \"\" or \".\" for the project root. Subdirectories are RELATIVE (e.g. \"src\" or \"docs/api\"). \
+Do NOT prepend the workspace's absolute path that appears in session context. \
+Call this whenever you need to confirm what is or isn't present — do not assume from prior turns. \
+Re-list after any write/delete/rename if subsequent decisions depend on the new layout.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "default": "" }
+                    "path": { "type": "string", "default": "", "description": "\"\" or \".\" for the project root, otherwise a relative subdirectory (e.g. \"src\"). Do not prepend the workspace's absolute path." }
                 }
             }),
         },
         ToolDescriptor {
             name: "grep_dir",
             description: "Search for a regular expression across files in the user's local project. \
-Respects .gitignore. `path` is RELATIVE to project root (default: project root).",
+Respects .gitignore. `path` is RELATIVE to project root (default: project root). \
+Do NOT prepend the workspace's absolute path that appears in session context.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Regex pattern." },
-                    "path": { "type": "string", "default": "" },
+                    "path": { "type": "string", "default": "", "description": "Relative subdirectory; \"\" for the project root. Do not prepend the workspace's absolute path." },
                     "case_insensitive": { "type": "boolean", "default": false }
                 },
                 "required": ["pattern"]
@@ -83,21 +90,23 @@ Respects .gitignore. `path` is RELATIVE to project root (default: project root).
         },
         ToolDescriptor {
             name: "delete_file",
-            description: "Delete a file in the user's local project. Path must be RELATIVE to project root.",
+            description: "Delete a file in the user's local project. Paths are RELATIVE to project root. \
+Do NOT prepend the workspace's absolute path that appears in session context.",
             input_schema: json!({
                 "type": "object",
-                "properties": { "path": { "type": "string" } },
+                "properties": { "path": { "type": "string", "description": "Relative path inside the project root. Do not prepend the workspace's absolute path." } },
                 "required": ["path"]
             }),
         },
         ToolDescriptor {
             name: "rename",
-            description: "Rename or move a file within the user's local project. Both paths RELATIVE to project root.",
+            description: "Rename or move a file within the user's local project. Both paths RELATIVE to project root. \
+Do NOT prepend the workspace's absolute path that appears in session context.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "from": { "type": "string" },
-                    "to": { "type": "string" }
+                    "from": { "type": "string", "description": "Relative source path. Do not prepend the workspace's absolute path." },
+                    "to":   { "type": "string", "description": "Relative destination path. Do not prepend the workspace's absolute path." }
                 },
                 "required": ["from", "to"]
             }),
@@ -105,44 +114,71 @@ Respects .gitignore. `path` is RELATIVE to project root (default: project root).
     ]
 }
 
-/// Resolve a model-supplied relative path against `root`, refusing anything
-/// that escapes it (via `..`, absolute paths, or symlink chains pointing
-/// outside). Returns the canonicalized absolute path on success.
+/// Resolve a model-supplied path against `root`, refusing anything that
+/// escapes it (via `..` traversal or absolute paths pointing outside).
+/// Returns the canonicalized absolute path on success.
+///
+/// Tolerates absolute paths that happen to live under the project root —
+/// models often paste the workspace's absolute path from session context
+/// despite the "relative" instruction; rejecting those produces the
+/// intermittent "is_error=true" failures we were seeing in production.
 pub fn resolve_under_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
-    let trimmed = rel.trim().trim_start_matches('/');
-    let rel_path = Path::new(if trimmed.is_empty() { "." } else { trimmed });
+    let trimmed = rel.trim();
+    let input = Path::new(trimmed);
+
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("project root canonicalize failed: {e}"))?;
+
+    let working: String = if input.is_absolute() {
+        let abs_canon = if input.exists() {
+            input.canonicalize().map_err(|e| format!("canonicalize failed: {e}"))?
+        } else {
+            input.to_path_buf()
+        };
+        match abs_canon.strip_prefix(&root_canon) {
+            Ok(stripped) if stripped.as_os_str().is_empty() => String::from("."),
+            Ok(stripped) => stripped.to_string_lossy().into_owned(),
+            Err(_) => return Err(format!("path escapes project root: {rel}")),
+        }
+    } else if trimmed.is_empty() {
+        String::from(".")
+    } else {
+        trimmed.to_string()
+    };
+
+    let rel_path = Path::new(if working.is_empty() { "." } else { &working });
 
     for component in rel_path.components() {
-        match component {
-            Component::ParentDir => return Err(format!("path escapes project root: {rel}")),
-            Component::Prefix(_) | Component::RootDir => {
-                return Err(format!("path escapes project root: {rel}"));
-            }
-            _ => {}
+        if matches!(component, Component::ParentDir) {
+            return Err(format!("path escapes project root: {rel}"));
         }
     }
 
     let joined = root.join(rel_path);
 
-    // We don't require the target to exist (for write_file / rename targets),
-    // so canonicalize the parent and re-attach the file name when needed.
+    // We don't require the target — or its parent chain — to exist. Write
+    // operations (write_file, rename) often target paths several levels
+    // deep into directories that haven't been created yet; the operation
+    // itself does the mkdir. Walk up to the nearest existing ancestor,
+    // canonicalize that, and re-attach the missing tail.
     let canon = if joined.exists() {
         joined.canonicalize().map_err(|e| format!("canonicalize failed: {e}"))?
-    } else if let Some(parent) = joined.parent() {
-        let parent_canon = parent
-            .canonicalize()
-            .map_err(|e| format!("canonicalize parent failed: {e}"))?;
-        match joined.file_name() {
-            Some(name) => parent_canon.join(name),
-            None => parent_canon,
-        }
     } else {
-        return Err(format!("invalid path: {rel}"));
+        let existing = joined
+            .ancestors()
+            .skip(1)
+            .find(|a| a.exists())
+            .ok_or_else(|| format!("no existing ancestor for: {rel}"))?;
+        let existing_canon = existing
+            .canonicalize()
+            .map_err(|e| format!("canonicalize ancestor failed: {e}"))?;
+        let tail = joined
+            .strip_prefix(existing)
+            .map_err(|e| format!("strip_prefix failed: {e}"))?;
+        existing_canon.join(tail)
     };
 
-    let root_canon = root
-        .canonicalize()
-        .map_err(|e| format!("project root canonicalize failed: {e}"))?;
     if !canon.starts_with(&root_canon) {
         return Err(format!("path escapes project root: {rel}"));
     }
@@ -436,6 +472,52 @@ mod tests {
         let b = resolve_under_root(&root, ".").unwrap();
         assert_eq!(a, root);
         assert_eq!(b, root);
+    }
+
+    #[test]
+    fn resolve_accepts_absolute_path_inside_root() {
+        let (_g, root) = tmp();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+
+        let abs_root = root.to_string_lossy().into_owned();
+        let resolved = resolve_under_root(&root, &abs_root).unwrap();
+        assert_eq!(resolved, root);
+
+        let abs_sub = root.join("src").to_string_lossy().into_owned();
+        let resolved = resolve_under_root(&root, &abs_sub).unwrap();
+        assert_eq!(resolved, root.join("src"));
+
+        let abs_file = root.join("src/main.rs").to_string_lossy().into_owned();
+        let resolved = resolve_under_root(&root, &abs_file).unwrap();
+        assert_eq!(resolved, root.join("src/main.rs"));
+    }
+
+    #[test]
+    fn resolve_accepts_nonexistent_multilevel_path_for_write() {
+        let (_g, root) = tmp();
+        // Relative path whose parent dirs don't exist yet — write_file
+        // would create them. Resolver must not bail before that.
+        let resolved = resolve_under_root(&root, "new_dir/sub/new_file.txt").unwrap();
+        assert_eq!(resolved, root.join("new_dir/sub/new_file.txt"));
+
+        // Same case via absolute path from session context.
+        let abs_new = root.join("other/deeper/file.txt").to_string_lossy().into_owned();
+        let resolved = resolve_under_root(&root, &abs_new).unwrap();
+        assert_eq!(resolved, root.join("other/deeper/file.txt"));
+    }
+
+    #[tokio::test]
+    async fn write_file_creates_missing_parent_dirs() {
+        let (_g, root) = tmp();
+        let (out, err) = dispatch(
+            &root,
+            "write_file",
+            &json!({"path": "newly/nested/dir/hello.txt", "content": "hi"}),
+        )
+        .await;
+        assert!(!err, "write_file should succeed: {out}");
+        assert!(root.join("newly/nested/dir/hello.txt").exists());
     }
 
     #[tokio::test]

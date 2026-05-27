@@ -179,7 +179,11 @@ async fn handle_rpc(
             } else {
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
                 let (text, is_error) = dispatch(&state.project_root, tool_name, &arguments).await;
-                debug!(tool = tool_name, is_error, "fs MCP tool dispatch");
+                if is_error {
+                    warn!(tool = tool_name, error = %text, "fs MCP tool returned error");
+                } else {
+                    debug!(tool = tool_name, "fs MCP tool dispatch");
+                }
                 JsonRpcResponse::success(
                     id,
                     json!({

@@ -58,5 +58,16 @@ pub(super) async fn build(
         warn!(error = %e, model_id, "Failed to seed initial model on remote agent");
     }
 
+    // Same pattern as `current_model_id`: forward the user's pre-session
+    // mode pick (e.g. OpenCode's `build` / `plan` from the Guid page) so
+    // the first prompt lands on the chosen agent without an extra
+    // round-trip. Non-opencode protocols reject the call inside
+    // `set_mode`; we log and continue rather than failing the build.
+    if let Some(mode) = extra.session_mode.as_deref().filter(|s| !s.is_empty())
+        && let Err(e) = arc.set_mode(mode).await
+    {
+        warn!(error = %e, mode, "Failed to seed initial mode on remote agent");
+    }
+
     Ok(AgentInstance::Remote(arc))
 }

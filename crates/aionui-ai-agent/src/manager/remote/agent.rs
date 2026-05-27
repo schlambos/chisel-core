@@ -16,6 +16,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::agent_runtime::AgentRuntime;
 use crate::manager::remote::local_fs_mcp::LocalFsMcpServer;
+use crate::manager::remote::local_fs_mcp::project_tree::render_project_tree_default;
 use crate::manager::remote::opencode_mcp;
 use crate::protocol::events::{
     AcpPermissionEventData, AgentStreamEvent, FinishEventData, StartEventData, TextEventData, ThinkingEventData,
@@ -43,6 +44,13 @@ struct RemoteState {
     model_info_emitted: HashSet<String>,
     /// The desired model for the next prompt (opencode format: `{"providerID":"...","id":"...","variant":"..."}`).
     desired_model: Option<Value>,
+    /// The desired OpenCode agent (`"build"` / `"plan"`) for the next prompt.
+    /// Mirrors the `agent` field of OpenCode's `PromptInput`. Updated by
+    /// `set_mode` (client-initiated switch) and the
+    /// `session.next.agent.switched` SSE event (server-initiated). `None`
+    /// before the first selection — `opencode_send` omits the field so the
+    /// server picks its default ("build").
+    desired_agent: Option<String>,
 }
 
 /// Configuration for connecting to a remote agent.
@@ -129,6 +137,7 @@ impl RemoteAgentManager {
                 reasoning_parts: HashSet::new(),
                 model_info_emitted: HashSet::new(),
                 desired_model: None,
+                desired_agent: None,
             }),
             ws_sink: Mutex::new(None),
             _reader_handle: Mutex::new(None),
@@ -369,6 +378,10 @@ impl RemoteAgentManager {
             }
             "session.next.agent.switched" => {
                 let agent = props.get("agent").and_then(|v| v.as_str()).unwrap_or("build");
+                {
+                    let mut state = self.state.write().await;
+                    state.desired_agent = Some(agent.to_owned());
+                }
                 self.runtime.emit(AgentStreamEvent::AcpModeInfo(json!({"mode": agent})));
             }
             "message.part.delta" => {
@@ -824,14 +837,26 @@ impl RemoteAgentManager {
 
         let url = format!("{base_url}/session/{session_id}/prompt_async");
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
-        let model = self.state.read().await.desired_model.clone();
+        let (model, agent) = {
+            let state = self.state.read().await;
+            (state.desired_model.clone(), state.desired_agent.clone())
+        };
 
         let workspace = self.runtime.workspace().to_string();
+        let tree = {
+            let root = std::path::PathBuf::from(&workspace);
+            tokio::task::spawn_blocking(move || render_project_tree_default(&root))
+                .await
+                .unwrap_or_else(|_| String::from("(failed to enumerate project)"))
+        };
         let system_hint = format!(
             "The user's project is located at {workspace} on their local machine. \
              Use ONLY the mcp__aionui-local-fs-* tools for all file operations. \
              These tools operate on the user's actual project files. \
-             All file paths should be relative to {workspace}."
+             All file paths should be relative to the project root (e.g. \"src/main.rs\"), \
+             not absolute. Before claiming a file or directory does not exist, ALWAYS call \
+             list_dir or read_file on it — do not rely on memory of prior turns. The current \
+             project layout (gitignore-respecting; may be truncated) is:\n\n{tree}"
         );
 
         let mut body = json!({
@@ -848,6 +873,9 @@ impl RemoteAgentManager {
             } else {
                 body["model"] = m.clone();
             }
+        }
+        if let Some(ref a) = agent {
+            body["agent"] = json!(a);
         }
 
         let mut req = self
@@ -930,6 +958,59 @@ impl RemoteAgentManager {
                 available_models: available,
             }),
         })
+    }
+
+    /// Set the desired OpenCode agent (`build` / `plan`) for the next prompt.
+    ///
+    /// OpenCode has no dedicated mode-switch endpoint — the agent is selected
+    /// per-prompt via the `agent` field of `PromptInput`. Stashing it on
+    /// `RemoteState` lets the next `opencode_send` pick it up; the
+    /// `session.next.agent.switched` SSE event will then reflect the change
+    /// back to the UI via `AcpModeInfo`.
+    ///
+    /// Non-opencode protocols return `BadRequest` rather than silently
+    /// no-op'ing, so callers learn the operation is unsupported.
+    pub async fn set_mode(&self, mode: &str) -> Result<(), AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(format!(
+                "Mode switching is not supported for remote protocol '{}'",
+                self.remote_config.protocol
+            )));
+        }
+        let normalized = mode.trim();
+        if !matches!(normalized, "build" | "plan") {
+            return Err(AppError::BadRequest(format!(
+                "Unsupported OpenCode mode '{normalized}'; expected 'build' or 'plan'"
+            )));
+        }
+        {
+            let mut state = self.state.write().await;
+            state.desired_agent = Some(normalized.to_owned());
+        }
+        // Mirror the same UI sync path the SSE handler uses so the selector
+        // updates immediately instead of waiting for the next prompt round-trip.
+        self.runtime
+            .emit(AgentStreamEvent::AcpModeInfo(json!({"mode": normalized})));
+        Ok(())
+    }
+
+    /// Return the current mode for the conversation mode API.
+    ///
+    /// `initialized = false` before any selection or server-emitted switch —
+    /// matches the contract `AgentModeSelector` expects so it doesn't clobber
+    /// `initialMode` while the agent is warming up.
+    pub async fn mode(&self) -> Result<aionui_api_types::AgentModeResponse, AppError> {
+        let guard = self.state.read().await;
+        match guard.desired_agent.as_deref() {
+            Some(m) => Ok(aionui_api_types::AgentModeResponse {
+                mode: m.to_owned(),
+                initialized: true,
+            }),
+            None => Ok(aionui_api_types::AgentModeResponse {
+                mode: "build".into(),
+                initialized: false,
+            }),
+        }
     }
 
     async fn fetch_opencode_models(&self) -> Result<Vec<aionui_api_types::ModelInfoEntry>, AppError> {

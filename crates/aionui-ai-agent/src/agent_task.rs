@@ -318,14 +318,15 @@ impl AgentInstance {
         }
     }
 
-    /// Get the current session mode. Only ACP and Aionrs model a mode;
-    /// other variants report `mode = "default"`, `initialized = false`
-    /// so cron / UI can skip mode reconciliation.
+    /// Get the current session mode. ACP, Aionrs, and the Remote OpenCode
+    /// protocol model a mode. Other variants report `mode = "default"`,
+    /// `initialized = false` so cron / UI can skip mode reconciliation.
     pub async fn get_mode(&self) -> Result<aionui_api_types::AgentModeResponse, AppError> {
         match self {
             Self::Acp(m) => m.mode().await,
             Self::Aionrs(m) => m.mode().await,
-            Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Ok(aionui_api_types::AgentModeResponse {
+            Self::Remote(m) => m.mode().await,
+            Self::OpenClaw(_) | Self::Nanobot(_) => Ok(aionui_api_types::AgentModeResponse {
                 mode: "default".into(),
                 initialized: false,
             }),
@@ -334,14 +335,15 @@ impl AgentInstance {
         }
     }
 
-    /// Set the session mode. Unsupported for variants other than ACP /
-    /// Aionrs — returns a `BadRequest` so the caller can surface an
-    /// actionable error rather than silently no-op.
+    /// Set the session mode. Supported by ACP, Aionrs, and Remote (OpenCode
+    /// only). Other variants return `BadRequest` so the caller can surface
+    /// an actionable error rather than silently no-op.
     pub async fn set_mode(&self, mode: &str) -> Result<(), AppError> {
         match self {
             Self::Acp(m) => m.set_mode(mode).await,
             Self::Aionrs(m) => m.set_mode(mode).await,
-            Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Err(AppError::BadRequest(
+            Self::Remote(m) => m.set_mode(mode).await,
+            Self::OpenClaw(_) | Self::Nanobot(_) => Err(AppError::BadRequest(
                 "Mode switching is not supported for this agent type".into(),
             )),
             #[cfg(any(test, feature = "test-support"))]

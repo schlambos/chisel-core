@@ -77,6 +77,12 @@ pub struct RemoteBuildExtra {
     /// first send.
     #[serde(default)]
     pub current_model_id: Option<String>,
+    /// Initial mode selection forwarded from the Guid (New Chat) page.
+    /// For OpenCode this is `"build"` or `"plan"`; consumed by the factory
+    /// via `RemoteAgentManager::set_mode` so the first prompt lands on the
+    /// chosen agent. Optional — when absent the server picks its default.
+    #[serde(default)]
+    pub session_mode: Option<String>,
 }
 
 /// Aionrs-specific fields extracted from `extra` in build task options.
