@@ -421,7 +421,11 @@ impl AgentInstance {
         match self {
             Self::Acp(m) => m.load_slash_commands().await,
             Self::Aionrs(m) => m.get_slash_commands().await,
-            Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Ok(Vec::new()),
+            // Native OpenCode advertises commands via GET /command; the
+            // Remote manager fetches them lazily and returns an empty list
+            // for non-opencode protocols (openclaw / nanobot).
+            Self::Remote(m) => m.get_slash_commands_impl().await,
+            Self::OpenClaw(_) | Self::Nanobot(_) => Ok(Vec::new()),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_slash_commands().await,
         }

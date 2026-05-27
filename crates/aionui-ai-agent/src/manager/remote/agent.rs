@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use aionui_api_types::SlashCommandItem;
 use aionui_common::{
     AgentKillReason, AgentType, AppError, Confirmation, ConversationStatus, ErrorChain, RemoteAgentStatus, TimestampMs,
 };
@@ -17,6 +18,7 @@ use tracing::{debug, error, info, warn};
 use crate::agent_runtime::AgentRuntime;
 use crate::manager::remote::local_fs_mcp::LocalFsMcpServer;
 use crate::manager::remote::local_fs_mcp::project_tree::render_project_tree_default;
+use crate::manager::remote::opencode_commands::{self, OpenCodeCommand};
 use crate::manager::remote::opencode_mcp;
 use crate::protocol::events::{
     AcpPermissionEventData, AgentStreamEvent, FinishEventData, StartEventData, TextEventData, ThinkingEventData,
@@ -51,6 +53,13 @@ struct RemoteState {
     /// before the first selection — `opencode_send` omits the field so the
     /// server picks its default ("build").
     desired_agent: Option<String>,
+    /// Cached OpenCode slash-command catalog (`GET /command`). `None`
+    /// before the first fetch; `Some(vec)` afterwards (empty vec on
+    /// fetch failure is allowed so we don't retry every keystroke).
+    /// Read by the menu (`get_slash_commands_impl`) and by
+    /// `opencode_send` for template expansion. Lifetime: tied to this
+    /// `RemoteAgentManager` instance — re-fetched only on reconnect.
+    opencode_commands: Option<Vec<OpenCodeCommand>>,
 }
 
 /// Configuration for connecting to a remote agent.
@@ -138,6 +147,7 @@ impl RemoteAgentManager {
                 model_info_emitted: HashSet::new(),
                 desired_model: None,
                 desired_agent: None,
+                opencode_commands: None,
             }),
             ws_sink: Mutex::new(None),
             _reader_handle: Mutex::new(None),
@@ -191,6 +201,11 @@ impl RemoteAgentManager {
             base_url = %base_url,
             "Connected to OpenCode server"
         );
+
+        // Prime the slash-command cache eagerly so the menu is populated
+        // before the user types `/`. Best-effort: on failure we cache
+        // an empty list rather than retry — see `ensure_opencode_commands`.
+        let _ = self.ensure_opencode_commands().await;
 
         let this = Arc::clone(self);
         let event_url = format!("{base_url}/event");
@@ -599,6 +614,40 @@ impl RemoteAgentManager {
         Ok(())
     }
 
+    /// Populate the cached slash-command catalog. Idempotent: returns
+    /// the cached list immediately if already fetched. Best-effort — a
+    /// network failure stores an empty vec rather than leaving `None`,
+    /// so we don't hammer the server on every menu open.
+    async fn ensure_opencode_commands(&self) -> Vec<OpenCodeCommand> {
+        {
+            let guard = self.state.read().await;
+            if let Some(ref cached) = guard.opencode_commands {
+                return cached.clone();
+            }
+        }
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        let fetched = opencode_commands::fetch(&self.http_client, &base_url, auth_header.as_deref()).await;
+        debug!(
+            conversation_id = %self.runtime.conversation_id(),
+            command_count = fetched.len(),
+            "Populated OpenCode slash-command cache"
+        );
+        let mut guard = self.state.write().await;
+        guard.opencode_commands = Some(fetched.clone());
+        fetched
+    }
+
+    /// Slash-command list exposed via `IAgentTask::get_slash_commands`
+    /// for the Remote variant. Empty for non-opencode protocols.
+    pub async fn get_slash_commands_impl(&self) -> Result<Vec<SlashCommandItem>, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Ok(Vec::new());
+        }
+        let cmds = self.ensure_opencode_commands().await;
+        Ok(cmds.iter().map(OpenCodeCommand::to_slash_item).collect())
+    }
+
     /// Fetch available models from OpenCode and emit them to the frontend.
     async fn emit_model_info(&self) {
         let models = self.fetch_opencode_models().await.unwrap_or_default();
@@ -823,6 +872,13 @@ impl RemoteAgentManager {
     }
 
     /// Send a message via OpenCode HTTP prompt_async.
+    ///
+    /// If `content` starts with `/`, looks it up in the cached command
+    /// catalog and expands the template before sending. OpenCode's
+    /// server does not intercept `/`-prefixed prompts, so without this
+    /// step the raw `/cmd` string would be forwarded to the LLM as-is.
+    /// Unknown `/cmd` strings fall through unchanged — the user may
+    /// have typed something the server doesn't advertise.
     async fn opencode_send(&self, content: &str) -> Result<(), AppError> {
         let base_url = normalize_base_url(&self.remote_config.url);
 
@@ -837,10 +893,60 @@ impl RemoteAgentManager {
 
         let url = format!("{base_url}/session/{session_id}/prompt_async");
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+
+        // Resolve slash-command expansion. The per-command `agent`/`model`
+        // override only applies to *this* prompt and must not clobber the
+        // session-level `desired_agent`/`desired_model` the user picked
+        // from the mode/model selectors.
+        let (expanded_content, override_agent, override_model) = {
+            if let Some((name, args)) = opencode_commands::parse_invocation(content) {
+                let cmds = self.ensure_opencode_commands().await;
+                if let Some(cmd) = cmds.iter().find(|c| c.name == name) {
+                    let body = match cmd.template.as_deref() {
+                        Some(t) => opencode_commands::expand_template(t, args),
+                        // No template — pass the args through as the prompt.
+                        // Empty args fall back to the bare command name so
+                        // the LLM at least sees what was requested.
+                        None => {
+                            if args.is_empty() {
+                                cmd.name.clone()
+                            } else {
+                                args.to_string()
+                            }
+                        }
+                    };
+                    (body, cmd.agent.clone(), cmd.model.clone())
+                } else {
+                    (content.to_string(), None, None)
+                }
+            } else {
+                (content.to_string(), None, None)
+            }
+        };
+
         let (model, agent) = {
             let state = self.state.read().await;
-            (state.desired_model.clone(), state.desired_agent.clone())
+            (
+                override_model
+                    .map(|m| {
+                        // Per-command model override: encode as the same
+                        // shape `set_model` produces so the body builder
+                        // below handles it uniformly.
+                        let (provider_id, model_id) = m
+                            .split_once("::")
+                            .map(|(p, m)| (p.to_string(), m.to_string()))
+                            .unwrap_or_else(|| ("opencode-go".to_string(), m));
+                        json!({
+                            "providerID": provider_id,
+                            "id": model_id,
+                            "variant": "default",
+                        })
+                    })
+                    .or_else(|| state.desired_model.clone()),
+                override_agent.or_else(|| state.desired_agent.clone()),
+            )
         };
+        let content = expanded_content.as_str();
 
         let workspace = self.runtime.workspace().to_string();
         let tree = {
