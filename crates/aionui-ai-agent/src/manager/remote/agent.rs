@@ -347,6 +347,22 @@ impl RemoteAgentManager {
 
         let session_id = props.get("sessionID").and_then(|v| v.as_str()).map(String::from);
 
+        // OpenCode's `/event` SSE stream is global: a single connection
+        // receives events for EVERY session on the server, including sessions
+        // owned by other AionUi conversations pointed at the same server. Each
+        // `RemoteAgentManager` runs its own reader, so without this guard every
+        // manager would process every other conversation's events — bleeding
+        // one thread's Start/text/Finish into another's stream. Drop any
+        // session-scoped event whose `sessionID` is not this conversation's
+        // own session. Events with no `sessionID` (`server.connected`,
+        // `server.heartbeat`, etc.) are not session-scoped and pass through.
+        if let Some(ref event_session) = session_id {
+            let own = self.state.read().await.opencode_session_id.clone();
+            if own.as_deref() != Some(event_session.as_str()) {
+                return;
+            }
+        }
+
         match event_type {
             "session.status" => {
                 let status_type = props.get("status").and_then(|v| v.get("type")).and_then(|v| v.as_str());
@@ -1593,9 +1609,14 @@ mod tests {
             auth_token: None,
             allow_insecure: false,
         };
-        RemoteAgentManager::new("conv_model_info".to_string(), "/ws".to_string(), config, None)
+        let agent = RemoteAgentManager::new("conv_model_info".to_string(), "/ws".to_string(), config, None)
             .await
-            .unwrap()
+            .unwrap();
+        // Simulate an established session so SSE events for `sess_1` (used by
+        // the handler tests below) pass the per-session ownership filter in
+        // `handle_opencode_sse_event`.
+        agent.state.write().await.opencode_session_id = Some("sess_1".to_string());
+        agent
     }
 
     /// Drains all events currently buffered in `rx` (non-blocking).
@@ -1732,6 +1753,68 @@ mod tests {
         assert_eq!(model_infos.len(), 2, "expected one emission per distinct message id");
         assert_eq!(model_infos[0].model_id, "claude-sonnet-4-5");
         assert_eq!(model_infos[1].model_id, "claude-opus-4-7");
+    }
+
+    #[tokio::test]
+    async fn sse_event_for_foreign_session_is_ignored() {
+        // The OpenCode `/event` stream is global; this manager owns `sess_1`
+        // (seeded by `opencode_test_agent`). An event tagged with a different
+        // session must not bleed into this conversation's stream.
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        let foreign = json!({
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "sess_OTHER",
+                "field": "text",
+                "delta": "text from another conversation",
+                "partID": "prt_x",
+            }
+        })
+        .to_string();
+        agent.handle_opencode_sse_event(&foreign).await;
+        assert!(
+            drain_events(&mut rx).is_empty(),
+            "events for a foreign session must be dropped"
+        );
+
+        // Sanity: the same event for THIS session is delivered.
+        let own = json!({
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "sess_1",
+                "field": "text",
+                "delta": "hello",
+                "partID": "prt_y",
+            }
+        })
+        .to_string();
+        agent.handle_opencode_sse_event(&own).await;
+        let events = drain_events(&mut rx);
+        assert!(
+            events.iter().any(|e| matches!(e, AgentStreamEvent::Text(d) if d.content == "hello")),
+            "events for this conversation's own session must be delivered"
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_event_without_session_id_passes_through() {
+        // Non-session-scoped events (no `sessionID`) are not filtered. Use a
+        // `session.error` payload, which emits an Error regardless of session.
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        let ev = json!({
+            "type": "session.error",
+            "properties": { "error": { "data": { "message": "boom" } } }
+        })
+        .to_string();
+        agent.handle_opencode_sse_event(&ev).await;
+        assert!(
+            drain_events(&mut rx).iter().any(|e| matches!(e, AgentStreamEvent::Error(_))),
+            "events with no sessionID must pass through"
+        );
     }
 
     #[tokio::test]
