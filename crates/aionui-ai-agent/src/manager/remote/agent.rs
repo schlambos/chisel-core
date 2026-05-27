@@ -22,7 +22,8 @@ use crate::manager::remote::opencode_commands::{self, OpenCodeCommand};
 use crate::manager::remote::opencode_mcp;
 use crate::manager::remote::opencode_models;
 use crate::protocol::events::{
-    AcpPermissionEventData, AgentStreamEvent, FinishEventData, StartEventData, TextEventData, ThinkingEventData,
+    AcpPermissionEventData, AgentStreamEvent, FinishEventData, PlanEventData, StartEventData, TextEventData,
+    ThinkingEventData,
 };
 use crate::types::SendMessageData;
 use aionui_common::ConfirmationOption;
@@ -566,6 +567,20 @@ impl RemoteAgentManager {
                             }));
                         }
                     }
+                }
+            }
+            "todo.updated" => {
+                // OpenCode emits `todo.updated` as a dedicated SSE event whenever
+                // an agent calls the `todowrite` tool. Payload shape:
+                //   { type: "todo.updated",
+                //     properties: { sessionID: "ses_...", todos: [{content, status, priority}] } }
+                // Map directly to the existing `Plan` event the frontend already
+                // renders for ACP `SessionUpdate::Plan` notifications.
+                if let Some(entries) = extract_opencode_todo_entries(props) {
+                    self.runtime.emit(AgentStreamEvent::Plan(PlanEventData {
+                        session_id: session_id.clone(),
+                        entries,
+                    }));
                 }
             }
             "permission.asked" => {
@@ -1566,6 +1581,19 @@ impl RemoteAgentManager {
     }
 }
 
+/// Extract todo entries from OpenCode's `todo.updated` SSE event.
+///
+/// Payload shape:
+///   `{ "properties": { "sessionID": "ses_...", "todos": [{content, status, priority}] } }`
+///
+/// Returns the `todos` array verbatim (including the empty array, which represents
+/// "todos cleared"). Returns `None` only when the `todos` field is missing or
+/// malformed, so callers can distinguish "no event" from "explicit clear".
+fn extract_opencode_todo_entries(props: &Value) -> Option<Vec<Value>> {
+    let todos = props.get("todos")?.as_array()?;
+    Some(todos.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1886,5 +1914,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fresh.get_session_key(), None);
+    }
+
+    #[test]
+    fn extract_todo_entries_returns_todos_array() {
+        let props = json!({
+            "sessionID": "sess_1",
+            "todos": [
+                { "content": "Create Makefile", "status": "completed", "priority": "high" },
+                { "content": "Port PPPP protocol", "status": "in_progress", "priority": "medium" }
+            ]
+        });
+        let entries = extract_opencode_todo_entries(&props).expect("todos array present");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["content"], "Create Makefile");
+        assert_eq!(entries[1]["status"], "in_progress");
+    }
+
+    #[test]
+    fn extract_todo_entries_returns_empty_array_when_cleared() {
+        // OpenCode publishes `todos: []` when an agent clears its plan; the
+        // frontend needs that explicit signal to hide the Todos tab.
+        let props = json!({ "sessionID": "sess_1", "todos": [] });
+        let entries = extract_opencode_todo_entries(&props).expect("empty array is a valid clear signal");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn extract_todo_entries_returns_none_when_field_missing() {
+        let props = json!({ "sessionID": "sess_1" });
+        assert!(extract_opencode_todo_entries(&props).is_none());
+    }
+
+    #[test]
+    fn extract_todo_entries_returns_none_when_field_wrong_type() {
+        let props = json!({ "sessionID": "sess_1", "todos": "not-an-array" });
+        assert!(extract_opencode_todo_entries(&props).is_none());
+    }
+
+    #[tokio::test]
+    async fn todo_updated_event_emits_plan_event() {
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        let event = json!({
+            "type": "todo.updated",
+            "properties": {
+                "sessionID": "sess_1",
+                "todos": [
+                    { "content": "Step one", "status": "completed", "priority": "high" },
+                    { "content": "Step two", "status": "pending", "priority": "medium" }
+                ]
+            }
+        })
+        .to_string();
+
+        agent.handle_opencode_sse_event(&event).await;
+
+        let events = drain_events(&mut rx);
+        let plan = events
+            .iter()
+            .find_map(|e| match e {
+                AgentStreamEvent::Plan(d) => Some(d),
+                _ => None,
+            })
+            .expect("Plan event should be emitted from todo.updated");
+        assert_eq!(plan.entries.len(), 2);
+        assert_eq!(plan.entries[0]["content"], "Step one");
+        assert_eq!(plan.session_id.as_deref(), Some("sess_1"));
+    }
+
+    #[tokio::test]
+    async fn todo_updated_event_for_foreign_session_is_ignored() {
+        // todo.updated carries sessionID; the per-session ownership filter at the
+        // top of handle_opencode_sse_event must drop events for other sessions.
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        let event = json!({
+            "type": "todo.updated",
+            "properties": {
+                "sessionID": "ses_other",
+                "todos": [{ "content": "Other session", "status": "pending", "priority": "low" }]
+            }
+        })
+        .to_string();
+
+        agent.handle_opencode_sse_event(&event).await;
+
+        assert!(
+            !drain_events(&mut rx).iter().any(|e| matches!(e, AgentStreamEvent::Plan(_))),
+            "todo.updated for a foreign session must not emit Plan"
+        );
     }
 }
