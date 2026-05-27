@@ -44,7 +44,10 @@ impl ConversationService {
         if req.model_id.trim().is_empty() {
             return Err(AppError::BadRequest("model_id must not be empty".into()));
         }
-        self.get_or_build_agent(conversation_id).await?.set_model(&req.model_id).await
+        self.get_or_build_agent(conversation_id)
+            .await?
+            .set_model(&req.model_id)
+            .await
     }
 
     // ── Usage / Slash commands ──────────────────────────────────────
@@ -54,7 +57,10 @@ impl ConversationService {
     }
 
     pub async fn get_slash_commands(&self, conversation_id: &str) -> Result<Vec<SlashCommandItem>, AppError> {
-        self.get_or_build_agent(conversation_id).await?.get_slash_commands().await
+        self.get_or_build_agent(conversation_id)
+            .await?
+            .get_slash_commands()
+            .await
     }
 
     // ── Side question ───────────────────────────────────────────────

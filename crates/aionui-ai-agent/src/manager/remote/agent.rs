@@ -730,11 +730,21 @@ impl RemoteAgentManager {
         // function, just without client-side fs (matching prior behavior).
         self.ensure_local_fs_mcp(base_url, auth_header.as_deref()).await;
 
+        let session_body = json!({
+            "permission": [
+                { "permission": "bash",  "pattern": "*", "action": "deny" },
+                { "permission": "read",  "pattern": "*", "action": "deny" },
+                { "permission": "edit",  "pattern": "*", "action": "deny" },
+                { "permission": "glob",  "pattern": "*", "action": "deny" },
+                { "permission": "grep",  "pattern": "*", "action": "deny" }
+            ]
+        });
+
         let mut req = self
             .http_client
             .post(&url)
             .header("Content-Type", "application/json")
-            .body("{}")
+            .body(serde_json::to_string(&session_body).unwrap())
             .timeout(Duration::from_secs(10));
 
         if let Some(ref h) = auth_header {
@@ -782,8 +792,17 @@ impl RemoteAgentManager {
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
         let model = self.state.read().await.desired_model.clone();
 
+        let workspace = self.runtime.workspace().to_string();
+        let system_hint = format!(
+            "The user's project is located at {workspace} on their local machine. \
+             Use ONLY the mcp__aionui-local-fs-* tools for all file operations. \
+             These tools operate on the user's actual project files. \
+             All file paths should be relative to {workspace}."
+        );
+
         let mut body = json!({
-            "parts": [{"type": "text", "text": content}]
+            "parts": [{"type": "text", "text": content}],
+            "system": system_hint
         });
         if let Some(ref m) = model {
             if let Some(id) = m.get("id") {
