@@ -4,6 +4,7 @@
 //! submodules. All logic lives in the modules below.
 
 mod config;
+mod remote_session_sync;
 mod router;
 mod services;
 

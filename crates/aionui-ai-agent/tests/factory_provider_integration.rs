@@ -73,9 +73,11 @@ fn make_factory(
         agent_registry,
         acp_agent_service,
         data_dir: PathBuf::from("/tmp/aionrs-test"),
+        work_dir: PathBuf::from("/tmp/aionrs-test"),
         backend_binary_path: Arc::new(PathBuf::from("/tmp/aionrs-test/aioncore")),
         guide_mcp_config: None,
         mcp_server_repo: None,
+        conversation_repo: None,
     })
 }
 

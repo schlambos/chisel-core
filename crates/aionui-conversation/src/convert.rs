@@ -35,9 +35,25 @@ pub fn row_to_response_with_extra(
     mut extra: serde_json::Value,
     data_dir: &Path,
 ) -> Result<ConversationResponse, AppError> {
+    let mut remote_workspace_fallback_applied = false;
+    if row.r#type == "remote"
+        && data_dir.is_dir()
+        && let Some(workspace) = extra.get("workspace").and_then(|v| v.as_str())
+        && !workspace.is_empty()
+        && !Path::new(workspace).is_dir()
+    {
+        if let Some(obj) = extra.as_object_mut() {
+            obj.insert(
+                "workspace".to_owned(),
+                serde_json::Value::String(data_dir.to_string_lossy().into_owned()),
+            );
+            remote_workspace_fallback_applied = true;
+        }
+    }
+
     let is_temporary_workspace = {
         let ws = extra.get("workspace").and_then(|v| v.as_str()).unwrap_or("");
-        !ws.is_empty() && Path::new(ws).starts_with(data_dir)
+        !remote_workspace_fallback_applied && !ws.is_empty() && Path::new(ws).starts_with(data_dir)
     };
     if let Some(obj) = extra.as_object_mut() {
         obj.insert(
@@ -395,6 +411,27 @@ mod tests {
             r#"{"workspace":"/Users/alice/my-project"}"#,
         );
         let resp = row_to_response(row, Path::new("/srv/aionui-data")).unwrap();
+        assert_eq!(resp.extra["is_temporary_workspace"], false);
+    }
+
+    #[test]
+    fn row_to_response_uses_local_root_for_non_local_remote_workspace() {
+        let local_root = std::env::temp_dir();
+        let missing_remote_path = local_root.join("aionui-missing-remote-workspace");
+        let _ = std::fs::remove_dir_all(&missing_remote_path);
+        let extra = serde_json::json!({
+            "workspace": missing_remote_path.to_string_lossy(),
+            "remote_agent_id": "ra_1",
+            "sessionKey": "ses_1"
+        });
+        let row = make_row("remote", "pending", Some("aionui"), None, &extra.to_string());
+
+        let resp = row_to_response(row, &local_root).unwrap();
+
+        assert_eq!(
+            resp.extra["workspace"].as_str(),
+            Some(local_root.to_string_lossy().as_ref())
+        );
         assert_eq!(resp.extra["is_temporary_workspace"], false);
     }
 

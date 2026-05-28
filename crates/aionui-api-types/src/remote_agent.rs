@@ -112,6 +112,39 @@ pub struct HandshakeResponse {
     pub status: String,
 }
 
+/// Active session listed on a remote OpenCode agent.  Returned by
+/// `GET /api/remote-agents/{id}/sessions`, which proxies the upstream
+/// OpenCode `GET /session` call.  Drives the Phase 4 sidebar mirror:
+/// the sync service materialises one Chisl conversation per row, the
+/// renderer groups it by `directory`, and `id` becomes the persisted
+/// `extra.sessionKey` for resume.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteSessionInfo {
+    /// OpenCode session id (`ses_...`).  Persisted to
+    /// `conversation.extra.sessionKey` when the user attaches.
+    pub id: String,
+    /// Server-side title (often the first user prompt).  Optional —
+    /// freshly created sessions may not have one yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Working directory OpenCode reports for this session
+    /// (`session.directory`). Used as the Chisl `extra.workspace`
+    /// so sync-discovered sessions group under the right project
+    /// node in the sidebar — even if the path doesn't exist on this
+    /// machine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    /// Creation timestamp in milliseconds, lifted from OpenCode's
+    /// `time.created`. Used as the Chisl row's `created_at` so
+    /// sidebar ordering matches the server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<TimestampMs>,
+    /// Last-activity timestamp in milliseconds, lifted from
+    /// OpenCode's `time.updated`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<TimestampMs>,
+}
+
 /// Deserialize `Option<Option<T>>`:
 /// - JSON field absent → `None` (keep current value)
 /// - JSON `null` → `Some(None)` (clear the value)

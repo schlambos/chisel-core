@@ -231,6 +231,13 @@ pub struct RemoteAgentManager {
     /// address when the network route to OpenCode changes. Paired with
     /// `local_fs_mcp`; aborted on teardown.
     reachability_guardian: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Optional handle to Chisl's conversation/messages store. When
+    /// present, Phase 4c's stale-session rebroker reads the local
+    /// transcript here so it can prepend it to the next prompt and
+    /// reconstruct context on a freshly created OpenCode session.
+    /// `None` for unit-test constructors that don't exercise the
+    /// stale-session path.
+    conversation_repo: Option<Arc<dyn aionui_db::IConversationRepository>>,
 }
 
 impl RemoteAgentManager {
@@ -240,6 +247,21 @@ impl RemoteAgentManager {
         workspace: String,
         remote_config: RemoteAgentConfig,
         resume_session_id: Option<String>,
+    ) -> Result<Self, AppError> {
+        Self::new_with_history(conversation_id, workspace, remote_config, resume_session_id, None).await
+    }
+
+    /// Like [`Self::new`] but also accepts a conversation repository
+    /// handle for Phase 4c transcript-prepended rebrokering. Existing
+    /// call sites use [`Self::new`] (no repo) until they are migrated
+    /// to provide one — the absence of a repo just disables the
+    /// stale-session context-dump fallback.
+    pub async fn new_with_history(
+        conversation_id: String,
+        workspace: String,
+        remote_config: RemoteAgentConfig,
+        resume_session_id: Option<String>,
+        conversation_repo: Option<Arc<dyn aionui_db::IConversationRepository>>,
     ) -> Result<Self, AppError> {
         let runtime = AgentRuntime::new(conversation_id, workspace, 256);
 
@@ -276,6 +298,7 @@ impl RemoteAgentManager {
             http_client,
             local_fs_mcp: Mutex::new(None),
             reachability_guardian: Mutex::new(None),
+            conversation_repo,
         })
     }
 
@@ -1161,13 +1184,25 @@ impl RemoteAgentManager {
     async fn opencode_send(&self, content: &str) -> Result<(), AppError> {
         let base_url = normalize_base_url(&self.remote_config.url);
 
+        // Track whether this call created a fresh server-side session.
+        // Phase 4c: when we just spun up a new session AND the
+        // conversation has prior turns in Chisl's local DB, prepend
+        // a framed transcript so the agent picks up where it left off
+        // even though OpenCode's own context is empty.
+        let mut session_just_created = false;
         let session_id = {
             let mut state = self.state.write().await;
             if state.opencode_session_id.is_none() {
                 let id = self.opencode_create_session(&base_url).await?;
                 state.opencode_session_id = Some(id);
+                session_just_created = true;
             }
             state.opencode_session_id.clone().unwrap()
+        };
+        let context_prefix = if session_just_created {
+            self.build_context_transcript_prefix().await
+        } else {
+            None
         };
 
         let url = format!("{base_url}/session/{session_id}/prompt_async");
@@ -1251,8 +1286,18 @@ impl RemoteAgentManager {
              (gitignore-respecting; may be truncated) is:\n\n{tree}"
         );
 
+        // Phase 4c: if we just brokered a fresh session and Chisl has
+        // a local transcript for this conversation, prepend it. We use
+        // a single combined text part rather than two parts so the
+        // model sees the framing as one user turn — splitting it would
+        // make OpenCode treat the framing block as a standalone prompt
+        // and emit an extra assistant response before the real one.
+        let prompt_text = match context_prefix.as_deref() {
+            Some(prefix) if !prefix.is_empty() => format!("{prefix}\n\n{content}"),
+            _ => content.to_string(),
+        };
         let mut body = json!({
-            "parts": [{"type": "text", "text": content}],
+            "parts": [{"type": "text", "text": prompt_text}],
             "system": system_hint
         });
         if let Some(ref m) = model {
@@ -1307,6 +1352,106 @@ impl RemoteAgentManager {
         }
 
         Ok(())
+    }
+
+    /// Build a framed transcript of the conversation's prior local
+    /// turns so the agent has context after a fresh server-side
+    /// session is created. Phase 4c: this only runs when the old
+    /// OpenCode session id was found dead in `connect()` AND
+    /// `opencode_send` is creating a new one. Returns `None` when:
+    ///
+    /// - no `conversation_repo` was wired in (test constructors),
+    /// - the conversation has no usable history rows, or
+    /// - the read fails (best-effort — never block the user's prompt).
+    ///
+    /// Format: a single `<chisl-context>` block with `[USER]:` /
+    /// `[ASSISTANT]:` markers, followed by a "Continue from this
+    /// context." instruction. The user's actual prompt is appended
+    /// after the block by the caller, so the model sees one merged
+    /// user turn — splitting would make OpenCode emit an assistant
+    /// reply to the framing before reaching the real question.
+    async fn build_context_transcript_prefix(&self) -> Option<String> {
+        let repo = self.conversation_repo.as_ref()?;
+        let conv_id = self.runtime.conversation_id().to_string();
+        // 10k page size matches the renderer's load size — handles any
+        // realistic transcript in a single round-trip without paging.
+        let result = match repo
+            .get_messages(&conv_id, 0, 10_000, aionui_db::SortOrder::Asc)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    conversation_id = %conv_id,
+                    error = %e,
+                    "could not read local transcript for context-dump; new session starts without prior context"
+                );
+                return None;
+            }
+        };
+        let mut lines = Vec::<String>::new();
+        for row in &result.items {
+            let position = row.position.as_deref().unwrap_or("");
+            // Skip the just-inserted user message at the end of the
+            // transcript — the caller appends it again via `content`.
+            // We detect it as the final row whose position == "right".
+            let speaker = match (position, row.r#type.as_str()) {
+                ("right", "text") => "[USER]",
+                ("left", "text") => "[ASSISTANT]",
+                // Tool calls and thinking blocks are noisy and rarely
+                // useful as raw context — surface them as compact
+                // descriptors so the agent sees that work happened
+                // without being confused by stale tool payloads.
+                ("left", "thinking") => {
+                    lines.push("[ASSISTANT][thinking]".to_string());
+                    continue;
+                }
+                ("left", "tool_call") => {
+                    let tool = serde_json::from_str::<serde_json::Value>(&row.content)
+                        .ok()
+                        .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
+                        .unwrap_or_else(|| "tool".to_string());
+                    lines.push(format!("[ASSISTANT][used tool: {tool}]"));
+                    continue;
+                }
+                _ => continue,
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(&row.content) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let text = parsed
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if text.is_empty() {
+                continue;
+            }
+            lines.push(format!("{speaker}: {text}"));
+        }
+        // Drop the trailing user line: that's the prompt we're about
+        // to send. Without this, the agent would see the new prompt
+        // twice — once inside the transcript and once as the real
+        // user turn appended after.
+        if matches!(lines.last().map(String::as_str), Some(s) if s.starts_with("[USER]:")) {
+            lines.pop();
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        let transcript = lines.join("\n");
+        info!(
+            conversation_id = %conv_id,
+            turns = result.items.len(),
+            "injecting Chisl-local transcript into freshly brokered OpenCode session"
+        );
+        Some(format!(
+            "<chisl-context>\nThe OpenCode session backing this conversation was \
+             reset, so the server has no memory of the prior turns. The conversation \
+             so far on the user's machine was:\n\n{transcript}\n</chisl-context>\n\n\
+             Continue from this context. The next message is the user's new prompt."
+        ))
     }
 
     /// Get the connection status.

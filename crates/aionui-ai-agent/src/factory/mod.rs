@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use aionui_api_types::GuideMcpConfig;
 use aionui_common::{AgentType, AppError};
-use aionui_db::{IMcpServerRepository, IProviderRepository, IRemoteAgentRepository};
+use aionui_db::{IConversationRepository, IMcpServerRepository, IProviderRepository, IRemoteAgentRepository};
 use futures_util::FutureExt;
 
 use crate::agent_task::AgentInstance;
@@ -32,6 +32,10 @@ pub struct AgentFactoryDeps {
     pub agent_registry: Arc<AgentRegistry>,
     pub acp_agent_service: Arc<AcpSessionSyncService>,
     pub data_dir: PathBuf,
+    /// Configured local workspace root. Remote OpenCode sessions may report
+    /// server-local directories such as `/app`; use this as the local fallback
+    /// for client-side filesystem MCP when the persisted path is not local.
+    pub work_dir: PathBuf,
     /// Absolute path to the backend binary, reused as the `command` of the
     /// stdio MCP bridge injected into ACP `session/new` for team sessions.
     /// Captured once at app startup (`std::env::current_exe()`).
@@ -44,6 +48,12 @@ pub struct AgentFactoryDeps {
     /// inject enabled servers into `session/new` (ELECTRON-1JG fix).
     /// `None` for tests/composition paths that do not need MCP injection.
     pub mcp_server_repo: Option<Arc<dyn IMcpServerRepository>>,
+    /// Conversation/messages repository. Used by the Remote factory to
+    /// pass a history reader into `RemoteAgentManager` so Phase 4c can
+    /// prepend a Chisl-local transcript when OpenCode hands us a fresh
+    /// session id (the previous one was deleted server-side).
+    /// `None` for tests that don't exercise the context-dump path.
+    pub conversation_repo: Option<Arc<dyn IConversationRepository>>,
 }
 
 /// Build a production agent factory that dispatches to concrete agent types.

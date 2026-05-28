@@ -1,11 +1,21 @@
 use std::sync::Arc;
 
+use aionui_db::IConversationRepository;
+use aionui_realtime::EventBroadcaster;
+
 use crate::{AgentRegistry, AgentService, RemoteAgentService};
 
 /// Router state for remote agent routes.
+///
+/// `conversation_repo` and `broadcaster` are carried here (rather than on
+/// a separate router) so the Phase 4b `backfill-remote-history` route can
+/// persist messages and emit `conversation.listChanged(updated)` without
+/// adding a second axum extractor.
 #[derive(Clone)]
 pub struct RemoteAgentRouterState {
     pub service: Arc<RemoteAgentService>,
+    pub conversation_repo: Arc<dyn IConversationRepository>,
+    pub broadcaster: Arc<dyn EventBroadcaster>,
 }
 
 #[derive(Clone)]

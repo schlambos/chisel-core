@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use aionui_api_types::RemoteBuildExtra;
@@ -50,7 +51,15 @@ pub(super) async fn build(
     // id is discarded so the next send starts fresh. Mirrors
     // `factory/openclaw.rs`.
     let resume_session_id = extra.session_key.clone();
-    let agent = RemoteAgentManager::new(ctx.conversation_id, ctx.workspace, config, resume_session_id).await?;
+    let workspace = resolve_local_workspace(&ctx.workspace, &deps.work_dir, &ctx.conversation_id);
+    let agent = RemoteAgentManager::new_with_history(
+        ctx.conversation_id,
+        workspace,
+        config,
+        resume_session_id,
+        deps.conversation_repo.clone(),
+    )
+    .await?;
     let arc = Arc::new(agent);
     arc.connect().await?;
 
@@ -78,4 +87,58 @@ pub(super) async fn build(
     }
 
     Ok(AgentInstance::Remote(arc))
+}
+
+fn resolve_local_workspace(workspace: &str, fallback_work_dir: &Path, conversation_id: &str) -> String {
+    if Path::new(workspace).is_dir() || workspace.trim().is_empty() {
+        return workspace.to_owned();
+    }
+
+    if fallback_work_dir.is_dir() {
+        warn!(
+            conversation_id,
+            stored_workspace = %workspace,
+            fallback_workspace = %fallback_work_dir.display(),
+            "remote conversation workspace is not local; using configured work dir for local fs"
+        );
+        return fallback_work_dir.to_string_lossy().into_owned();
+    }
+
+    workspace.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_local_workspace_keeps_existing_local_directory() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let fallback = tempfile::TempDir::new().unwrap();
+
+        let resolved = resolve_local_workspace(&workspace.path().to_string_lossy(), fallback.path(), "conv");
+
+        assert_eq!(resolved, workspace.path().to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_local_workspace_uses_work_dir_for_non_local_remote_directory() {
+        let fallback = tempfile::TempDir::new().unwrap();
+
+        let resolved = resolve_local_workspace("/app", fallback.path(), "conv");
+
+        assert_eq!(resolved, fallback.path().to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_local_workspace_keeps_original_when_no_local_fallback_exists() {
+        let root = tempfile::TempDir::new().unwrap();
+        let stored = root.path().join("remote-only");
+        let fallback = root.path().join("missing-work-dir");
+        let stored = stored.to_string_lossy().into_owned();
+
+        let resolved = resolve_local_workspace(&stored, &fallback, "conv");
+
+        assert_eq!(resolved, stored);
+    }
 }

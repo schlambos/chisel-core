@@ -29,7 +29,11 @@ use aionui_shell::shell_routes;
 use aionui_system::{connection_test_routes, system_routes};
 use aionui_team::team_routes;
 
+use crate::remote_session_sync::RemoteSessionSyncService;
 use crate::services::AppServices;
+use crate::config::derive_encryption_key;
+use aionui_ai_agent::RemoteAgentService;
+use aionui_db::SqliteRemoteAgentRepository;
 
 use super::health::{guide_mcp_status, health_check};
 use super::state::{ModuleStates, build_module_states, build_ws_state};
@@ -74,6 +78,22 @@ pub async fn create_router(services: &AppServices) -> Router {
             tracing::warn!(error = %e, "failed to restore channel plugins");
         }
     });
+
+    // Phase 4a: mirror OpenCode remote-agent sessions into Chisl
+    // conversations. Single tokio task, 60s tick, re-reads the
+    // remote-agents table each tick so add/delete naturally take
+    // effect without explicit lifecycle wiring.
+    let encryption_key = derive_encryption_key(&services.jwt_secret_raw);
+    let remote_agent_pool = services.database.pool().clone();
+    let remote_agent_repo = Arc::new(SqliteRemoteAgentRepository::new(remote_agent_pool));
+    let remote_agent_service = Arc::new(RemoteAgentService::new(remote_agent_repo.clone(), encryption_key));
+    let session_sync = Arc::new(RemoteSessionSyncService::new(
+        remote_agent_repo,
+        remote_agent_service,
+        services.conversation_repo.clone(),
+        services.event_bus.clone(),
+    ));
+    session_sync.spawn();
 
     create_router_with_states(services, states)
 }

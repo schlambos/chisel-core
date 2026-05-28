@@ -246,6 +246,8 @@ pub fn build_remote_agent_state(services: &AppServices) -> RemoteAgentRouterStat
     let repo = Arc::new(SqliteRemoteAgentRepository::new(pool));
     RemoteAgentRouterState {
         service: Arc::new(RemoteAgentService::new(repo, encryption_key)),
+        conversation_repo: services.conversation_repo.clone(),
+        broadcaster: services.event_bus.clone(),
     }
 }
 

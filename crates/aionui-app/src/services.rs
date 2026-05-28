@@ -168,9 +168,11 @@ impl AppServices {
             agent_registry: agent_registry.clone(),
             acp_agent_service: acp_agent_service.clone(),
             data_dir: data_dir.clone(),
+            work_dir: work_dir.clone(),
             backend_binary_path: backend_binary_path.clone(),
             guide_mcp_config: guide_mcp_config.clone(),
             mcp_server_repo: Some(mcp_server_repo),
+            conversation_repo: Some(conversation_repo.clone()),
         });
 
         // Agent factory is now wired. Future extension/custom agents

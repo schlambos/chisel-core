@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use aionui_api_types::{
     CreateRemoteAgentRequest, HandshakeResponse, ModelInfoEntry, ModelInfoPayload, RemoteAgentListItem,
-    RemoteAgentResponse, TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
+    RemoteAgentResponse, RemoteSessionInfo, TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
 };
 use aionui_common::{
     AppError, RemoteAgentAuthType, RemoteAgentProtocol, RemoteAgentStatus, decrypt_string, encrypt_string,
@@ -250,6 +250,79 @@ impl RemoteAgentService {
         let auth_type = parse_auth_type(&row.auth_type);
         let auth_token = decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
         fetch_opencode_model_info(&row.url, auth_type, auth_token.as_deref(), row.allow_insecure).await
+    }
+
+    /// List active sessions on a remote OpenCode agent.  Proxies the
+    /// upstream `GET /session` call so the renderer can offer an
+    /// "Attach to existing session" picker (Phase 4 cross-device
+    /// handoff).  Mirrors [`fetch_models`]: reads the row, decrypts the
+    /// auth token (plaintext never leaves the Rust process), and
+    /// returns a normalised list.
+    ///
+    /// OpenCode-only.  Other protocols return `BadRequest` rather than
+    /// silently returning an empty list, so the UI can surface a
+    /// meaningful error.
+    pub async fn list_sessions(&self, id: &str) -> Result<Vec<RemoteSessionInfo>, AppError> {
+        let row = self
+            .repo
+            .find_by_id(id)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::NotFound(format!("Remote agent '{id}' not found")))?;
+
+        let protocol = parse_protocol(&row.protocol);
+        if protocol != RemoteAgentProtocol::OpenCode {
+            return Err(AppError::BadRequest(
+                "Session list is only supported for OpenCode remote agents".into(),
+            ));
+        }
+
+        let auth_type = parse_auth_type(&row.auth_type);
+        let auth_token = decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
+        fetch_opencode_sessions(&row.url, auth_type, auth_token.as_deref(), row.allow_insecure).await
+    }
+
+    /// Fetch the historical message transcript of a remote OpenCode
+    /// session and convert it into Chisl `MessageRow` entries ready to
+    /// insert under `conversation_id`. Phase 4b backfill: the first
+    /// time the user opens a sync-discovered conversation, we hit
+    /// `GET /session/{id}/message` once and write the rows so the
+    /// chat view shows the prior turns.
+    ///
+    /// Returns the rows in chronological order. Caller is responsible
+    /// for persisting them (the service layer deliberately doesn't
+    /// hold a conversation repo).
+    pub async fn fetch_session_messages(
+        &self,
+        remote_agent_id: &str,
+        conversation_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<aionui_db::models::MessageRow>, AppError> {
+        let row = self
+            .repo
+            .find_by_id(remote_agent_id)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::NotFound(format!("Remote agent '{remote_agent_id}' not found")))?;
+
+        let protocol = parse_protocol(&row.protocol);
+        if protocol != RemoteAgentProtocol::OpenCode {
+            return Err(AppError::BadRequest(
+                "History backfill is only supported for OpenCode remote agents".into(),
+            ));
+        }
+
+        let auth_type = parse_auth_type(&row.auth_type);
+        let auth_token = decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
+        fetch_opencode_messages(
+            &row.url,
+            auth_type,
+            auth_token.as_deref(),
+            row.allow_insecure,
+            session_id,
+            conversation_id,
+        )
+        .await
     }
 
     // ── Private helpers ──────────────────────────────────────────
@@ -517,6 +590,364 @@ async fn fetch_opencode_model_info(
     })
 }
 
+/// Fetch the OpenCode `/session` listing and normalise it into
+/// `RemoteSessionInfo` rows. OpenCode returns an array of session
+/// objects whose interesting fields are `id`, `title`, and
+/// `time.updated` (timestamp). Older builds may return `updated_at`
+/// at the top level; both shapes are accepted.
+async fn fetch_opencode_sessions(
+    url: &str,
+    auth_type: RemoteAgentAuthType,
+    auth_token: Option<&str>,
+    allow_insecure: bool,
+) -> Result<Vec<RemoteSessionInfo>, AppError> {
+    let base_url = normalize_opencode_base_url(url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .danger_accept_invalid_certs(allow_insecure)
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))?;
+    let response = client
+        .get(format!("{base_url}/session"))
+        .headers(build_opencode_auth_headers(auth_type, auth_token)?)
+        .send()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode session list failed: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(AppError::BadGateway(format!(
+            "OpenCode /session returned {}",
+            response.status()
+        )));
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode /session response was not JSON: {e}")))?;
+
+    let array = body
+        .as_array()
+        .ok_or_else(|| AppError::BadGateway("OpenCode /session response was not a JSON array".into()))?;
+
+    let mut sessions: Vec<RemoteSessionInfo> = array
+        .iter()
+        .filter_map(parse_opencode_session)
+        .collect();
+
+    // Most recent first so the "Attach" picker surfaces the user's
+    // current work without scrolling. Sessions without a timestamp
+    // (older builds) sort to the bottom.
+    sessions.sort_by(|a, b| b.updated_at.unwrap_or(0).cmp(&a.updated_at.unwrap_or(0)));
+    Ok(sessions)
+}
+
+/// Extract `{ id, title, directory, created_at, updated_at }` from a
+/// single OpenCode session object. Returns `None` if `id` is missing —
+/// every other field is optional. `time.created` / `time.updated` may
+/// be expressed in seconds (older builds) or milliseconds (current); we
+/// lift the raw number and only normalise to ms when the value looks
+/// like a seconds-since-epoch.
+fn parse_opencode_session(value: &serde_json::Value) -> Option<RemoteSessionInfo> {
+    let id = value.get("id").and_then(|v| v.as_str())?.to_string();
+    let title = value.get("title").and_then(|v| v.as_str()).map(String::from);
+    let directory = value.get("directory").and_then(|v| v.as_str()).map(String::from);
+
+    let raw_updated = value
+        .get("time")
+        .and_then(|t| t.get("updated"))
+        .and_then(|v| v.as_f64())
+        .or_else(|| value.get("updated_at").and_then(|v| v.as_f64()))
+        .or_else(|| value.get("updatedAt").and_then(|v| v.as_f64()));
+    let raw_created = value
+        .get("time")
+        .and_then(|t| t.get("created"))
+        .and_then(|v| v.as_f64())
+        .or_else(|| value.get("created_at").and_then(|v| v.as_f64()))
+        .or_else(|| value.get("createdAt").and_then(|v| v.as_f64()));
+
+    Some(RemoteSessionInfo {
+        id,
+        title,
+        directory,
+        created_at: raw_created.map(normalize_ms),
+        updated_at: raw_updated.map(normalize_ms),
+    })
+}
+
+/// OpenCode currently emits ms-since-epoch but some older builds used
+/// seconds. Anything below ~10^11 is treated as seconds and scaled. The
+/// threshold (Sat Mar 03 1973 in ms) is comfortably below any plausible
+/// real session time in ms and above any plausible time in seconds.
+fn normalize_ms(n: f64) -> i64 {
+    let as_int = n as i64;
+    if as_int < 100_000_000_000 { as_int * 1000 } else { as_int }
+}
+
+/// Fetch the OpenCode `/session/{id}/message` listing and convert each
+/// `{info, parts}` into one or more Chisl `MessageRow` entries.
+///
+/// Conversion rules (matching what `stream_relay.rs` writes for live
+/// turns so historical and live messages render identically):
+///
+/// - `user` role + `text` parts → one `text` row per text part,
+///   `position = "right"`, `content = {content: <text>}`.
+/// - `assistant` role + `text` parts → `text` row, `position = "left"`,
+///   `content = {content: <text>, model: {...}}` when model info present.
+/// - `assistant` role + `reasoning` parts → `thinking` row,
+///   `content = {content, status: "done", duration_ms}`.
+/// - `assistant` role + `tool` parts → `tool_call` row,
+///   `content = ToolCallEventData` JSON shape (callID, name, args,
+///   status, input, output).
+/// - `step-start` / `step-finish` parts are skipped — they are flow
+///   markers without user-visible content.
+async fn fetch_opencode_messages(
+    url: &str,
+    auth_type: RemoteAgentAuthType,
+    auth_token: Option<&str>,
+    allow_insecure: bool,
+    session_id: &str,
+    conversation_id: &str,
+) -> Result<Vec<aionui_db::models::MessageRow>, AppError> {
+    let base_url = normalize_opencode_base_url(url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .danger_accept_invalid_certs(allow_insecure)
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))?;
+    let response = client
+        .get(format!("{base_url}/session/{session_id}/message"))
+        .headers(build_opencode_auth_headers(auth_type, auth_token)?)
+        .send()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode message fetch failed: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(AppError::BadGateway(format!(
+            "OpenCode /session/{session_id}/message returned {}",
+            response.status()
+        )));
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode message response was not JSON: {e}")))?;
+    let array = body
+        .as_array()
+        .ok_or_else(|| AppError::BadGateway("OpenCode message response was not a JSON array".into()))?;
+
+    Ok(convert_opencode_messages(conversation_id, array))
+}
+
+/// Pure conversion (no I/O) so tests can drive it with synthetic JSON.
+pub(crate) fn convert_opencode_messages(
+    conversation_id: &str,
+    array: &[serde_json::Value],
+) -> Vec<aionui_db::models::MessageRow> {
+    let mut rows = Vec::new();
+    for msg in array {
+        let info = match msg.get("info") {
+            Some(v) => v,
+            None => continue,
+        };
+        let role = info.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let is_user = role == "user";
+        let is_assistant = role == "assistant";
+        if !is_user && !is_assistant {
+            continue;
+        }
+        let base_created = info
+            .get("time")
+            .and_then(|t| t.get("created"))
+            .and_then(|v| v.as_f64())
+            .map(normalize_ms)
+            .unwrap_or_else(aionui_common::now_ms);
+        let model = if is_assistant { extract_assistant_model(info) } else { None };
+
+        let parts = match msg.get("parts").and_then(|v| v.as_array()) {
+            Some(p) => p,
+            None => continue,
+        };
+        for (i, part) in parts.iter().enumerate() {
+            // Each part within a message gets a slight created_at bump so
+            // it sorts after the previous one — OpenCode itself emits
+            // parts in order but doesn't always stamp every one with a
+            // distinct timestamp.
+            let created_at = base_created + i as i64;
+            let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match part_type {
+                "text" => {
+                    let Some(text) = part.get("text").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if text.is_empty() {
+                        continue;
+                    }
+                    rows.push(build_text_row(conversation_id, part, text, is_user, model.as_ref(), created_at));
+                }
+                "reasoning" if is_assistant => {
+                    let Some(text) = part.get("text").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if text.is_empty() {
+                        continue;
+                    }
+                    rows.push(build_thinking_row(conversation_id, part, text, created_at));
+                }
+                "tool" if is_assistant => {
+                    rows.push(build_tool_call_row(conversation_id, part, created_at));
+                }
+                // step-start / step-finish carry no user-visible payload.
+                _ => continue,
+            }
+        }
+    }
+    rows
+}
+
+fn extract_assistant_model(info: &serde_json::Value) -> Option<(String, String)> {
+    // OpenCode emits either flat `providerID`/`modelID` (live builds)
+    // or nested `model: { providerID, modelID }`. Accept both.
+    let provider = info
+        .get("providerID")
+        .and_then(|v| v.as_str())
+        .or_else(|| info.get("model").and_then(|m| m.get("providerID")).and_then(|v| v.as_str()))?;
+    let model = info
+        .get("modelID")
+        .and_then(|v| v.as_str())
+        .or_else(|| info.get("model").and_then(|m| m.get("modelID")).and_then(|v| v.as_str()))?;
+    Some((provider.to_string(), model.to_string()))
+}
+
+fn build_text_row(
+    conversation_id: &str,
+    part: &serde_json::Value,
+    text: &str,
+    is_user: bool,
+    model: Option<&(String, String)>,
+    created_at: i64,
+) -> aionui_db::models::MessageRow {
+    let id = part_id(part);
+    let content = match model {
+        Some((provider, model_id)) if !is_user => serde_json::json!({
+            "content": text,
+            "model": { "provider_id": provider, "model_id": model_id },
+        }),
+        _ => serde_json::json!({ "content": text }),
+    };
+    aionui_db::models::MessageRow {
+        id: id.clone(),
+        conversation_id: conversation_id.to_string(),
+        msg_id: Some(id),
+        r#type: "text".into(),
+        content: content.to_string(),
+        position: Some(if is_user { "right".into() } else { "left".into() }),
+        status: Some("finish".into()),
+        hidden: false,
+        created_at,
+    }
+}
+
+fn build_thinking_row(
+    conversation_id: &str,
+    part: &serde_json::Value,
+    text: &str,
+    created_at: i64,
+) -> aionui_db::models::MessageRow {
+    let id = part_id(part);
+    // OpenCode reasoning parts carry `time: { start, end }` (ms) for the
+    // streaming overlay timer. Lift it as duration if both are present.
+    let duration_ms = part
+        .get("time")
+        .and_then(|t| {
+            let start = t.get("start").and_then(|v| v.as_f64())?;
+            let end = t.get("end").and_then(|v| v.as_f64())?;
+            Some(((end - start) as i64).max(0))
+        })
+        .unwrap_or(0);
+    let content = serde_json::json!({
+        "content": text,
+        "status": "done",
+        "duration_ms": duration_ms,
+    });
+    aionui_db::models::MessageRow {
+        id: id.clone(),
+        conversation_id: conversation_id.to_string(),
+        msg_id: Some(id),
+        r#type: "thinking".into(),
+        content: content.to_string(),
+        position: Some("left".into()),
+        status: Some("finish".into()),
+        hidden: false,
+        created_at,
+    }
+}
+
+fn build_tool_call_row(
+    conversation_id: &str,
+    part: &serde_json::Value,
+    created_at: i64,
+) -> aionui_db::models::MessageRow {
+    // Mirror `stream_relay::persist_tool_call`: the row's content is the
+    // serialized `ToolCallEventData`. We construct one from the OpenCode
+    // tool-part state so the renderer's existing tool_call view sees the
+    // historical entries identically to live ones.
+    let call_id = part
+        .get("callID")
+        .and_then(|v| v.as_str())
+        .or_else(|| part.get("call_id").and_then(|v| v.as_str()))
+        .map(String::from)
+        .unwrap_or_else(part_id_str_from_part);
+    let name = part.get("tool").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let state = part.get("state").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let opencode_status = state.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let (chisl_status, event_status) = match opencode_status {
+        "completed" => ("finish", "completed"),
+        "running" => ("work", "running"),
+        "error" | "failed" => ("error", "error"),
+        _ => ("finish", "completed"),
+    };
+    let input = state.get("input").cloned();
+    let output = state
+        .get("output")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| state.get("output").map(|v| v.to_string()));
+    let description = state.get("title").and_then(|v| v.as_str()).map(String::from);
+    let content = serde_json::json!({
+        "call_id": call_id,
+        "name": name,
+        "args": input.clone().unwrap_or(serde_json::Value::Null),
+        "status": event_status,
+        "input": input,
+        "output": output,
+        "description": description,
+    });
+    aionui_db::models::MessageRow {
+        id: call_id.clone(),
+        conversation_id: conversation_id.to_string(),
+        msg_id: Some(call_id),
+        r#type: "tool_call".into(),
+        content: content.to_string(),
+        position: Some("left".into()),
+        status: Some(chisl_status.into()),
+        hidden: false,
+        created_at,
+    }
+}
+
+fn part_id(part: &serde_json::Value) -> String {
+    part.get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(part_id_str_from_part)
+}
+
+fn part_id_str_from_part() -> String {
+    aionui_common::generate_short_id()
+}
+
 fn build_opencode_auth_headers(
     auth_type: RemoteAgentAuthType,
     auth_token: Option<&str>,
@@ -744,5 +1175,142 @@ mod tests {
         assert_eq!(parse_status("connected"), RemoteAgentStatus::Connected);
         assert_eq!(parse_status("pending"), RemoteAgentStatus::Pending);
         assert_eq!(parse_status("error"), RemoteAgentStatus::Error);
+    }
+
+    #[test]
+    fn parse_opencode_session_lifts_time_in_seconds() {
+        // Older OpenCode shape: top-level `time.{created,updated}` in
+        // seconds. We scale to ms so the renderer can format with
+        // `new Date(ts)`.
+        let value = serde_json::json!({
+            "id": "ses_abc",
+            "title": "Plan a refactor",
+            "directory": "/Users/alice/proj",
+            "time": { "created": 1_700_000_000, "updated": 1_700_000_500 },
+        });
+        let session = super::parse_opencode_session(&value).expect("session parsed");
+        assert_eq!(session.id, "ses_abc");
+        assert_eq!(session.title.as_deref(), Some("Plan a refactor"));
+        assert_eq!(session.directory.as_deref(), Some("/Users/alice/proj"));
+        assert_eq!(session.created_at, Some(1_700_000_000_000));
+        assert_eq!(session.updated_at, Some(1_700_000_500_000));
+    }
+
+    #[test]
+    fn parse_opencode_session_passes_through_ms_timestamps() {
+        // Live builds emit ms-since-epoch directly (e.g. 1779933821994).
+        // We accept verbatim without rescaling.
+        let value = serde_json::json!({
+            "id": "ses_xyz",
+            "directory": "/app",
+            "time": { "created": 1_779_933_821_994_i64, "updated": 1_779_933_836_090_i64 },
+        });
+        let session = super::parse_opencode_session(&value).expect("session parsed");
+        assert_eq!(session.id, "ses_xyz");
+        assert_eq!(session.directory.as_deref(), Some("/app"));
+        assert_eq!(session.created_at, Some(1_779_933_821_994));
+        assert_eq!(session.updated_at, Some(1_779_933_836_090));
+    }
+
+    #[test]
+    fn parse_opencode_session_requires_id() {
+        // Without an id there is nothing useful to attach to; drop the row
+        // rather than surfacing a stub the UI cannot act on.
+        let value = serde_json::json!({ "title": "no id" });
+        assert!(super::parse_opencode_session(&value).is_none());
+    }
+
+    #[test]
+    fn parse_opencode_session_handles_missing_time_and_directory() {
+        let value = serde_json::json!({ "id": "ses_1" });
+        let session = super::parse_opencode_session(&value).expect("session parsed");
+        assert!(session.updated_at.is_none());
+        assert!(session.created_at.is_none());
+        assert!(session.directory.is_none());
+        assert!(session.title.is_none());
+    }
+
+    #[test]
+    fn convert_opencode_messages_user_text_becomes_right_position_row() {
+        let array = vec![serde_json::json!({
+            "info": { "role": "user", "time": { "created": 1_700_000_000_000_i64 } },
+            "parts": [{ "id": "prt_a", "type": "text", "text": "hello" }],
+        })];
+        let rows = super::convert_opencode_messages("conv_1", &array);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.r#type, "text");
+        assert_eq!(row.position.as_deref(), Some("right"));
+        assert_eq!(row.conversation_id, "conv_1");
+        let parsed: serde_json::Value = serde_json::from_str(&row.content).unwrap();
+        assert_eq!(parsed["content"], "hello");
+        // User text rows must not carry a `model` block — the user
+        // didn't generate any tokens.
+        assert!(parsed.get("model").is_none());
+    }
+
+    #[test]
+    fn convert_opencode_messages_assistant_text_carries_model_info() {
+        let array = vec![serde_json::json!({
+            "info": {
+                "role": "assistant",
+                "time": { "created": 1_700_000_000_000_i64 },
+                "model": { "providerID": "google", "modelID": "antigravity" },
+            },
+            "parts": [{ "id": "prt_b", "type": "text", "text": "hi" }],
+        })];
+        let rows = super::convert_opencode_messages("conv_1", &array);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.position.as_deref(), Some("left"));
+        let parsed: serde_json::Value = serde_json::from_str(&row.content).unwrap();
+        assert_eq!(parsed["model"]["provider_id"], "google");
+        assert_eq!(parsed["model"]["model_id"], "antigravity");
+    }
+
+    #[test]
+    fn convert_opencode_messages_skips_step_markers_and_handles_reasoning() {
+        // Real OpenCode shape from the live probe: assistant turn with
+        // step-start, reasoning, tool, step-finish. Reasoning becomes a
+        // `thinking` row; step-* are dropped.
+        let array = vec![serde_json::json!({
+            "info": { "role": "assistant", "time": { "created": 1_700_000_000_000_i64 } },
+            "parts": [
+                { "type": "step-start" },
+                { "id": "prt_r", "type": "reasoning", "text": "thinking aloud",
+                  "time": { "start": 1_700_000_000_000_i64, "end": 1_700_000_001_500_i64 } },
+                { "id": "prt_t", "type": "tool", "callID": "call_1", "tool": "run_shell",
+                  "state": { "status": "completed", "input": { "command": "ls" }, "output": "a b c" } },
+                { "type": "step-finish" },
+            ],
+        })];
+        let rows = super::convert_opencode_messages("conv_1", &array);
+        assert_eq!(rows.len(), 2, "step-start and step-finish must be dropped");
+        assert_eq!(rows[0].r#type, "thinking");
+        let thinking_content: serde_json::Value = serde_json::from_str(&rows[0].content).unwrap();
+        assert_eq!(thinking_content["duration_ms"], 1500);
+        assert_eq!(rows[1].r#type, "tool_call");
+        assert_eq!(rows[1].id, "call_1", "row id must come from callID");
+        let tool_content: serde_json::Value = serde_json::from_str(&rows[1].content).unwrap();
+        assert_eq!(tool_content["name"], "run_shell");
+        assert_eq!(tool_content["status"], "completed");
+        assert_eq!(tool_content["output"], "a b c");
+    }
+
+    #[test]
+    fn convert_opencode_messages_skips_empty_text_parts() {
+        // Defensive: OpenCode occasionally emits an empty text part
+        // before the real one. We'd rather drop them than persist
+        // empty user bubbles.
+        let array = vec![serde_json::json!({
+            "info": { "role": "user", "time": { "created": 1_700_000_000_000_i64 } },
+            "parts": [
+                { "id": "prt_empty", "type": "text", "text": "" },
+                { "id": "prt_real", "type": "text", "text": "hi" },
+            ],
+        })];
+        let rows = super::convert_opencode_messages("conv_1", &array);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "prt_real");
     }
 }
