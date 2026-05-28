@@ -8,6 +8,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
@@ -17,7 +19,7 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -27,10 +29,72 @@ use super::protocol::{
 };
 use super::tools::{all_tool_descriptors, dispatch};
 
+/// Cloneable handle over the server's "has a remote client reached us yet"
+/// signal. Handed to the registration/guardian code so it can verify
+/// reachability and re-arm the probe without owning the server.
+#[derive(Clone)]
+pub struct ContactProbe {
+    /// Flipped true on the first inbound request of any kind — proof that
+    /// a remote client (OpenCode) reached this server at the advertised
+    /// address.
+    contacted: Arc<AtomicBool>,
+    /// Woken whenever `contacted` transitions to true, so a waiter can be
+    /// notified without polling.
+    notify: Arc<Notify>,
+}
+
+impl ContactProbe {
+    fn new() -> Self {
+        Self {
+            contacted: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Whether any remote client has reached the server since the last
+    /// `reset`.
+    pub fn was_contacted(&self) -> bool {
+        self.contacted.load(Ordering::SeqCst)
+    }
+
+    /// Clear the flag before a fresh reachability probe, so a hit recorded
+    /// for a previous candidate isn't mistaken for the current one.
+    pub fn reset(&self) {
+        self.contacted.store(false, Ordering::SeqCst);
+    }
+
+    /// Wait up to `timeout` for the first inbound request. Returns true if
+    /// the server has been (or is) contacted within the window. Only
+    /// OpenCode dialing the advertised URL can trip it.
+    pub async fn wait_for_first_contact(&self, timeout: Duration) -> bool {
+        // Arm the notification *before* the load so a hit racing in between
+        // can't be missed.
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.contacted.load(Ordering::SeqCst) {
+            return true;
+        }
+        tokio::time::timeout(timeout, notified).await.is_ok()
+    }
+
+    /// Record an inbound contact. Returns true if this was the first one
+    /// (i.e. a transition), so the caller can log it once.
+    fn record(&self) -> bool {
+        if !self.contacted.swap(true, Ordering::SeqCst) {
+            self.notify.notify_waiters();
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Clone)]
 struct McpAppState {
     project_root: PathBuf,
     auth_token: Arc<str>,
+    probe: ContactProbe,
 }
 
 /// Running MCP server handle. Drops trigger graceful shutdown.
@@ -39,6 +103,7 @@ pub struct LocalFsMcpServer {
     auth_token: String,
     shutdown_tx: watch::Sender<bool>,
     join: Option<JoinHandle<()>>,
+    probe: ContactProbe,
 }
 
 impl LocalFsMcpServer {
@@ -54,9 +119,11 @@ impl LocalFsMcpServer {
             ));
         }
         let canonical = project_root.canonicalize()?;
+        let probe = ContactProbe::new();
         let state = McpAppState {
             project_root: canonical.clone(),
             auth_token: Arc::from(auth_token.as_str()),
+            probe: probe.clone(),
         };
         let app = Router::new().route("/", post(handle_rpc)).with_state(state);
 
@@ -91,11 +158,34 @@ impl LocalFsMcpServer {
             auth_token,
             shutdown_tx,
             join: Some(join),
+            probe,
         })
     }
 
     pub fn bind_addr(&self) -> SocketAddr {
         self.bind_addr
+    }
+
+    /// Cloneable handle to this server's reachability signal, for the
+    /// registration/guardian code.
+    pub fn contact_probe(&self) -> ContactProbe {
+        self.probe.clone()
+    }
+
+    /// Whether any remote client has reached this server yet.
+    pub fn was_contacted(&self) -> bool {
+        self.probe.was_contacted()
+    }
+
+    /// Clear the contact flag before a fresh reachability probe.
+    pub fn reset_contact(&self) {
+        self.probe.reset();
+    }
+
+    /// Wait up to `timeout` for the first inbound request. See
+    /// [`ContactProbe::wait_for_first_contact`].
+    pub async fn wait_for_first_contact(&self, timeout: Duration) -> bool {
+        self.probe.wait_for_first_contact(timeout).await
     }
 
     /// Local URL the server listens on. Reachability from a remote
@@ -130,6 +220,12 @@ async fn handle_rpc(
 ) -> impl IntoResponse {
     let id = req.id.clone();
     let method = req.method.as_str();
+
+    // First inbound request of any kind proves the advertised address is
+    // reachable from the remote. Record it and wake any reachability probe.
+    if state.probe.record() {
+        debug!(method, "local fs MCP received first inbound contact");
+    }
 
     let needs_auth = !matches!(method, "initialize" | "notifications/initialized" | "ping");
     if needs_auth && !auth_ok(&headers, &state.auth_token) {
@@ -299,6 +395,30 @@ mod tests {
         let v: Value = resp.json().await.unwrap();
         let text = v["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("a.txt"));
+    }
+
+    #[tokio::test]
+    async fn first_contact_is_recorded_on_any_request() {
+        let (_dir, server, url) = boot().await;
+        // Nothing has hit the server yet.
+        assert!(!server.was_contacted());
+        assert!(!server.wait_for_first_contact(Duration::from_millis(50)).await);
+
+        let client = Client::new();
+        // An unauthenticated `initialize` is enough — it proves reachability.
+        client
+            .post(&url)
+            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}))
+            .send()
+            .await
+            .unwrap();
+
+        assert!(server.was_contacted());
+        assert!(server.wait_for_first_contact(Duration::from_secs(1)).await);
+
+        // reset_contact clears it for the next probe.
+        server.reset_contact();
+        assert!(!server.was_contacted());
     }
 
     #[tokio::test]

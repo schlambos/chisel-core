@@ -125,6 +125,10 @@ pub struct RemoteAgentManager {
     /// create + mcp.add. None before session create or after teardown.
     /// Per-session — never shared across conversations.
     local_fs_mcp: Mutex<Option<LocalFsMcpServer>>,
+    /// Background task that re-registers the local fs MCP's advertised
+    /// address when the network route to OpenCode changes. Paired with
+    /// `local_fs_mcp`; aborted on teardown.
+    reachability_guardian: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl RemoteAgentManager {
@@ -168,6 +172,7 @@ impl RemoteAgentManager {
             _reader_handle: Mutex::new(None),
             http_client,
             local_fs_mcp: Mutex::new(None),
+            reachability_guardian: Mutex::new(None),
         })
     }
 
@@ -938,7 +943,27 @@ impl RemoteAgentManager {
             .await
         {
             Ok(server) => {
+                // Capture what the guardian needs before the server moves
+                // into the Mutex; the server keeps running on the same port
+                // across network changes, so re-registration only needs the
+                // port, token, and contact probe.
+                let port = server.bind_addr().port();
+                let token = server.auth_token().to_string();
+                let probe = server.contact_probe();
                 *self.local_fs_mcp.lock().await = Some(server);
+
+                let guardian = opencode_mcp::spawn_reachability_guardian(
+                    self.http_client.clone(),
+                    base_url.to_string(),
+                    auth_header.map(str::to_string),
+                    conversation_id.clone(),
+                    port,
+                    token,
+                    probe,
+                );
+                if let Some(old) = self.reachability_guardian.lock().await.replace(guardian) {
+                    old.abort();
+                }
             }
             Err(e) => {
                 warn!(
@@ -1421,6 +1446,14 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             *guard = None;
         }
 
+        // Stop the reachability guardian before teardown so it can't
+        // re-register against a server we're about to drop.
+        if let Ok(mut guard) = self.reachability_guardian.try_lock()
+            && let Some(handle) = guard.take()
+        {
+            handle.abort();
+        }
+
         // Take the MCP server out synchronously so the OS port frees
         // immediately on Drop; the OpenCode disconnect runs on a
         // detached task because kill() is sync.
@@ -1767,7 +1800,9 @@ mod tests {
 
         let events = drain_events(&mut rx);
         assert!(
-            !events.iter().any(|e| matches!(e, AgentStreamEvent::AssistantModelInfo(_))),
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentStreamEvent::AssistantModelInfo(_))),
             "AssistantModelInfo must not fire for user messages"
         );
     }
@@ -1845,7 +1880,9 @@ mod tests {
         agent.handle_opencode_sse_event(&own).await;
         let events = drain_events(&mut rx);
         assert!(
-            events.iter().any(|e| matches!(e, AgentStreamEvent::Text(d) if d.content == "hello")),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentStreamEvent::Text(d) if d.content == "hello")),
             "events for this conversation's own session must be delivered"
         );
     }
@@ -1864,7 +1901,9 @@ mod tests {
         .to_string();
         agent.handle_opencode_sse_event(&ev).await;
         assert!(
-            drain_events(&mut rx).iter().any(|e| matches!(e, AgentStreamEvent::Error(_))),
+            drain_events(&mut rx)
+                .iter()
+                .any(|e| matches!(e, AgentStreamEvent::Error(_))),
             "events with no sessionID must pass through"
         );
     }
@@ -2003,7 +2042,9 @@ mod tests {
         agent.handle_opencode_sse_event(&event).await;
 
         assert!(
-            !drain_events(&mut rx).iter().any(|e| matches!(e, AgentStreamEvent::Plan(_))),
+            !drain_events(&mut rx)
+                .iter()
+                .any(|e| matches!(e, AgentStreamEvent::Plan(_))),
             "todo.updated for a foreign session must not emit Plan"
         );
     }

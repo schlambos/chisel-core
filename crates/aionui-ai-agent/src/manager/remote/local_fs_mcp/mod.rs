@@ -9,4 +9,4 @@ pub mod protocol;
 pub mod server;
 pub mod tools;
 
-pub use server::LocalFsMcpServer;
+pub use server::{ContactProbe, LocalFsMcpServer};

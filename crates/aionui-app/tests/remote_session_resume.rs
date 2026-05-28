@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use aionui_ai_agent::manager::remote::{RemoteAgentConfig, RemoteAgentManager};
 use tempfile::TempDir;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn opencode_config(url: String) -> RemoteAgentConfig {
@@ -88,17 +88,36 @@ async fn resume_registers_local_fs_mcp_for_valid_session() {
     let server = MockServer::start().await;
     mount_connect_basics(&server).await;
 
+    // Keep the reachability verify loop fast: the mock never dials our MCP
+    // server back, so every candidate "fails" verification after this
+    // window before falling through to the best-guess registration.
+    // SAFETY: process-global, but every test sets the same value.
+    unsafe { std::env::set_var("AIONUI_LOCAL_FS_MCP_VERIFY_MS", "30") };
+
     Mock::given(method("GET"))
         .and(path("/session/ses_valid_mcp"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "ses_valid_mcp" })))
         .mount(&server)
         .await;
-    // The whole point of the regression: `POST /mcp` MUST be called exactly
-    // once on resume (mirroring the new-session path).
+    // The regression invariant: resume MUST register the client fs MCP
+    // (mirroring the new-session path). With reachability verification the
+    // exact count is an implementation detail — what matters is that
+    // registration happens at all on resume.
     Mock::given(method("POST"))
         .and(path("/mcp"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-        .expect(1)
+        .expect(1..)
+        .mount(&server)
+        .await;
+    // Verification's connect/disconnect probes — accept and ignore.
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/mcp/.+/connect$"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/mcp/.+/disconnect$"))
+        .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
     // A rebuild that resumes must NOT create a new server-side session.

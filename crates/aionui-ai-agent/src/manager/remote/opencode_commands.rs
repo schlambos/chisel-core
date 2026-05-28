@@ -49,11 +49,7 @@ impl OpenCodeCommand {
 
 /// Fetch the command catalog. Best-effort: any failure returns an empty
 /// list so the menu stays empty rather than blocking the conversation.
-pub async fn fetch(
-    http_client: &reqwest::Client,
-    base_url: &str,
-    auth_header: Option<&str>,
-) -> Vec<OpenCodeCommand> {
+pub async fn fetch(http_client: &reqwest::Client, base_url: &str, auth_header: Option<&str>) -> Vec<OpenCodeCommand> {
     let url = format!("{base_url}/command");
     let mut req = http_client.get(&url).timeout(Duration::from_secs(10));
     if let Some(h) = auth_header {
@@ -169,7 +165,10 @@ mod tests {
 
     #[test]
     fn expand_substitutes_arguments_token() {
-        assert_eq!(expand_template("Review $ARGUMENTS please", "src/foo.rs"), "Review src/foo.rs please");
+        assert_eq!(
+            expand_template("Review $ARGUMENTS please", "src/foo.rs"),
+            "Review src/foo.rs please"
+        );
     }
 
     #[test]
