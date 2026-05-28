@@ -22,9 +22,10 @@ use crate::manager::remote::local_fs_mcp::project_tree::render_project_tree_defa
 use crate::manager::remote::opencode_commands::{self, OpenCodeCommand};
 use crate::manager::remote::opencode_mcp;
 use crate::manager::remote::opencode_models;
+use crate::manager::remote::opencode_tool_call;
 use crate::protocol::events::{
-    AcpPermissionEventData, AgentStreamEvent, FinishEventData, PlanEventData, StartEventData, TextEventData,
-    ThinkingEventData,
+    AcpPermissionEventData, AcpToolCallSessionUpdateKind, AgentStreamEvent, FinishEventData, PlanEventData,
+    StartEventData, TextEventData, ThinkingEventData,
 };
 use crate::types::SendMessageData;
 use aionui_common::ConfirmationOption;
@@ -76,6 +77,17 @@ struct RemoteState {
     /// the decision, waking the parked tool call. Dropped on cancel/kill so
     /// any waiting command fails closed.
     pending_shell_approvals: HashMap<String, oneshot::Sender<ShellApproval>>,
+    /// OpenCode tool `callID`s we've already announced to the relay as
+    /// `AcpToolCallSessionUpdateKind::ToolCall` (insert). The first time we
+    /// see a `message.part.updated` for a `type=tool` part we flip the
+    /// event to the insert variant so the persistence layer creates the
+    /// row; every subsequent tick of the same `callID` stays as
+    /// `ToolCallUpdate` (merge). Mirrors how the ACP WS path semantically
+    /// separates "new tool call" from "tool call updated" without
+    /// requiring OpenCode itself to emit two distinct event kinds.
+    /// Lifetime: tied to this `RemoteAgentManager` — cleared on
+    /// reconnect/teardown alongside `reasoning_parts`.
+    opencode_tool_call_ids: HashSet<String>,
 }
 
 /// Configuration for connecting to a remote agent.
@@ -149,6 +161,13 @@ impl ShellApprover for RemoteShellApprover {
             action: Some("run_shell".to_string()),
             description: format!("{} — {cwd}\n\n$ {command}", super::local_fs_mcp::shell::shell_hint()),
             command_type: Some("run_shell".to_string()),
+            // Note the spelled-out scope on the "always" option. The bare
+            // "Allow always" label was easy to misread as "always for this
+            // command" when it actually silences *every* shell prompt for
+            // the remainder of the session via `approval_memory`. Making
+            // the scope explicit on the wire avoids a user picking it by
+            // accident and then wondering why later parallel shell tools
+            // run without ever asking again.
             options: vec![
                 ConfirmationOption {
                     label: "Allow once".to_string(),
@@ -156,7 +175,7 @@ impl ShellApprover for RemoteShellApprover {
                     params: None,
                 },
                 ConfirmationOption {
-                    label: "Allow always".to_string(),
+                    label: "Skip shell prompts (this session)".to_string(),
                     value: Value::String("always".to_string()),
                     params: None,
                 },
@@ -292,6 +311,7 @@ impl RemoteAgentManager {
                 opencode_commands: None,
                 model_context_limits: None,
                 pending_shell_approvals: HashMap::new(),
+                opencode_tool_call_ids: HashSet::new(),
             })),
             ws_sink: Mutex::new(None),
             _reader_handle: Mutex::new(None),
@@ -633,11 +653,54 @@ impl RemoteAgentManager {
                 }
             }
             "message.part.updated" => {
-                if let Some(part) = props.get("part")
-                    && part.get("type").and_then(|v| v.as_str()) == Some("reasoning")
-                    && let Some(part_id) = part.get("id").and_then(|v| v.as_str())
-                {
-                    self.state.write().await.reasoning_parts.insert(part_id.to_string());
+                if let Some(part) = props.get("part") {
+                    match part.get("type").and_then(|v| v.as_str()) {
+                        Some("reasoning") => {
+                            // Track reasoning part IDs so `message.part.delta`
+                            // can route deltas into the Thinking stream
+                            // instead of the user-visible Text stream.
+                            if let Some(part_id) = part.get("id").and_then(|v| v.as_str()) {
+                                self.state.write().await.reasoning_parts.insert(part_id.to_string());
+                            }
+                        }
+                        Some("tool") => {
+                            // OpenCode streams shell/grep/edit/etc tool execution
+                            // through repeated `message.part.updated` events whose
+                            // `state.metadata.output` grows cumulatively. Translate
+                            // each tick into an `AcpToolCall` event so the existing
+                            // inline tool-card UI renders the live output. See
+                            // `opencode_tool_call` for the mapping rules.
+                            if let Some(mut event) =
+                                opencode_tool_call::translate_message_part_updated(props, session_id.clone())
+                            {
+                                // The translator defaults every event to `ToolCallUpdate`
+                                // (merge) because OpenCode does not distinguish "new" from
+                                // "updated" parts on the wire. The persistence layer
+                                // (`stream_relay::persist_acp_tool_call`) requires the FIRST
+                                // event for a given `tool_call_id` to be `ToolCall` (insert)
+                                // — otherwise the update fails with "Record not found" and
+                                // the tool card never lands in the DB (UI works in-flight
+                                // but disappears on reload). Promote the first occurrence
+                                // here while holding the write lock so concurrent SSE
+                                // events for the same id can't both race to "first".
+                                let is_first = {
+                                    let mut state = self.state.write().await;
+                                    state.opencode_tool_call_ids.insert(event.update.tool_call_id.clone())
+                                };
+                                if is_first {
+                                    event.update.session_update = AcpToolCallSessionUpdateKind::ToolCall;
+                                }
+                                debug!(
+                                    conversation_id = %self.runtime.conversation_id(),
+                                    tool_call_id = %event.update.tool_call_id,
+                                    first = is_first,
+                                    "Forwarding OpenCode tool part update"
+                                );
+                                self.runtime.emit(AgentStreamEvent::AcpToolCall(event));
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             "message.updated" => {
@@ -1649,6 +1712,15 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
     async fn send_message(&self, data: SendMessageData) -> Result<(), AppError> {
         self.runtime.bump_activity();
 
+        // Auto-reject any permissions left over from a prior turn. If the
+        // model parked itself on an un-answered tool approval and the user
+        // then typed a new prompt rather than approving, the prior turn must
+        // be released before this turn can stream — otherwise the parked
+        // `run_shell` (or OpenCode permission) keeps the previous assistant
+        // message in `busy` state, and the new prompt's events interleave
+        // with stale tool output.
+        self.reject_pending_confirmations("new_prompt").await;
+
         let is_first = {
             let mut state = self.state.write().await;
             let first = !state.has_messages;
@@ -1729,14 +1801,12 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
                 }
             });
 
-            // Mirror the WebSocket path: drop any pending confirmations
-            // locally. Dropping the shell-approval senders closes their
-            // channels, so any parked `run_shell` fails closed (Reject).
-            {
-                let mut state = self.state.write().await;
-                state.confirmations.clear();
-                state.pending_shell_approvals.clear();
-            }
+            // Explicit auto-reject so OpenCode-side permissions get an HTTP
+            // reply and the parked `run_shell` MCP calls all wake up with
+            // Reject — the previous in-line `clear()` only dropped the senders
+            // (which still produces Reject via the channel-closed handler)
+            // but never told the server-side permissions they were cancelled.
+            self.reject_pending_confirmations("cancel").await;
             return Ok(());
         }
         if self.ws_sink.lock().await.is_none() {
@@ -1744,10 +1814,7 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
         }
         let payload = json!({ "type": "session/cancel", "data": {} });
         self.ws_send(&payload).await?;
-
-        let mut state = self.state.write().await;
-        state.confirmations.clear();
-        state.pending_shell_approvals.clear();
+        self.reject_pending_confirmations("cancel").await;
         Ok(())
     }
 
@@ -1940,6 +2007,118 @@ impl RemoteAgentManager {
                 g.approval_memory.get(&key).copied().unwrap_or(false)
             })
             .unwrap_or(false)
+    }
+
+    /// Auto-reject every pending confirmation on this conversation, releasing
+    /// the model from any parked tool calls.
+    ///
+    /// Called when:
+    /// - The conversation is cancelled (`cancel()`) — the existing teardown
+    ///   already drops shell senders, but this helper also fires the explicit
+    ///   `POST /permission/{id}/reply` so the OpenCode server doesn't keep
+    ///   server-side permissions in limbo across abort + resume cycles.
+    /// - A fresh user prompt arrives while the prior turn is still parked on
+    ///   un-answered permissions (`send_message()` entry). Without this the
+    ///   model from the previous turn stays blocked forever, and the new
+    ///   prompt's response can't start until those orphans are resolved.
+    ///
+    /// Mirrors the behaviour of `confirm(call_id, "reject")` for each pending
+    /// call_id but in a single state-lock acquisition for atomicity.
+    ///
+    /// `reason` is logged to make it obvious in production traces why a wave
+    /// of rejects fired (`"cancel"` vs `"new_prompt"`).
+    pub async fn reject_pending_confirmations(&self, reason: &'static str) {
+        // Snapshot the work we need to do, then drop the write guard so the
+        // OpenCode-permission HTTP replies below don't run while holding it.
+        let (shell_senders, opencode_call_ids) = {
+            let mut state = self.state.write().await;
+            if state.confirmations.is_empty() && state.pending_shell_approvals.is_empty() {
+                return;
+            }
+
+            // Collect every parked shell sender so dropping/Reject-signalling
+            // them happens outside the lock.
+            let shell_senders: Vec<(String, oneshot::Sender<ShellApproval>)> =
+                state.pending_shell_approvals.drain().collect();
+
+            // Anything left in state.confirmations after stripping shell-rooted
+            // entries is an OpenCode-side permission that needs an HTTP reject.
+            let shell_call_ids: HashSet<String> = shell_senders.iter().map(|(id, _)| id.clone()).collect();
+            let opencode_call_ids: Vec<String> = state
+                .confirmations
+                .iter()
+                .filter(|c| !shell_call_ids.contains(&c.call_id))
+                .map(|c| c.call_id.clone())
+                .collect();
+
+            state.confirmations.clear();
+            (shell_senders, opencode_call_ids)
+        };
+
+        let total = shell_senders.len() + opencode_call_ids.len();
+        if total == 0 {
+            return;
+        }
+        info!(
+            conversation_id = %self.runtime.conversation_id(),
+            reason,
+            shell_count = shell_senders.len(),
+            opencode_count = opencode_call_ids.len(),
+            "auto-rejecting pending confirmations"
+        );
+
+        // Wake every parked `run_shell` MCP request with an explicit Reject so
+        // the local fs MCP returns an error to OpenCode; the model then sees
+        // the rejection and moves on instead of hanging on the MCP response.
+        for (_call_id, tx) in shell_senders {
+            let _ = tx.send(ShellApproval::Reject);
+        }
+
+        // Best-effort reject the OpenCode-side permissions. We don't await any
+        // of these — same pattern as `confirm()` — so cancel/new-prompt stays
+        // responsive even if the server is slow.
+        if !opencode_call_ids.is_empty() && is_opencode_protocol(&self.remote_config.protocol) {
+            let base_url = normalize_base_url(&self.remote_config.url);
+            let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+            let http_client = self.http_client.clone();
+            let conversation_id = self.runtime.conversation_id().to_string();
+            tokio::spawn(async move {
+                for call_id in opencode_call_ids {
+                    let url = format!("{base_url}/permission/{call_id}/reply");
+                    let mut req = http_client
+                        .post(&url)
+                        .json(&json!({ "reply": "reject" }))
+                        .timeout(Duration::from_secs(5));
+                    if let Some(ref h) = auth_header {
+                        req = req.header(AUTHORIZATION, h.as_str());
+                    }
+                    match req.send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            debug!(
+                                %conversation_id, %call_id, %reason,
+                                "auto-rejected OpenCode permission"
+                            );
+                        }
+                        Ok(resp) => {
+                            // 404 here is normal — the permission may already
+                            // have been resolved server-side by the abort.
+                            debug!(
+                                %conversation_id, %call_id, %reason,
+                                status = %resp.status(),
+                                "OpenCode permission auto-reject returned non-success"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                %conversation_id, %call_id, %reason,
+                                error = %e,
+                                "OpenCode permission auto-reject request failed"
+                            );
+                        }
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -2376,5 +2555,64 @@ mod tests {
                 .any(|e| matches!(e, AgentStreamEvent::Plan(_))),
             "todo.updated for a foreign session must not emit Plan"
         );
+    }
+
+    fn fake_confirmation(call_id: &str) -> Confirmation {
+        Confirmation {
+            id: call_id.to_string(),
+            call_id: call_id.to_string(),
+            title: Some("Run a command on your machine?".to_string()),
+            action: Some("run_shell".to_string()),
+            description: format!("dummy command for {call_id}"),
+            command_type: Some("run_shell".to_string()),
+            options: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn reject_pending_is_noop_when_state_is_empty() {
+        // Calling the helper on an idle agent must not log, panic, or block —
+        // both cancel() and send_message() reach this path unconditionally.
+        let agent = opencode_test_agent().await;
+        agent.reject_pending_confirmations("noop_test").await;
+        let state = agent.state.read().await;
+        assert!(state.confirmations.is_empty());
+        assert!(state.pending_shell_approvals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reject_pending_clears_state_and_resolves_shell_senders() {
+        // The auto-reject helper is the unblock mechanism for parked
+        // `run_shell` MCP calls: the parked task is awaiting its
+        // oneshot::Receiver and must wake with `ShellApproval::Reject` so
+        // the MCP request finishes (otherwise the previous turn never
+        // completes and the new prompt can't be processed).
+        let agent = opencode_test_agent().await;
+        let (tx_a, rx_a) = oneshot::channel::<ShellApproval>();
+        let (tx_b, rx_b) = oneshot::channel::<ShellApproval>();
+
+        {
+            let mut state = agent.state.write().await;
+            state.confirmations.push(fake_confirmation("shell-a"));
+            state.confirmations.push(fake_confirmation("shell-b"));
+            // Also drop in an opencode-side permission to confirm it's
+            // counted separately but still removed from local state.
+            state.confirmations.push(fake_confirmation("perm-c"));
+            state.pending_shell_approvals.insert("shell-a".to_string(), tx_a);
+            state.pending_shell_approvals.insert("shell-b".to_string(), tx_b);
+        }
+
+        agent.reject_pending_confirmations("new_prompt").await;
+
+        // Every parked shell sender wakes with Reject — this is what
+        // releases the MCP tool calls so the model can continue.
+        assert_eq!(rx_a.await.unwrap(), ShellApproval::Reject);
+        assert_eq!(rx_b.await.unwrap(), ShellApproval::Reject);
+
+        // Local state is wiped so a future click on a stale card has no
+        // ghost entry to act on.
+        let state = agent.state.read().await;
+        assert!(state.confirmations.is_empty());
+        assert!(state.pending_shell_approvals.is_empty());
     }
 }
