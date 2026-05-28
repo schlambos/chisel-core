@@ -582,7 +582,13 @@ mod tests {
     #[tokio::test]
     async fn write_then_read_roundtrip() {
         let (_g, root) = tmp();
-        let (out, err) = dispatch(&root, "write_file", &json!({"path": "hello.txt", "content": "hi"}), None).await;
+        let (out, err) = dispatch(
+            &root,
+            "write_file",
+            &json!({"path": "hello.txt", "content": "hi"}),
+            None,
+        )
+        .await;
         assert!(!err, "write_file should succeed: {out}");
 
         let (out, err) = dispatch(&root, "read_file", &json!({"path": "hello.txt"}), None).await;
@@ -649,7 +655,13 @@ mod tests {
             decision: ShellApproval::Allow,
             seen: std::sync::Mutex::new(Vec::new()),
         });
-        let (out, err) = dispatch(&root, "run_shell", &json!({"command": "echo gated_ok"}), Some(&approver)).await;
+        let (out, err) = dispatch(
+            &root,
+            "run_shell",
+            &json!({"command": "echo gated_ok"}),
+            Some(&approver),
+        )
+        .await;
         assert!(!err, "approved command should run: {out}");
         assert!(out.contains("gated_ok"), "missing command output: {out}");
     }
@@ -662,10 +674,19 @@ mod tests {
             decision: ShellApproval::Reject,
             seen,
         });
-        let (out, err) = dispatch(&root, "run_shell", &json!({"command": "echo should_not_run"}), Some(&approver)).await;
+        let (out, err) = dispatch(
+            &root,
+            "run_shell",
+            &json!({"command": "echo should_not_run"}),
+            Some(&approver),
+        )
+        .await;
         assert!(err, "rejected command must report an error");
         assert!(out.contains("rejected"), "unexpected message: {out}");
-        assert!(!out.contains("should_not_run"), "rejected command must not execute: {out}");
+        assert!(
+            !out.contains("should_not_run"),
+            "rejected command must not execute: {out}"
+        );
     }
 
     #[tokio::test]

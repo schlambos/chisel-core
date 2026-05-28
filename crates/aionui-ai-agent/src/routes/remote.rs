@@ -160,11 +160,7 @@ async fn backfill_remote_history(
 
     let mut extra: serde_json::Value = serde_json::from_str(&row.extra)
         .map_err(|e| AppError::Internal(format!("conversation extra was not JSON: {e}")))?;
-    if extra
-        .get("history_loaded")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    if extra.get("history_loaded").and_then(|v| v.as_bool()).unwrap_or(false) {
         return Ok(Json(ApiResponse::ok(BackfillResult {
             inserted: 0,
             already_loaded: true,
@@ -239,10 +235,7 @@ async fn mark_loaded_and_respond(
         pinned: None,
         pinned_at: None,
         model: None,
-        extra: Some(
-            serde_json::to_string(extra)
-                .map_err(|e| AppError::Internal(format!("re-serialize extra: {e}")))?,
-        ),
+        extra: Some(serde_json::to_string(extra).map_err(|e| AppError::Internal(format!("re-serialize extra: {e}")))?),
         status: None,
         updated_at: Some(aionui_common::now_ms()),
     };

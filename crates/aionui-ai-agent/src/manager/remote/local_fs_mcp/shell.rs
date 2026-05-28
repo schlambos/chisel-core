@@ -81,14 +81,22 @@ fn resolve_shell() -> ShellSpec {
             "/C"
         };
         let label = format!("windows/{}", basename(&custom));
-        return ShellSpec { program: custom, arg, label };
+        return ShellSpec {
+            program: custom,
+            arg,
+            label,
+        };
     }
     let comspec = std::env::var("COMSPEC")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "cmd.exe".to_string());
     let label = format!("windows/{}", basename(&comspec));
-    ShellSpec { program: comspec, arg: "/C", label }
+    ShellSpec {
+        program: comspec,
+        arg: "/C",
+        label,
+    }
 }
 
 #[cfg(not(windows))]
@@ -99,7 +107,11 @@ fn resolve_shell() -> ShellSpec {
         .or_else(|| std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty()))
         .unwrap_or_else(|| "/bin/sh".to_string());
     let label = format!("{}/{}", std::env::consts::OS, basename(&shell));
-    ShellSpec { program: shell, arg: "-c", label }
+    ShellSpec {
+        program: shell,
+        arg: "-c",
+        label,
+    }
 }
 
 /// `os/shell` label for the current machine, injected into the agent's
@@ -125,10 +137,7 @@ pub async fn run_shell(root: &Path, command: &str) -> (String, bool) {
 
     let output = match tokio::time::timeout(SHELL_TIMEOUT, cmd.output()).await {
         Err(_) => {
-            return (
-                format!("command timed out after {}s", SHELL_TIMEOUT.as_secs()),
-                true,
-            );
+            return (format!("command timed out after {}s", SHELL_TIMEOUT.as_secs()), true);
         }
         Ok(Err(e)) => return (format!("failed to launch shell ({}): {e}", spec.program), true),
         Ok(Ok(output)) => output,

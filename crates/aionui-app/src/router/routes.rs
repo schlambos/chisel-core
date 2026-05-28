@@ -29,9 +29,9 @@ use aionui_shell::shell_routes;
 use aionui_system::{connection_test_routes, system_routes};
 use aionui_team::team_routes;
 
+use crate::config::derive_encryption_key;
 use crate::remote_session_sync::RemoteSessionSyncService;
 use crate::services::AppServices;
-use crate::config::derive_encryption_key;
 use aionui_ai_agent::RemoteAgentService;
 use aionui_db::SqliteRemoteAgentRepository;
 

@@ -155,8 +155,7 @@ mod tests {
     #[test]
     fn remote_build_extra_session_key_defaults_to_none() {
         // Absent on a brand-new conversation — must not fail deserialization.
-        let extra: RemoteBuildExtra =
-            serde_json::from_value(serde_json::json!({ "remote_agent_id": "ra_1" })).unwrap();
+        let extra: RemoteBuildExtra = serde_json::from_value(serde_json::json!({ "remote_agent_id": "ra_1" })).unwrap();
         assert_eq!(extra.session_key, None);
     }
 }

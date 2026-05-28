@@ -630,15 +630,12 @@ async fn fetch_opencode_sessions(
         .as_array()
         .ok_or_else(|| AppError::BadGateway("OpenCode /session response was not a JSON array".into()))?;
 
-    let mut sessions: Vec<RemoteSessionInfo> = array
-        .iter()
-        .filter_map(parse_opencode_session)
-        .collect();
+    let mut sessions: Vec<RemoteSessionInfo> = array.iter().filter_map(parse_opencode_session).collect();
 
     // Most recent first so the "Attach" picker surfaces the user's
     // current work without scrolling. Sessions without a timestamp
     // (older builds) sort to the bottom.
-    sessions.sort_by(|a, b| b.updated_at.unwrap_or(0).cmp(&a.updated_at.unwrap_or(0)));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at.unwrap_or(0)));
     Ok(sessions)
 }
 
@@ -681,7 +678,11 @@ fn parse_opencode_session(value: &serde_json::Value) -> Option<RemoteSessionInfo
 /// real session time in ms and above any plausible time in seconds.
 fn normalize_ms(n: f64) -> i64 {
     let as_int = n as i64;
-    if as_int < 100_000_000_000 { as_int * 1000 } else { as_int }
+    if as_int < 100_000_000_000 {
+        as_int * 1000
+    } else {
+        as_int
+    }
 }
 
 /// Fetch the OpenCode `/session/{id}/message` listing and convert each
@@ -763,7 +764,11 @@ pub(crate) fn convert_opencode_messages(
             .and_then(|v| v.as_f64())
             .map(normalize_ms)
             .unwrap_or_else(aionui_common::now_ms);
-        let model = if is_assistant { extract_assistant_model(info) } else { None };
+        let model = if is_assistant {
+            extract_assistant_model(info)
+        } else {
+            None
+        };
 
         let parts = match msg.get("parts").and_then(|v| v.as_array()) {
             Some(p) => p,
@@ -784,7 +789,14 @@ pub(crate) fn convert_opencode_messages(
                     if text.is_empty() {
                         continue;
                     }
-                    rows.push(build_text_row(conversation_id, part, text, is_user, model.as_ref(), created_at));
+                    rows.push(build_text_row(
+                        conversation_id,
+                        part,
+                        text,
+                        is_user,
+                        model.as_ref(),
+                        created_at,
+                    ));
                 }
                 "reasoning" if is_assistant => {
                     let Some(text) = part.get("text").and_then(|v| v.as_str()) else {
@@ -809,14 +821,16 @@ pub(crate) fn convert_opencode_messages(
 fn extract_assistant_model(info: &serde_json::Value) -> Option<(String, String)> {
     // OpenCode emits either flat `providerID`/`modelID` (live builds)
     // or nested `model: { providerID, modelID }`. Accept both.
-    let provider = info
-        .get("providerID")
-        .and_then(|v| v.as_str())
-        .or_else(|| info.get("model").and_then(|m| m.get("providerID")).and_then(|v| v.as_str()))?;
-    let model = info
-        .get("modelID")
-        .and_then(|v| v.as_str())
-        .or_else(|| info.get("model").and_then(|m| m.get("modelID")).and_then(|v| v.as_str()))?;
+    let provider = info.get("providerID").and_then(|v| v.as_str()).or_else(|| {
+        info.get("model")
+            .and_then(|m| m.get("providerID"))
+            .and_then(|v| v.as_str())
+    })?;
+    let model = info.get("modelID").and_then(|v| v.as_str()).or_else(|| {
+        info.get("model")
+            .and_then(|m| m.get("modelID"))
+            .and_then(|v| v.as_str())
+    })?;
     Some((provider.to_string(), model.to_string()))
 }
 

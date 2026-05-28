@@ -11,4 +11,4 @@ pub mod shell;
 pub mod tools;
 
 pub use server::{ContactProbe, LocalFsMcpServer};
-pub use shell::{ShellApprover, ShellApproval};
+pub use shell::{ShellApproval, ShellApprover};

@@ -162,10 +162,7 @@ impl RemoteSessionSyncService {
                 let Ok(extra) = serde_json::from_str::<serde_json::Value>(&row.extra) else {
                     continue;
                 };
-                let agent_id = extra
-                    .get("remote_agent_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let agent_id = extra.get("remote_agent_id").and_then(|v| v.as_str()).unwrap_or("");
                 let session_key = extra.get("sessionKey").and_then(|v| v.as_str()).unwrap_or("");
                 if !agent_id.is_empty() && !session_key.is_empty() {
                     keys.insert((agent_id.to_string(), session_key.to_string()));
@@ -256,4 +253,3 @@ fn source_str(s: ConversationSource) -> String {
         .trim_matches('"')
         .to_string()
 }
-

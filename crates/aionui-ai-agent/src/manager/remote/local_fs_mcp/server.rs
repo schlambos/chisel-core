@@ -289,7 +289,8 @@ async fn handle_rpc(
                 JsonRpcResponse::error(id, INVALID_PARAMS, "missing tool name")
             } else {
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-                let (text, is_error) = dispatch(&state.project_root, tool_name, &arguments, state.approver.as_ref()).await;
+                let (text, is_error) =
+                    dispatch(&state.project_root, tool_name, &arguments, state.approver.as_ref()).await;
                 if is_error {
                     warn!(tool = tool_name, error = %text, "fs MCP tool returned error");
                 } else {

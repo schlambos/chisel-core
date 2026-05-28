@@ -17,8 +17,8 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::agent_runtime::AgentRuntime;
-use crate::manager::remote::local_fs_mcp::{LocalFsMcpServer, ShellApproval, ShellApprover};
 use crate::manager::remote::local_fs_mcp::project_tree::render_project_tree_default;
+use crate::manager::remote::local_fs_mcp::{LocalFsMcpServer, ShellApproval, ShellApprover};
 use crate::manager::remote::opencode_commands::{self, OpenCodeCommand};
 use crate::manager::remote::opencode_mcp;
 use crate::manager::remote::opencode_models;
@@ -144,7 +144,12 @@ impl ShellApprover for RemoteShellApprover {
         // A prior "allow always" for this session short-circuits the prompt.
         {
             let state = self.state.read().await;
-            if state.approval_memory.get(&shell_approval_key()).copied().unwrap_or(false) {
+            if state
+                .approval_memory
+                .get(&shell_approval_key())
+                .copied()
+                .unwrap_or(false)
+            {
                 return ShellApproval::Allow;
             }
         }
@@ -200,7 +205,9 @@ impl ShellApprover for RemoteShellApprover {
             "awaiting user approval for a local shell command"
         );
         self.runtime
-            .emit(AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(confirmation)));
+            .emit(AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(
+                confirmation,
+            )));
 
         // Park until the UI replies via `confirm()`. A dropped sender
         // (cancel/kill clears the map) closes the channel → fail closed.
@@ -396,11 +403,11 @@ impl RemoteAgentManager {
                 // was process-scoped), but the resumed OpenCode session may
                 // still hold the stale registration on the server side. Re-
                 // registering replaces the dead URL with the new one so
-                // `mcp__aionui-local-fs-*` tool calls dial a live local
-                // server. Without this, the very first prompt on a resumed
-                // session fails with "Unable to connect" from the model
-                // because `opencode_create_session` (the only other call
-                // site) is skipped when a session id already exists.
+                // `aionui-local-fs_*` tool calls dial a live local server.
+                // Without this, the very first prompt on a resumed session
+                // fails with "Unable to connect" from the model because
+                // `opencode_create_session` (the other call site) is skipped
+                // when a session id already exists.
                 self.ensure_local_fs_mcp(&base_url, auth_header.as_deref()).await;
             } else {
                 warn!(
@@ -548,6 +555,7 @@ impl RemoteAgentManager {
                             session_id: session_id.clone(),
                         }));
                         self.runtime.transition_to(ConversationStatus::Finished);
+                        self.release_turn_slot().await;
                     }
                     _ => {}
                 }
@@ -557,6 +565,7 @@ impl RemoteAgentManager {
                     session_id: session_id.clone(),
                 }));
                 self.runtime.transition_to(ConversationStatus::Finished);
+                self.release_turn_slot().await;
             }
             "session.error" => {
                 // OpenCode sends errors as { name: "...", data: { message: "..." } }
@@ -759,6 +768,7 @@ impl RemoteAgentManager {
                             self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
                                 session_id: session_id.clone(),
                             }));
+                            self.release_turn_slot().await;
                         }
                     }
                 }
@@ -1115,19 +1125,80 @@ impl RemoteAgentManager {
         })
     }
 
-    /// Ensure a `LocalFsMcpServer` is running and registered with the
-    /// remote OpenCode. Idempotent: returns immediately if already
-    /// registered. Failures here are logged but never returned — the
-    /// agent must still function (degraded) if MCP registration fails.
+    /// Release this conversation's hold on the per-OpenCode turn slot
+    /// acquired in [`Self::opencode_send`]. Safe to call whether or not
+    /// we currently own it — no-op when another conversation has taken
+    /// over (after a wait-timeout). Idempotent across the multiple
+    /// `Finish` emission paths (`session.updated → idle`, `session.idle`,
+    /// `message.part.updated → finish=stop`), only the first call does
+    /// the work.
+    async fn release_turn_slot(&self) {
+        let base_url = normalize_base_url(&self.remote_config.url);
+        opencode_mcp::release_turn(&base_url, self.runtime.conversation_id()).await;
+    }
+
+    /// Ensure this conversation owns the OpenCode `aionui-local-fs` slot
+    /// and has a live `LocalFsMcpServer` backing it.
+    ///
+    /// The OpenCode MCP registry is instance-global: a single slot named
+    /// [`opencode_mcp::MCP_NAME`] is shared across every AionUI
+    /// conversation talking to the same OpenCode instance. This method has
+    /// three modes:
+    ///
+    /// 1. **No local server yet** — start one for this conversation's
+    ///    workspace, register it with OpenCode, claim the slot.
+    /// 2. **Local server exists and we still own the slot** — fast no-op.
+    /// 3. **Local server exists but another conversation took the slot** —
+    ///    re-register the existing server (no restart, port stays stable),
+    ///    re-claim. This is the typical case when the user switches tabs:
+    ///    the other tab's prompt re-pointed the slot, and now we need it
+    ///    back before our own prompt is sent.
+    ///
+    /// Failures are logged, never returned — the agent must still
+    /// function (degraded) if MCP registration fails.
     async fn ensure_local_fs_mcp(&self, base_url: &str, auth_header: Option<&str>) {
-        {
+        let conversation_id = self.runtime.conversation_id().to_string();
+
+        // Cheap fast-path: if we have a server AND we own the slot, nothing to do.
+        // Snapshot the server's identity outside the lock so we don't hold the
+        // mutex across the (potentially network-bound) re-registration call.
+        let existing = {
             let guard = self.local_fs_mcp.lock().await;
-            if guard.is_some() {
+            guard
+                .as_ref()
+                .map(|s| (s.bind_addr().port(), s.auth_token().to_string(), s.contact_probe()))
+        };
+
+        if let Some((port, token, probe)) = existing {
+            if opencode_mcp::owns_slot(base_url, &conversation_id, port) {
                 return;
             }
+            // Server is alive, but the slot belongs to another conversation
+            // (or no one). Re-register the existing server URL to take it
+            // back. Port/token stay stable, so the OpenCode mcp.add just
+            // replaces the URL/headers on its side.
+            if let Err(e) = opencode_mcp::ensure_slot_owned(
+                &self.http_client,
+                base_url,
+                auth_header,
+                &conversation_id,
+                port,
+                &token,
+                &probe,
+            )
+            .await
+            {
+                warn!(
+                    conversation_id = %conversation_id,
+                    error = %e,
+                    "failed to reclaim local fs MCP slot — client-side fs may misroute this turn"
+                );
+            }
+            return;
         }
+
+        // No local server yet — cold start.
         let workspace = self.runtime.workspace().to_string();
-        let conversation_id = self.runtime.conversation_id().to_string();
 
         // Approver lets the MCP server's `run_shell` tool gate each command
         // on the user's confirmation UI. Built from shared handles (cloned
@@ -1246,6 +1317,48 @@ impl RemoteAgentManager {
     /// have typed something the server doesn't advertise.
     async fn opencode_send(&self, content: &str) -> Result<(), AppError> {
         let base_url = normalize_base_url(&self.remote_config.url);
+        let conversation_id = self.runtime.conversation_id().to_string();
+
+        // Serialize prompts per OpenCode instance: block until any other
+        // conversation's in-flight turn finishes on this `base_url`. The
+        // `aionui-local-fs` MCP slot is a single named registration per
+        // OpenCode instance, so two conversations cannot have overlapping
+        // tool calls without one of them landing on the wrong workspace
+        // (and surfacing approval prompts in the wrong UI tab — see
+        // `opencode_mcp::TURN_SIGNALS` for the failure mode). Released on
+        // every `Finish` emission below, in `kill()` teardown, OR in the
+        // error-path arm at the bottom of this function if we never even
+        // got to `POST /prompt_async`.
+        opencode_mcp::acquire_turn(&base_url, &conversation_id).await;
+
+        let result = self.opencode_send_after_acquire(content, &base_url).await;
+        if result.is_err() {
+            // No prompt was dispatched (or it was rejected outright) — no
+            // SSE Finish event will ever fire, so we must drop the slot
+            // ourselves or the next conversation deadlocks for
+            // `TURN_WAIT_TIMEOUT` before force-acquiring.
+            opencode_mcp::release_turn(&base_url, &conversation_id).await;
+        }
+        result
+    }
+
+    /// Body of [`Self::opencode_send`] after the per-base-url turn slot has
+    /// been acquired. Split out so the caller can centralize the
+    /// release-on-error logic without sprinkling `release_turn` calls at
+    /// every `?` site.
+    async fn opencode_send_after_acquire(&self, content: &str, base_url: &str) -> Result<(), AppError> {
+        let base_url = base_url.to_string();
+        // Re-confirm ownership of the OpenCode `aionui-local-fs` slot
+        // before every prompt. If another conversation prompted last on
+        // the same OpenCode instance, the slot now points at *their* MCP
+        // server (rooted at *their* workspace). Re-registering here puts
+        // it back on our server so the tool calls the model emits this
+        // turn land on the right project. No-op when we already own the
+        // slot. Best-effort — failures are logged inside, never thrown.
+        let auth_header_for_mcp =
+            build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        self.ensure_local_fs_mcp(&base_url, auth_header_for_mcp.as_deref())
+            .await;
 
         // Track whether this call created a fresh server-side session.
         // Phase 4c: when we just spun up a new session AND the
@@ -1335,14 +1448,16 @@ impl RemoteAgentManager {
         let shell_hint = super::local_fs_mcp::shell::shell_hint();
         let system_hint = format!(
             "The user's project is located at {workspace} on their local machine. \
-             Use ONLY the mcp__aionui-local-fs-* tools for all file operations. \
+             Use ONLY the aionui-local-fs_* tools for all file operations \
+             (aionui-local-fs_read_file, aionui-local-fs_list_dir, aionui-local-fs_write_file, \
+             aionui-local-fs_grep_dir, aionui-local-fs_run_shell, etc.). \
              These tools operate on the user's actual project files. \
              All file paths should be relative to the project root (e.g. \"src/main.rs\"), \
              not absolute. Before claiming a file or directory does not exist, ALWAYS call \
-             list_dir or read_file on it — do not rely on memory of prior turns. \
-             To run terminal commands — build, test, lint, git, anything you need to verify \
-             your work — you MUST use the mcp__aionui-local-fs-*_run_shell tool; your own \
-             built-in shell runs on a different machine and cannot see this project. \
+             aionui-local-fs_list_dir or aionui-local-fs_read_file on it — do not rely on \
+             memory of prior turns. To run terminal commands — build, test, lint, git, anything \
+             you need to verify your work — you MUST use the aionui-local-fs_run_shell tool; \
+             your own built-in shell runs on a different machine and cannot see this project. \
              Commands execute on the user's machine ({shell_hint}), in the project root, and \
              each one requires the user to approve it first, so write commands in that shell's \
              syntax and prefer one combined command over many. The current project layout \
@@ -1379,7 +1494,7 @@ impl RemoteAgentManager {
         }
 
         // Surface the silent failure mode where the system hint instructs the
-        // model to use `mcp__aionui-local-fs-*` tools but no local fs MCP is
+        // model to use `aionui-local-fs_*` tools but no local fs MCP is
         // registered. The user-visible symptom is "Unable to connect" from the
         // model; without this log there is nothing in production logs to
         // explain why. Best-effort observability — never blocks the prompt.
@@ -1438,10 +1553,7 @@ impl RemoteAgentManager {
         let conv_id = self.runtime.conversation_id().to_string();
         // 10k page size matches the renderer's load size — handles any
         // realistic transcript in a single round-trip without paging.
-        let result = match repo
-            .get_messages(&conv_id, 0, 10_000, aionui_db::SortOrder::Asc)
-            .await
-        {
+        let result = match repo.get_messages(&conv_id, 0, 10_000, aionui_db::SortOrder::Asc).await {
             Ok(r) => r,
             Err(e) => {
                 warn!(
@@ -1483,11 +1595,7 @@ impl RemoteAgentManager {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            let text = parsed
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim();
+            let text = parsed.get("content").and_then(|v| v.as_str()).unwrap_or("").trim();
             if text.is_empty() {
                 continue;
             }
@@ -1848,7 +1956,10 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
 
         // Take the MCP server out synchronously so the OS port frees
         // immediately on Drop; the OpenCode disconnect runs on a
-        // detached task because kill() is sync.
+        // detached task because kill() is sync. The detached task also
+        // releases the per-base-url turn slot so a waiting conversation
+        // can proceed — without this, killing mid-turn would leave the
+        // slot held until the timeout fires (`TURN_WAIT_TIMEOUT`).
         if let Ok(mut guard) = self.local_fs_mcp.try_lock()
             && let Some(server) = guard.take()
         {
@@ -1858,6 +1969,7 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
                 build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
             let conversation_id = self.runtime.conversation_id().to_string();
             tokio::spawn(async move {
+                opencode_mcp::release_turn(&base_url, &conversation_id).await;
                 opencode_mcp::disconnect_from_opencode(
                     &http_client,
                     &base_url,
@@ -1866,6 +1978,14 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
                 )
                 .await;
                 server.shutdown().await;
+            });
+        } else {
+            // No local fs MCP to dispose, but still need to free a turn
+            // slot we may be holding (e.g. kill before a Finish fired).
+            let base_url = normalize_base_url(&self.remote_config.url);
+            let conversation_id = self.runtime.conversation_id().to_string();
+            tokio::spawn(async move {
+                opencode_mcp::release_turn(&base_url, &conversation_id).await;
             });
         }
 
@@ -1895,7 +2015,13 @@ impl RemoteAgentManager {
             .map(str::to_owned)
             .or_else(|| data.get("value").and_then(|v| v.as_str()).map(str::to_owned))
             .filter(|r| matches!(r.as_str(), "once" | "always" | "reject"))
-            .unwrap_or_else(|| if always_allow { "always".to_string() } else { "once".to_string() });
+            .unwrap_or_else(|| {
+                if always_allow {
+                    "always".to_string()
+                } else {
+                    "once".to_string()
+                }
+            });
 
         if let Ok(mut state) = self.state.try_write() {
             // In-process shell approval? These originate from our own local
@@ -1917,7 +2043,9 @@ impl RemoteAgentManager {
                 return Ok(());
             }
 
-            if reply == "always" && let Some(conf) = state.confirmations.iter().find(|c| c.call_id == call_id) {
+            if reply == "always"
+                && let Some(conf) = state.confirmations.iter().find(|c| c.call_id == call_id)
+            {
                 let key = approval_key(conf.action.as_deref(), conf.command_type.as_deref());
                 state.approval_memory.insert(key, true);
             }
@@ -2079,7 +2207,8 @@ impl RemoteAgentManager {
         // responsive even if the server is slow.
         if !opencode_call_ids.is_empty() && is_opencode_protocol(&self.remote_config.protocol) {
             let base_url = normalize_base_url(&self.remote_config.url);
-            let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+            let auth_header =
+                build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
             let http_client = self.http_client.clone();
             let conversation_id = self.runtime.conversation_id().to_string();
             tokio::spawn(async move {
