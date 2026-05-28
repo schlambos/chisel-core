@@ -27,6 +27,7 @@ use super::protocol::{
     INTERNAL_ERROR, INVALID_PARAMS, JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PROTOCOL_VERSION, SERVER_NAME,
     SERVER_VERSION,
 };
+use super::shell::ShellApprover;
 use super::tools::{all_tool_descriptors, dispatch};
 
 /// Cloneable handle over the server's "has a remote client reached us yet"
@@ -95,6 +96,10 @@ struct McpAppState {
     project_root: PathBuf,
     auth_token: Arc<str>,
     probe: ContactProbe,
+    /// Gates the `run_shell` tool through the host agent's confirmation UI.
+    /// `None` leaves shell execution disabled (it fails closed); the fs
+    /// tools are unaffected either way.
+    approver: Option<Arc<dyn ShellApprover>>,
 }
 
 /// Running MCP server handle. Drops trigger graceful shutdown.
@@ -111,7 +116,16 @@ impl LocalFsMcpServer {
     /// absolute path on the local filesystem). `bind` is the interface to
     /// listen on — typically `127.0.0.1:0` for loopback or `0.0.0.0:0` for
     /// all interfaces; the OS picks an ephemeral port.
-    pub async fn start(project_root: PathBuf, bind: SocketAddr, auth_token: String) -> std::io::Result<Self> {
+    ///
+    /// `approver`, when `Some`, gates the `run_shell` tool through the host
+    /// agent's confirmation flow; `None` disables shell execution (the
+    /// filesystem tools still work).
+    pub async fn start(
+        project_root: PathBuf,
+        bind: SocketAddr,
+        auth_token: String,
+        approver: Option<Arc<dyn ShellApprover>>,
+    ) -> std::io::Result<Self> {
         if !project_root.is_dir() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -124,6 +138,7 @@ impl LocalFsMcpServer {
             project_root: canonical.clone(),
             auth_token: Arc::from(auth_token.as_str()),
             probe: probe.clone(),
+            approver,
         };
         let app = Router::new().route("/", post(handle_rpc)).with_state(state);
 
@@ -274,7 +289,7 @@ async fn handle_rpc(
                 JsonRpcResponse::error(id, INVALID_PARAMS, "missing tool name")
             } else {
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-                let (text, is_error) = dispatch(&state.project_root, tool_name, &arguments).await;
+                let (text, is_error) = dispatch(&state.project_root, tool_name, &arguments, state.approver.as_ref()).await;
                 if is_error {
                     warn!(tool = tool_name, error = %text, "fs MCP tool returned error");
                 } else {
@@ -338,6 +353,7 @@ mod tests {
             dir.path().to_path_buf(),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             token.clone(),
+            None,
         )
         .await
         .unwrap();

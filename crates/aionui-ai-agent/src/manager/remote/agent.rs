@@ -11,12 +11,13 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::header::AUTHORIZATION;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use crate::agent_runtime::AgentRuntime;
-use crate::manager::remote::local_fs_mcp::LocalFsMcpServer;
+use crate::manager::remote::local_fs_mcp::{LocalFsMcpServer, ShellApproval, ShellApprover};
 use crate::manager::remote::local_fs_mcp::project_tree::render_project_tree_default;
 use crate::manager::remote::opencode_commands::{self, OpenCodeCommand};
 use crate::manager::remote::opencode_mcp;
@@ -68,6 +69,13 @@ struct RemoteState {
     /// the `size` field of the synthesized `acp_context_usage` event.
     /// Lifetime: tied to this `RemoteAgentManager` instance.
     model_context_limits: Option<HashMap<String, u64>>,
+    /// In-flight `run_shell` approvals raised by the local fs MCP server,
+    /// keyed by the synthetic confirmation `call_id` (`shell-…`). The MCP
+    /// dispatch parks a `oneshot::Sender` here and awaits the receiver;
+    /// `confirm()` (driven by the UI's reply) removes the entry and sends
+    /// the decision, waking the parked tool call. Dropped on cancel/kill so
+    /// any waiting command fails closed.
+    pending_shell_approvals: HashMap<String, oneshot::Sender<ShellApproval>>,
 }
 
 /// Configuration for connecting to a remote agent.
@@ -99,13 +107,107 @@ fn build_auth_header(auth_type: &str, auth_token: Option<&str>) -> Option<String
     Some(value)
 }
 
+/// Approval-memory key for an "allow always" decision on the shell tool.
+/// Mirrors the `(action, command_type)` pair the confirmation carries.
+fn shell_approval_key() -> String {
+    approval_key(Some("run_shell"), Some("run_shell"))
+}
+
+/// Bridges `run_shell` tool calls from the local fs MCP server back to the
+/// user's confirmation UI.
+///
+/// Holds only the shared pieces it needs — the state behind its `Arc` and a
+/// runtime handle to emit events — so it can be handed to the MCP server as
+/// a `'static` trait object without coupling to the manager's lifetime or
+/// requiring an `Arc<RemoteAgentManager>` at the (borrowed-`self`) call site
+/// that starts the server.
+struct RemoteShellApprover {
+    runtime: AgentRuntime,
+    state: Arc<RwLock<RemoteState>>,
+}
+
+#[async_trait::async_trait]
+impl ShellApprover for RemoteShellApprover {
+    async fn approve_shell(&self, command: &str, cwd: &str) -> ShellApproval {
+        // A prior "allow always" for this session short-circuits the prompt.
+        {
+            let state = self.state.read().await;
+            if state.approval_memory.get(&shell_approval_key()).copied().unwrap_or(false) {
+                return ShellApproval::Allow;
+            }
+        }
+
+        // Synthetic id namespaced so `confirm()` can tell our in-process
+        // approvals apart from OpenCode's `per_…` permission ids.
+        let call_id = format!("shell-{}", Uuid::new_v4());
+        let (tx, rx) = oneshot::channel();
+
+        let confirmation = Confirmation {
+            id: call_id.clone(),
+            call_id: call_id.clone(),
+            title: Some("Run a command on your machine?".to_string()),
+            action: Some("run_shell".to_string()),
+            description: format!("{} — {cwd}\n\n$ {command}", super::local_fs_mcp::shell::shell_hint()),
+            command_type: Some("run_shell".to_string()),
+            options: vec![
+                ConfirmationOption {
+                    label: "Allow once".to_string(),
+                    value: Value::String("once".to_string()),
+                    params: None,
+                },
+                ConfirmationOption {
+                    label: "Allow always".to_string(),
+                    value: Value::String("always".to_string()),
+                    params: None,
+                },
+                ConfirmationOption {
+                    label: "Reject".to_string(),
+                    value: Value::String("reject".to_string()),
+                    params: None,
+                },
+            ],
+        };
+
+        {
+            let mut state = self.state.write().await;
+            state.confirmations.retain(|c| c.call_id != call_id);
+            state.confirmations.push(confirmation.clone());
+            state.pending_shell_approvals.insert(call_id.clone(), tx);
+        }
+
+        info!(
+            conversation_id = %self.runtime.conversation_id(),
+            %call_id,
+            "awaiting user approval for a local shell command"
+        );
+        self.runtime
+            .emit(AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(confirmation)));
+
+        // Park until the UI replies via `confirm()`. A dropped sender
+        // (cancel/kill clears the map) closes the channel → fail closed.
+        match rx.await {
+            Ok(decision) => decision,
+            Err(_) => {
+                let mut state = self.state.write().await;
+                state.pending_shell_approvals.remove(&call_id);
+                state.confirmations.retain(|c| c.call_id != call_id);
+                ShellApproval::Reject
+            }
+        }
+    }
+}
+
 /// Manages a Remote Agent via WebSocket or HTTP/SSE transport.
 ///
 /// OpenClaw / ACP protocols use WebSocket. OpenCode uses HTTP POST + SSE.
 pub struct RemoteAgentManager {
     runtime: AgentRuntime,
     remote_config: RemoteAgentConfig,
-    state: RwLock<RemoteState>,
+    /// Shared so the local fs MCP server's shell approver can reach the
+    /// confirmation queue and approval memory without holding the whole
+    /// manager. `Arc<RwLock<_>>` derefs to `RwLock<_>`, so all existing
+    /// `self.state.read()/write()` call sites are unaffected.
+    state: Arc<RwLock<RemoteState>>,
     /// WebSocket sink for sending messages, wrapped in Mutex for concurrency.
     ws_sink: Mutex<
         Option<
@@ -149,7 +251,7 @@ impl RemoteAgentManager {
         Ok(Self {
             runtime,
             remote_config,
-            state: RwLock::new(RemoteState {
+            state: Arc::new(RwLock::new(RemoteState {
                 session_key: None,
                 confirmations: Vec::new(),
                 has_messages: false,
@@ -167,7 +269,8 @@ impl RemoteAgentManager {
                 desired_agent: None,
                 opencode_commands: None,
                 model_context_limits: None,
-            }),
+                pending_shell_approvals: HashMap::new(),
+            })),
             ws_sink: Mutex::new(None),
             _reader_handle: Mutex::new(None),
             http_client,
@@ -939,8 +1042,24 @@ impl RemoteAgentManager {
         }
         let workspace = self.runtime.workspace().to_string();
         let conversation_id = self.runtime.conversation_id().to_string();
-        match opencode_mcp::start_and_register(&self.http_client, base_url, auth_header, &conversation_id, &workspace)
-            .await
+
+        // Approver lets the MCP server's `run_shell` tool gate each command
+        // on the user's confirmation UI. Built from shared handles (cloned
+        // `Arc` + `AgentRuntime`) so it outlives this borrowed-`self` call.
+        let approver: Arc<dyn ShellApprover> = Arc::new(RemoteShellApprover {
+            runtime: self.runtime.clone(),
+            state: Arc::clone(&self.state),
+        });
+
+        match opencode_mcp::start_and_register(
+            &self.http_client,
+            base_url,
+            auth_header,
+            &conversation_id,
+            &workspace,
+            Some(approver),
+        )
+        .await
         {
             Ok(server) => {
                 // Capture what the guardian needs before the server moves
@@ -1115,14 +1234,21 @@ impl RemoteAgentManager {
                 .await
                 .unwrap_or_else(|_| String::from("(failed to enumerate project)"))
         };
+        let shell_hint = super::local_fs_mcp::shell::shell_hint();
         let system_hint = format!(
             "The user's project is located at {workspace} on their local machine. \
              Use ONLY the mcp__aionui-local-fs-* tools for all file operations. \
              These tools operate on the user's actual project files. \
              All file paths should be relative to the project root (e.g. \"src/main.rs\"), \
              not absolute. Before claiming a file or directory does not exist, ALWAYS call \
-             list_dir or read_file on it — do not rely on memory of prior turns. The current \
-             project layout (gitignore-respecting; may be truncated) is:\n\n{tree}"
+             list_dir or read_file on it — do not rely on memory of prior turns. \
+             To run terminal commands — build, test, lint, git, anything you need to verify \
+             your work — you MUST use the mcp__aionui-local-fs-*_run_shell tool; your own \
+             built-in shell runs on a different machine and cannot see this project. \
+             Commands execute on the user's machine ({shell_hint}), in the project root, and \
+             each one requires the user to approve it first, so write commands in that shell's \
+             syntax and prefer one combined command over many. The current project layout \
+             (gitignore-respecting; may be truncated) is:\n\n{tree}"
         );
 
         let mut body = json!({
@@ -1422,6 +1548,50 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
 
     async fn cancel(&self) -> Result<(), AppError> {
         if is_opencode_protocol(&self.remote_config.protocol) {
+            // Nothing has been started on the server until a session exists.
+            let session_id = { self.state.read().await.opencode_session_id.clone() };
+            let Some(session_id) = session_id else {
+                return Ok(());
+            };
+
+            // Fire-and-forget the interrupt so the UI's stop button returns
+            // instantly instead of blocking on a network round-trip. OpenCode's
+            // `POST /session/{id}/abort` halts in-flight generation server-side,
+            // which is what actually stops token spend.
+            let http_client = self.http_client.clone();
+            let base_url = normalize_base_url(&self.remote_config.url);
+            let auth_header =
+                build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+            let conversation_id = self.runtime.conversation_id().to_string();
+            tokio::spawn(async move {
+                let url = format!("{base_url}/session/{session_id}/abort");
+                let mut req = http_client.post(&url).timeout(Duration::from_secs(10));
+                if let Some(ref h) = auth_header {
+                    req = req.header(AUTHORIZATION, h.as_str());
+                }
+                match req.send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        info!(%conversation_id, %session_id, "OpenCode session aborted");
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        warn!(%conversation_id, %session_id, %status, %body, "OpenCode abort returned non-success");
+                    }
+                    Err(e) => {
+                        warn!(%conversation_id, %session_id, error = %e, "OpenCode abort request failed");
+                    }
+                }
+            });
+
+            // Mirror the WebSocket path: drop any pending confirmations
+            // locally. Dropping the shell-approval senders closes their
+            // channels, so any parked `run_shell` fails closed (Reject).
+            {
+                let mut state = self.state.write().await;
+                state.confirmations.clear();
+                state.pending_shell_approvals.clear();
+            }
             return Ok(());
         }
         if self.ws_sink.lock().await.is_none() {
@@ -1432,6 +1602,7 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
 
         let mut state = self.state.write().await;
         state.confirmations.clear();
+        state.pending_shell_approvals.clear();
         Ok(())
     }
 
@@ -1444,6 +1615,15 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
 
         if let Ok(mut guard) = self.ws_sink.try_lock() {
             *guard = None;
+        }
+
+        // Drop any parked shell approvals first. Each one is holding a
+        // `run_shell` MCP request open while it awaits the user; dropping the
+        // senders makes them resolve to Reject so those requests complete —
+        // otherwise the server's graceful shutdown below would block on them.
+        if let Ok(mut state) = self.state.try_write() {
+            state.confirmations.clear();
+            state.pending_shell_approvals.clear();
         }
 
         // Stop the reachability guardian before teardown so it can't
@@ -1494,8 +1674,38 @@ impl RemoteAgentManager {
 /// Remote-specific operations reached through `AgentInstance::Remote(..)`.
 impl RemoteAgentManager {
     pub fn confirm(&self, _msg_id: &str, call_id: &str, data: Value, always_allow: bool) -> Result<(), AppError> {
+        // Normalize the UI's choice up front — both the local shell-approval
+        // path and the OpenCode path need it. Prefer the explicit option
+        // value the frontend sent ("once"/"always"/"reject"); fall back to
+        // the always_allow flag, then "once".
+        let reply = data
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| data.get("value").and_then(|v| v.as_str()).map(str::to_owned))
+            .filter(|r| matches!(r.as_str(), "once" | "always" | "reject"))
+            .unwrap_or_else(|| if always_allow { "always".to_string() } else { "once".to_string() });
+
         if let Ok(mut state) = self.state.try_write() {
-            if always_allow && let Some(conf) = state.confirmations.iter().find(|c| c.call_id == call_id) {
+            // In-process shell approval? These originate from our own local
+            // fs MCP server (call_id "shell-…"), so resolve them by waking
+            // the parked `run_shell` tool call — there is no OpenCode-side
+            // permission to reply to (that POST would 404).
+            if let Some(tx) = state.pending_shell_approvals.remove(call_id) {
+                if reply == "always" {
+                    state.approval_memory.insert(shell_approval_key(), true);
+                }
+                state.confirmations.retain(|c| c.call_id != call_id);
+                drop(state);
+                let decision = if reply == "reject" {
+                    ShellApproval::Reject
+                } else {
+                    ShellApproval::Allow
+                };
+                let _ = tx.send(decision);
+                return Ok(());
+            }
+
+            if reply == "always" && let Some(conf) = state.confirmations.iter().find(|c| c.call_id == call_id) {
                 let key = approval_key(conf.action.as_deref(), conf.command_type.as_deref());
                 state.approval_memory.insert(key, true);
             }
@@ -1503,32 +1713,6 @@ impl RemoteAgentManager {
         }
 
         if is_opencode_protocol(&self.remote_config.protocol) {
-            // Translate the UI's choice into the OpenCode reply string.
-            // Prefer the option value the frontend sent (we attached
-            // "once"/"always"/"reject" in the permission.asked handler).
-            // Fall back to the always_allow flag, then "once".
-            let reply = data
-                .as_str()
-                .map(str::to_owned)
-                .or_else(|| data.get("value").and_then(|v| v.as_str()).map(str::to_owned))
-                .unwrap_or_else(|| {
-                    if always_allow {
-                        "always".to_string()
-                    } else {
-                        "once".to_string()
-                    }
-                });
-            let reply = match reply.as_str() {
-                "once" | "always" | "reject" => reply,
-                _ => {
-                    if always_allow {
-                        "always".to_string()
-                    } else {
-                        "once".to_string()
-                    }
-                }
-            };
-
             let base_url = normalize_base_url(&self.remote_config.url);
             let auth_header =
                 build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());

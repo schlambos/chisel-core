@@ -7,6 +7,8 @@
 pub mod project_tree;
 pub mod protocol;
 pub mod server;
+pub mod shell;
 pub mod tools;
 
 pub use server::{ContactProbe, LocalFsMcpServer};
+pub use shell::{ShellApprover, ShellApproval};

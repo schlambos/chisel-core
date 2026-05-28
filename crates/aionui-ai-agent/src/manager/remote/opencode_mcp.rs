@@ -12,6 +12,7 @@
 //! actually reach wins. This is robust to multi-homed hosts, VPNs, and
 //! asymmetric routing without any hard-coded address.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::header::AUTHORIZATION;
@@ -20,7 +21,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use super::local_fs_mcp::{ContactProbe, LocalFsMcpServer};
+use super::local_fs_mcp::{ContactProbe, LocalFsMcpServer, ShellApprover};
 use super::reachability::{Plan, current_route_ip, plan};
 
 /// Name used to register the client MCP with OpenCode. Per-conversation
@@ -97,12 +98,13 @@ pub async fn start_and_register(
     auth_header: Option<&str>,
     conversation_id: &str,
     workspace_root: &str,
+    approver: Option<Arc<dyn ShellApprover>>,
 ) -> Result<LocalFsMcpServer, String> {
     let plan = plan(base_url);
     let bind = plan.bind_addr();
 
     let token = Uuid::new_v4().to_string();
-    let server = LocalFsMcpServer::start(workspace_root.into(), bind, token.clone())
+    let server = LocalFsMcpServer::start(workspace_root.into(), bind, token.clone(), approver)
         .await
         .map_err(|e| format!("failed to start local fs MCP server: {e}"))?;
     let probe = server.contact_probe();
@@ -325,7 +327,11 @@ async fn register_mcp(
             "headers": {
                 "Authorization": format!("Bearer {token}"),
             },
-            "timeout": 30000,
+            // Generous so a `run_shell` call isn't abandoned while it waits
+            // for the user to approve the command (the approval blocks the
+            // MCP request). The fast filesystem tools return well within this
+            // either way, so the larger ceiling costs them nothing.
+            "timeout": 300000,
         },
     });
 

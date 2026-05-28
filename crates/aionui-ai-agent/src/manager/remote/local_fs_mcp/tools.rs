@@ -5,6 +5,7 @@
 //! sees absolute client paths; only `src/foo.ts`-style relative paths.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -14,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::fs;
 use tracing::warn;
+
+use super::shell::{self, ShellApproval, ShellApprover};
 
 const MAX_READ_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB cap per read
 const MAX_GREP_FILES: usize = 5000;
@@ -109,6 +112,21 @@ Do NOT prepend the workspace's absolute path that appears in session context.",
                     "to":   { "type": "string", "description": "Relative destination path. Do not prepend the workspace's absolute path." }
                 },
                 "required": ["from", "to"]
+            }),
+        },
+        ToolDescriptor {
+            name: "run_shell",
+            description: "Run a shell command on the USER'S LOCAL machine — where their project actually lives — and return its stdout, stderr, and exit code. \
+Use this to verify your work: build, run tests, run linters/formatters, git, or any terminal command. \
+Your own built-in/remote shell cannot see this project, so this is the ONLY way to execute commands against it. \
+The command runs in the project root using the user's native shell (the session context states which OS/shell — write the command in that syntax). \
+IMPORTANT: every call requires the user to approve the exact command before it runs, so combine related steps into one command rather than issuing many small ones.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "The exact command line to run in the user's native shell, in that shell's syntax." }
+                },
+                "required": ["command"]
             }),
         },
     ]
@@ -222,6 +240,11 @@ struct RenameInput {
     to: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ShellInput {
+    command: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ListEntry {
     name: String,
@@ -232,7 +255,17 @@ struct ListEntry {
 
 /// Dispatch a `tools/call` to the appropriate fs operation.
 /// Returns `(content_text, is_error)`.
-pub async fn dispatch(root: &Path, tool: &str, args: &Value) -> (String, bool) {
+///
+/// `approver` gates the `run_shell` tool: the command is only executed once
+/// the user approves it through the host agent's confirmation UI. It is
+/// `None` for the filesystem tools (which need no approval) and when no
+/// approval channel is wired up — in which case `run_shell` fails closed.
+pub async fn dispatch(
+    root: &Path,
+    tool: &str,
+    args: &Value,
+    approver: Option<&Arc<dyn ShellApprover>>,
+) -> (String, bool) {
     match tool {
         "read_file" => match serde_json::from_value::<ReadInput>(args.clone()) {
             Ok(input) => match read_file(root, &input.path).await {
@@ -276,7 +309,32 @@ pub async fn dispatch(root: &Path, tool: &str, args: &Value) -> (String, bool) {
             },
             Err(e) => (format!("invalid params: {e}"), true),
         },
+        "run_shell" => match serde_json::from_value::<ShellInput>(args.clone()) {
+            Ok(input) => run_shell(root, &input.command, approver).await,
+            Err(e) => (format!("invalid params: {e}"), true),
+        },
         _ => (format!("unknown tool: {tool}"), true),
+    }
+}
+
+/// Gate a shell command on user approval, then run it locally. Fails closed:
+/// an empty command or a missing approval channel never executes anything.
+async fn run_shell(root: &Path, command: &str, approver: Option<&Arc<dyn ShellApprover>>) -> (String, bool) {
+    let command = command.trim();
+    if command.is_empty() {
+        return ("empty command".to_string(), true);
+    }
+    let Some(approver) = approver else {
+        warn!("run_shell invoked with no approval channel; refusing to execute");
+        return (
+            "shell execution is unavailable: no approval channel is configured for this session".to_string(),
+            true,
+        );
+    };
+    let cwd = root.to_string_lossy();
+    match approver.approve_shell(command, &cwd).await {
+        ShellApproval::Allow => shell::run_shell(root, command).await,
+        ShellApproval::Reject => ("command was rejected by the user".to_string(), true),
     }
 }
 
@@ -514,6 +572,7 @@ mod tests {
             &root,
             "write_file",
             &json!({"path": "newly/nested/dir/hello.txt", "content": "hi"}),
+            None,
         )
         .await;
         assert!(!err, "write_file should succeed: {out}");
@@ -523,10 +582,10 @@ mod tests {
     #[tokio::test]
     async fn write_then_read_roundtrip() {
         let (_g, root) = tmp();
-        let (out, err) = dispatch(&root, "write_file", &json!({"path": "hello.txt", "content": "hi"})).await;
+        let (out, err) = dispatch(&root, "write_file", &json!({"path": "hello.txt", "content": "hi"}), None).await;
         assert!(!err, "write_file should succeed: {out}");
 
-        let (out, err) = dispatch(&root, "read_file", &json!({"path": "hello.txt"})).await;
+        let (out, err) = dispatch(&root, "read_file", &json!({"path": "hello.txt"}), None).await;
         assert!(!err, "read_file should succeed: {out}");
         assert_eq!(out, "hi");
     }
@@ -536,7 +595,7 @@ mod tests {
         let (_g, root) = tmp();
         std::fs::create_dir(root.join("sub")).unwrap();
         std::fs::write(root.join("a.txt"), "x").unwrap();
-        let (out, err) = dispatch(&root, "list_dir", &json!({"path": ""})).await;
+        let (out, err) = dispatch(&root, "list_dir", &json!({"path": ""}), None).await;
         assert!(!err);
         let v: Value = serde_json::from_str(&out).unwrap();
         let entries = v["entries"].as_array().unwrap();
@@ -546,7 +605,7 @@ mod tests {
     #[tokio::test]
     async fn read_rejects_escape() {
         let (_g, root) = tmp();
-        let (out, err) = dispatch(&root, "read_file", &json!({"path": "../etc/passwd"})).await;
+        let (out, err) = dispatch(&root, "read_file", &json!({"path": "../etc/passwd"}), None).await;
         assert!(err);
         assert!(out.contains("escapes project root"));
     }
@@ -559,11 +618,73 @@ mod tests {
             &root,
             "grep_dir",
             &json!({"pattern": "hello", "case_insensitive": true}),
+            None,
         )
         .await;
         assert!(!err, "grep failed: {out}");
         let v: Value = serde_json::from_str(&out).unwrap();
         let matches = v["matches"].as_array().unwrap();
         assert_eq!(matches.len(), 2);
+    }
+
+    /// Test approver that records the command it was asked about and returns
+    /// a fixed decision.
+    struct FixedApprover {
+        decision: ShellApproval,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ShellApprover for FixedApprover {
+        async fn approve_shell(&self, command: &str, _cwd: &str) -> ShellApproval {
+            self.seen.lock().unwrap().push(command.to_string());
+            self.decision
+        }
+    }
+
+    #[tokio::test]
+    async fn run_shell_executes_when_approved() {
+        let (_g, root) = tmp();
+        let approver: Arc<dyn ShellApprover> = Arc::new(FixedApprover {
+            decision: ShellApproval::Allow,
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let (out, err) = dispatch(&root, "run_shell", &json!({"command": "echo gated_ok"}), Some(&approver)).await;
+        assert!(!err, "approved command should run: {out}");
+        assert!(out.contains("gated_ok"), "missing command output: {out}");
+    }
+
+    #[tokio::test]
+    async fn run_shell_refuses_when_rejected() {
+        let (_g, root) = tmp();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let approver: Arc<dyn ShellApprover> = Arc::new(FixedApprover {
+            decision: ShellApproval::Reject,
+            seen,
+        });
+        let (out, err) = dispatch(&root, "run_shell", &json!({"command": "echo should_not_run"}), Some(&approver)).await;
+        assert!(err, "rejected command must report an error");
+        assert!(out.contains("rejected"), "unexpected message: {out}");
+        assert!(!out.contains("should_not_run"), "rejected command must not execute: {out}");
+    }
+
+    #[tokio::test]
+    async fn run_shell_fails_closed_without_approver() {
+        let (_g, root) = tmp();
+        let (out, err) = dispatch(&root, "run_shell", &json!({"command": "echo nope"}), None).await;
+        assert!(err, "must fail closed with no approver");
+        assert!(out.contains("no approval channel"), "unexpected message: {out}");
+    }
+
+    #[tokio::test]
+    async fn run_shell_rejects_empty_command() {
+        let (_g, root) = tmp();
+        let approver: Arc<dyn ShellApprover> = Arc::new(FixedApprover {
+            decision: ShellApproval::Allow,
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let (out, err) = dispatch(&root, "run_shell", &json!({"command": "   "}), Some(&approver)).await;
+        assert!(err, "empty command must error");
+        assert!(out.contains("empty command"), "unexpected message: {out}");
     }
 }
