@@ -35,25 +35,22 @@ pub fn row_to_response_with_extra(
     mut extra: serde_json::Value,
     data_dir: &Path,
 ) -> Result<ConversationResponse, AppError> {
-    let mut remote_workspace_fallback_applied = false;
     if row.r#type == "remote"
         && data_dir.is_dir()
         && let Some(workspace) = extra.get("workspace").and_then(|v| v.as_str())
         && !workspace.is_empty()
         && !Path::new(workspace).is_dir()
+        && let Some(obj) = extra.as_object_mut()
     {
-        if let Some(obj) = extra.as_object_mut() {
-            obj.insert(
-                "workspace".to_owned(),
-                serde_json::Value::String(data_dir.to_string_lossy().into_owned()),
-            );
-            remote_workspace_fallback_applied = true;
-        }
+        obj.insert(
+            "workspace".to_owned(),
+            serde_json::Value::String(data_dir.to_string_lossy().into_owned()),
+        );
     }
 
     let is_temporary_workspace = {
         let ws = extra.get("workspace").and_then(|v| v.as_str()).unwrap_or("");
-        !remote_workspace_fallback_applied && !ws.is_empty() && Path::new(ws).starts_with(data_dir)
+        !ws.is_empty() && Path::new(ws).starts_with(data_dir)
     };
     if let Some(obj) = extra.as_object_mut() {
         obj.insert(
@@ -432,7 +429,11 @@ mod tests {
             resp.extra["workspace"].as_str(),
             Some(local_root.to_string_lossy().as_ref())
         );
-        assert_eq!(resp.extra["is_temporary_workspace"], false);
+        // When the remote fallback rewrites workspace to data_dir, the row
+        // is by definition sitting under the managed temp area — the
+        // frontend must render it as a temporary session, not group it
+        // as a custom workspace named after the data_dir basename.
+        assert_eq!(resp.extra["is_temporary_workspace"], true);
     }
 
     #[test]
