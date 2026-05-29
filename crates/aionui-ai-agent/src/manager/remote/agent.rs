@@ -14,7 +14,7 @@ use reqwest::header::AUTHORIZATION;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 use crate::agent_runtime::AgentRuntime;
@@ -194,6 +194,131 @@ fn unwrap_event(raw: Value) -> Value {
         },
         other => other,
     }
+}
+
+/// OpenCode SSE event types that legitimately arrive on `/global/event` but
+/// require no client-side action in the remote manager (E02 — full event
+/// coverage). Three families live here:
+///
+///   1. **Server/global-scoped** events that are not tied to a single
+///      conversation (`server.*`, `global.*`, `account.*`, `installation.*`
+///      *handled explicitly elsewhere*, `lsp.*`, `mcp.*`, `project.*`,
+///      `vcs.*`, `file.*`, `command.executed`, `workspace.*`, `worktree.*`,
+///      `pty.*`, `tui.*`). A per-conversation manager would multiply any
+///      user-facing reaction N-fold across open conversations, so these are
+///      acknowledged quietly. Feature plans M10–M19 may promote individual
+///      entries out of this set later.
+///   2. **V2 streaming mirrors** (`session.next.text.*`, `…reasoning.*`,
+///      `…step.*`, `…tool.called|success|failed`, `…shell.*`,
+///      `…compaction.*`, `…prompted`, `…synthetic`, `…retried`). These
+///      duplicate information the dispatcher already consumes through the
+///      `message.part.updated` / `message.part.delta` / `message.updated`
+///      path — the product renders text, reasoning and tool lifecycle from
+///      those parts today, which proves the `session.next.*` mirrors are
+///      redundant. Handling them too would double-process every turn.
+///   3. **Session-scoped feature stubs** delegated to later plans
+///      (`session.updated`→M06 title sync, `session.deleted`→M06,
+///      `session.diff`→M05, `session.compacted`→M04, `question.*`→M09,
+///      `message.removed` / `message.part.removed`→M07).
+///
+/// Membership here only changes the log level (trace vs debug); it never
+/// alters stream behaviour. Anything NOT in this set and NOT explicitly
+/// matched falls through to the fingerprinted `debug` fallback so genuinely
+/// new server event types stay visible in diagnostics.
+const KNOWN_IGNORED_EVENTS: &[&str] = &[
+    // 1. server / global scoped
+    "server.connected",
+    "server.heartbeat",
+    "server.instance.disposed",
+    "global.disposed",
+    "account.added",
+    "account.removed",
+    "account.switched",
+    "file.edited",
+    "file.watcher.updated",
+    "command.executed",
+    "lsp.updated",
+    "lsp.client.diagnostics",
+    "mcp.tools.changed",
+    "mcp.browser.open.failed",
+    "project.updated",
+    "vcs.branch.updated",
+    "workspace.failed",
+    "workspace.ready",
+    "workspace.status",
+    "worktree.failed",
+    "worktree.ready",
+    "pty.created",
+    "pty.deleted",
+    "pty.exited",
+    "pty.updated",
+    "tui.command.execute",
+    "tui.prompt.append",
+    "tui.session.select",
+    "tui.toast.show",
+    // 2. V2 streaming mirrors of the message.part.* path we already consume
+    "session.next.prompted",
+    "session.next.synthetic",
+    "session.next.retried",
+    "session.next.step.started",
+    "session.next.step.ended",
+    "session.next.step.failed",
+    "session.next.text.started",
+    "session.next.text.delta",
+    "session.next.text.ended",
+    "session.next.reasoning.started",
+    "session.next.reasoning.delta",
+    "session.next.reasoning.ended",
+    "session.next.shell.started",
+    "session.next.shell.ended",
+    "session.next.tool.called",
+    "session.next.tool.success",
+    "session.next.tool.failed",
+    "session.next.compaction.started",
+    "session.next.compaction.delta",
+    "session.next.compaction.ended",
+    // 3. session-scoped feature stubs delegated to later plans
+    // `session.created` for our own root session reaches the dispatcher after
+    // child-registration has already run in the gate; there is no further work
+    // for the root case, so acknowledge it quietly rather than as "unhandled".
+    "session.created",
+    "session.updated",
+    "session.deleted",
+    "session.diff",
+    "session.compacted",
+    "question.asked",
+    "question.replied",
+    "question.rejected",
+    "message.removed",
+    "message.part.removed",
+];
+
+/// Whether an event type is a known, intentionally-unhandled OpenCode event
+/// (see [`KNOWN_IGNORED_EVENTS`]). Used by the dispatcher fallback to pick the
+/// log level so the noisy-but-benign global stream does not masquerade as an
+/// unknown event in diagnostics.
+fn is_known_ignored_event(event_type: &str) -> bool {
+    KNOWN_IGNORED_EVENTS.contains(&event_type)
+}
+
+/// Stable, **non-sensitive** fingerprint of an event's `properties` object,
+/// derived from the sorted set of top-level property *keys* only (never their
+/// values). Lets `log_unhandled` distinguish genuinely-new event shapes in
+/// diagnostics without ever recording payload contents — satisfying the
+/// AGENTS.md rule that production logs must not contain prompts, tool I/O,
+/// file contents, or secrets. Returns a 16-hex-char digest.
+fn event_property_fingerprint(props: &Value) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut keys: Vec<&str> = match props.as_object() {
+        Some(map) => map.keys().map(String::as_str).collect(),
+        None => Vec::new(),
+    };
+    keys.sort_unstable();
+    let mut hasher = DefaultHasher::new();
+    keys.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// Initial reconnect delay after the SSE reader drops (C02). Doubles each
@@ -1678,13 +1803,90 @@ impl RemoteAgentManager {
                     self.runtime.emit(event);
                 }
             }
-            _ => {
-                debug!(
+            "models-dev.refreshed" | "catalog.model.updated" => {
+                // The server's provider/model catalog changed upstream (a
+                // models.dev refresh or a per-model update). Drop the cached
+                // `model_id -> context_window` map so the next synthesized
+                // `acp_context_usage` lookup re-fetches from
+                // `GET /config/providers` rather than reporting a stale window.
+                // (E02)
+                let mut state = self.state.write().await;
+                if state.model_context_limits.take().is_some() {
+                    debug!(
+                        conversation_id = %self.runtime.conversation_id(),
+                        event_type = event_type,
+                        "OpenCode model catalog refreshed; invalidated context-window cache"
+                    );
+                }
+            }
+            "permission.replied" => {
+                // A permission this server tracks was answered. The reply may
+                // have come from another client (TUI/desktop) pointed at the
+                // same server, or be the echo of our own `confirm()`. Reconcile
+                // local state either way: drop any still-pending confirmation
+                // for that request id so it can't linger in the Approvals tab
+                // (or be re-surfaced by a `get_confirmations()` poll / reconnect
+                // backfill), and stamp the dedup map so a late local reply for
+                // the same id is suppressed (mirrors the `responded` Map in
+                // OpenCode's own `permission.tsx`). (E02)
+                let request_id = props
+                    .get("requestID")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| props.get("id").and_then(|v| v.as_str()))
+                    .map(String::from);
+                if let Some(id) = request_id {
+                    let mut state = self.state.write().await;
+                    let was_pending = state.confirmations.iter().any(|c| c.call_id == id);
+                    state.confirmations.retain(|c| c.call_id != id);
+                    state.recently_replied_permissions.insert(id.clone(), now_ms());
+                    if was_pending {
+                        debug!(
+                            conversation_id = %self.runtime.conversation_id(),
+                            request_id = %id,
+                            "OpenCode permission replied upstream; cleared pending confirmation"
+                        );
+                    }
+                }
+            }
+            "installation.updated" | "installation.update-available" => {
+                // The server reported a new opencode version is installed or
+                // available. Surface at info for production troubleshooting; we
+                // deliberately do NOT auto-update and do NOT fan a user-facing
+                // banner out of every per-conversation manager (the event is
+                // global and would multiply N-fold across open conversations).
+                // A dedicated, de-duplicated update banner is a renderer-side
+                // follow-up. (E02 §3.2)
+                let version = props.get("version").and_then(|v| v.as_str()).unwrap_or("");
+                info!(
                     conversation_id = %self.runtime.conversation_id(),
                     event_type = event_type,
-                    is_child = is_child,
-                    "Unhandled OpenCode event"
+                    version = %version,
+                    "OpenCode server reported an installation update"
                 );
+            }
+            other => {
+                // Full event coverage (E02 §3.4): a known-but-intentionally-
+                // unhandled event is acknowledged at `trace` so the noisy global
+                // stream stays quiet, while a genuinely-new event type is logged
+                // at `debug` with a non-sensitive property-key fingerprint so it
+                // becomes visible in diagnostics without code changes.
+                if is_known_ignored_event(other) {
+                    trace!(
+                        conversation_id = %self.runtime.conversation_id(),
+                        event_type = other,
+                        is_child = is_child,
+                        "Recognized OpenCode event with no client-side action"
+                    );
+                } else {
+                    debug!(
+                        conversation_id = %self.runtime.conversation_id(),
+                        event_type = other,
+                        is_child = is_child,
+                        prop_fingerprint = %event_property_fingerprint(props),
+                        prop_count = props.as_object().map(|m| m.len()).unwrap_or(0),
+                        "Unhandled OpenCode event"
+                    );
+                }
             }
         }
     }
@@ -3505,6 +3707,65 @@ fn extract_opencode_todo_entries(props: &Value) -> Option<Vec<Value>> {
 mod tests {
     use super::*;
     use crate::agent_task::IAgentTask;
+
+    // ---- E02: event-coverage classifier -----------------------------------
+
+    #[test]
+    fn known_ignored_event_recognizes_global_and_mirror_events() {
+        // Server/global-scoped.
+        assert!(is_known_ignored_event("server.connected"));
+        assert!(is_known_ignored_event("tui.toast.show"));
+        assert!(is_known_ignored_event("project.updated"));
+        // V2 streaming mirror of the message.part.* path.
+        assert!(is_known_ignored_event("session.next.text.delta"));
+        assert!(is_known_ignored_event("session.next.tool.success"));
+        // Session-scoped feature stub delegated to a later plan.
+        assert!(is_known_ignored_event("session.diff"));
+        assert!(is_known_ignored_event("session.updated"));
+    }
+
+    #[test]
+    fn known_ignored_event_excludes_handled_and_unknown_events() {
+        // Explicitly handled in the dispatcher — must NOT be in the quiet set.
+        assert!(!is_known_ignored_event("session.idle"));
+        assert!(!is_known_ignored_event("permission.asked"));
+        assert!(!is_known_ignored_event("permission.replied"));
+        assert!(!is_known_ignored_event("models-dev.refreshed"));
+        assert!(!is_known_ignored_event("installation.updated"));
+        assert!(!is_known_ignored_event("session.next.tool.progress"));
+        // Genuinely unknown.
+        assert!(!is_known_ignored_event("weird.thing"));
+        assert!(!is_known_ignored_event(""));
+    }
+
+    #[test]
+    fn property_fingerprint_is_stable_and_key_order_independent() {
+        let a = json!({ "sessionID": "ses_1", "reply": "once", "requestID": "perm_1" });
+        let b = json!({ "requestID": "perm_1", "reply": "once", "sessionID": "ses_1" });
+        // Same key set, different declaration order → identical fingerprint.
+        assert_eq!(event_property_fingerprint(&a), event_property_fingerprint(&b));
+        assert_eq!(event_property_fingerprint(&a).len(), 16);
+    }
+
+    #[test]
+    fn property_fingerprint_depends_only_on_keys_not_values() {
+        // Different values, same keys → same fingerprint (no payload leakage).
+        let secret = json!({ "version": "9.9.9-supersecret" });
+        let plain = json!({ "version": "1.0.0" });
+        assert_eq!(event_property_fingerprint(&secret), event_property_fingerprint(&plain));
+        // A different key set → different fingerprint.
+        let other = json!({ "diff": "..." });
+        assert_ne!(event_property_fingerprint(&plain), event_property_fingerprint(&other));
+    }
+
+    #[test]
+    fn property_fingerprint_handles_non_object_payloads() {
+        // Must not panic on absent/empty/non-object properties.
+        assert_eq!(event_property_fingerprint(&json!({})).len(), 16);
+        assert_eq!(event_property_fingerprint(&Value::Null).len(), 16);
+        // Empty object and JSON null share the empty-key-set fingerprint.
+        assert_eq!(event_property_fingerprint(&json!({})), event_property_fingerprint(&Value::Null));
+    }
 
     #[test]
     fn normalize_url_strips_trailing_slash() {
