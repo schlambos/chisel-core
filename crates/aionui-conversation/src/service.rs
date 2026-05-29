@@ -13,7 +13,8 @@ use aionui_api_types::{
     WebSocketMessage,
 };
 use aionui_common::{
-    AgentType, AppError, ConversationSource, ConversationStatus, ErrorChain, OnConversationDelete, PaginatedResult,
+    AgentType, AppError, ConversationSource, ConversationStatus, ErrorChain, OnConversationDelete, OnConversationUpdate,
+    PaginatedResult,
     generate_short_id, now_ms,
 };
 use aionui_db::models::MessageRow;
@@ -47,6 +48,10 @@ pub struct ConversationService {
     /// can happen post-construction without breaking the `Clone` impl —
     /// mirrors the `cron_service` slot pattern below.
     delete_hooks: Arc<RwLock<Vec<Arc<dyn OnConversationDelete>>>>,
+    /// Hooks notified after `update()` succeeds. Mirrors `delete_hooks`; used
+    /// by the remote layer (M06) to propagate a rename/archive to the
+    /// OpenCode server session.
+    update_hooks: Arc<RwLock<Vec<Arc<dyn OnConversationUpdate>>>>,
     cron_service: Arc<RwLock<Option<Arc<dyn ICronService>>>>,
 
     // Repos for conversation, acp_session and agent_metadata access.
@@ -74,6 +79,7 @@ impl ConversationService {
             skill_resolver,
             task_manager,
             delete_hooks: Arc::new(RwLock::new(Vec::new())),
+            update_hooks: Arc::new(RwLock::new(Vec::new())),
             cron_service: Arc::new(RwLock::new(None)),
 
             conversation_repo,
@@ -95,6 +101,18 @@ impl ConversationService {
     /// (kill the agent process) and `CronService` (cascade-delete cron jobs).
     pub fn with_delete_hook(&self, hook: Arc<dyn OnConversationDelete>) {
         if let Ok(mut guard) = self.delete_hooks.write() {
+            guard.push(hook);
+        }
+    }
+
+    /// Register a hook to be notified after a conversation is updated.
+    ///
+    /// Hooks are dispatched sequentially in registration order from `update()`.
+    /// Used by `aionui-app` to wire up remote-session propagation (M06): a
+    /// renamed/archived OpenCode-bound conversation is mirrored to its server
+    /// session.
+    pub fn with_update_hook(&self, hook: Arc<dyn OnConversationUpdate>) {
+        if let Ok(mut guard) = self.update_hooks.write() {
             guard.push(hook);
         }
     }
@@ -587,6 +605,14 @@ impl ConversationService {
 
         info!("Conversation updated");
         self.broadcast_list_changed(id, "updated", response.source.as_ref());
+
+        // Notify update hooks (M06: propagate rename/archive to the remote
+        // OpenCode session). Sequential, failures swallowed inside the hook.
+        let update_hooks: Vec<Arc<dyn OnConversationUpdate>> =
+            self.update_hooks.read().map(|guard| guard.clone()).unwrap_or_default();
+        for hook in update_hooks {
+            hook.on_conversation_updated(id).await;
+        }
 
         Ok(response)
     }

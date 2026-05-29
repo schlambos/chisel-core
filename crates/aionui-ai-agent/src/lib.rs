@@ -35,5 +35,5 @@ pub use protocol::events::AgentStreamEvent;
 pub use registry::{AgentRegistry, UnavailableReason};
 pub use routes::{AgentRouterState, RemoteAgentRouterState, agent_routes, remote_agent_routes};
 pub use services::AgentService;
-pub use services::RemoteAgentService;
+pub use services::{RemoteAgentService, RemoteSessionPatch, RemoteSessionSyncHook};
 pub use task_manager::{IWorkerTaskManager, WorkerTaskManagerImpl};

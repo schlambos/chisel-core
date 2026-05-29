@@ -806,6 +806,30 @@ async fn delete_invokes_registered_hook() {
     assert_eq!(calls.as_slice(), &[conv.id]);
 }
 
+#[tokio::test]
+async fn update_invokes_registered_hook() {
+    use aionui_common::OnConversationUpdate;
+
+    struct RecordingHook(Mutex<Vec<String>>);
+    #[async_trait::async_trait]
+    impl OnConversationUpdate for RecordingHook {
+        async fn on_conversation_updated(&self, conversation_id: &str) {
+            self.0.lock().unwrap().push(conversation_id.to_owned());
+        }
+    }
+
+    let (svc, _broadcaster, _repo, task_mgr) = make_service();
+    let hook = Arc::new(RecordingHook(Mutex::new(vec![])));
+    svc.with_update_hook(hook.clone());
+
+    let conv = svc.create("user_1", make_create_req()).await.unwrap();
+    let req: UpdateConversationRequest = serde_json::from_value(json!({ "name": "renamed" })).unwrap();
+    svc.update("user_1", &conv.id, req, &task_mgr).await.unwrap();
+
+    let calls = hook.0.lock().unwrap();
+    assert_eq!(calls.as_slice(), &[conv.id]);
+}
+
 // ── Broadcast payload tests ────────────────────────────────────────
 
 #[tokio::test]

@@ -327,6 +327,39 @@ impl RemoteAgentService {
         .await
     }
 
+    /// Propagate a rename / archive of an OpenCode-bound conversation to its
+    /// server session (M06) via `PATCH /session/{sessionID}`. Best-effort: a
+    /// no-op patch (`title` and `archived` both `None`) returns `Ok(())`
+    /// without a network call. Only valid for OpenCode remote agents.
+    pub async fn update_session(
+        &self,
+        remote_agent_id: &str,
+        session_id: &str,
+        patch: RemoteSessionPatch,
+    ) -> Result<(), AppError> {
+        let row = self
+            .repo
+            .find_by_id(remote_agent_id)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::NotFound(format!("Remote agent '{remote_agent_id}' not found")))?;
+
+        let protocol = parse_protocol(&row.protocol);
+        if protocol != RemoteAgentProtocol::OpenCode {
+            return Err(AppError::BadRequest(
+                "Session update is only supported for OpenCode remote agents".into(),
+            ));
+        }
+
+        let Some(body) = build_session_patch_body(&patch, aionui_common::now_ms()) else {
+            return Ok(());
+        };
+
+        let auth_type = parse_auth_type(&row.auth_type);
+        let auth_token = decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
+        patch_opencode_session(&row.url, auth_type, auth_token.as_deref(), row.allow_insecure, session_id, &body).await
+    }
+
     // ── Private helpers ──────────────────────────────────────────
 
     fn row_to_list_item(&self, row: RemoteAgentRow) -> Result<RemoteAgentListItem, AppError> {
@@ -599,6 +632,67 @@ async fn fetch_opencode_model_info(
 /// objects whose interesting fields are `id`, `title`, and
 /// `time.updated` (timestamp). Older builds may return `updated_at`
 /// at the top level; both shapes are accepted.
+/// Patch fields for a remote OpenCode session (M06). All optional; only
+/// present fields are sent. `archived: Some(true)` sets `time.archived` to the
+/// current ms timestamp; `Some(false)` clears it (`0`); `None` leaves the
+/// server's archive state untouched.
+#[derive(Debug, Clone, Default)]
+pub struct RemoteSessionPatch {
+    pub title: Option<String>,
+    pub archived: Option<bool>,
+}
+
+/// Build the JSON body for `PATCH /session/{id}` from a [`RemoteSessionPatch`].
+/// Returns `None` when there is nothing to send (caller skips the request).
+fn build_session_patch_body(patch: &RemoteSessionPatch, now_ms: i64) -> Option<serde_json::Value> {
+    let mut body = serde_json::Map::new();
+    if let Some(title) = &patch.title {
+        body.insert("title".to_string(), serde_json::Value::String(title.clone()));
+    }
+    if let Some(archived) = patch.archived {
+        let ts = if archived { now_ms } else { 0 };
+        body.insert("time".to_string(), serde_json::json!({ "archived": ts }));
+    }
+    if body.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(body))
+    }
+}
+
+/// `PATCH /session/{sessionID}` with the given body (M06). Best-effort title /
+/// archive sync — mirrors [`fetch_opencode_sessions`]'s client construction.
+async fn patch_opencode_session(
+    url: &str,
+    auth_type: RemoteAgentAuthType,
+    auth_token: Option<&str>,
+    allow_insecure: bool,
+    session_id: &str,
+    body: &serde_json::Value,
+) -> Result<(), AppError> {
+    let base_url = normalize_opencode_base_url(url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .danger_accept_invalid_certs(allow_insecure)
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))?;
+    let response = client
+        .patch(format!("{base_url}/session/{session_id}"))
+        .headers(build_opencode_auth_headers(auth_type, auth_token)?)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode session update failed: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(AppError::BadGateway(format!(
+            "OpenCode PATCH /session/{session_id} returned {}",
+            response.status()
+        )));
+    }
+    Ok(())
+}
+
 async fn fetch_opencode_sessions(
     url: &str,
     auth_type: RemoteAgentAuthType,
@@ -1163,6 +1257,55 @@ mod tests {
         assert_eq!(parse_protocol("opencode"), RemoteAgentProtocol::OpenCode);
         assert_eq!(parse_protocol("zeroclaw"), RemoteAgentProtocol::ZeroClaw);
         assert_eq!(parse_protocol("acp"), RemoteAgentProtocol::Acp);
+    }
+
+    // ── M06: session patch body builder ──────────────────────────
+    #[test]
+    fn session_patch_body_title_only() {
+        let patch = RemoteSessionPatch {
+            title: Some("New title".into()),
+            archived: None,
+        };
+        let body = build_session_patch_body(&patch, 1_700_000_000_000).unwrap();
+        assert_eq!(body, serde_json::json!({ "title": "New title" }));
+        assert!(body.get("time").is_none());
+    }
+
+    #[test]
+    fn session_patch_body_archive_sets_timestamp() {
+        let patch = RemoteSessionPatch {
+            title: None,
+            archived: Some(true),
+        };
+        let body = build_session_patch_body(&patch, 1_700_000_000_000).unwrap();
+        assert_eq!(body, serde_json::json!({ "time": { "archived": 1_700_000_000_000_i64 } }));
+    }
+
+    #[test]
+    fn session_patch_body_unarchive_clears_timestamp() {
+        let patch = RemoteSessionPatch {
+            title: None,
+            archived: Some(false),
+        };
+        let body = build_session_patch_body(&patch, 1_700_000_000_000).unwrap();
+        assert_eq!(body, serde_json::json!({ "time": { "archived": 0 } }));
+    }
+
+    #[test]
+    fn session_patch_body_combined_title_and_archive() {
+        let patch = RemoteSessionPatch {
+            title: Some("Renamed".into()),
+            archived: Some(true),
+        };
+        let body = build_session_patch_body(&patch, 42).unwrap();
+        assert_eq!(body["title"], "Renamed");
+        assert_eq!(body["time"]["archived"], 42);
+    }
+
+    #[test]
+    fn session_patch_body_empty_is_none() {
+        let patch = RemoteSessionPatch::default();
+        assert!(build_session_patch_body(&patch, 1).is_none());
     }
 
     #[test]

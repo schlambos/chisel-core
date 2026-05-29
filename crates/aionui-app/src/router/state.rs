@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
-use aionui_ai_agent::{AgentRouterState, AgentService, RemoteAgentRouterState, RemoteAgentService};
+use aionui_ai_agent::{
+    AgentRouterState, AgentService, RemoteAgentRouterState, RemoteAgentService, RemoteSessionSyncHook,
+};
 use aionui_assistant::{AssistantRouterState, AssistantService, BuiltinAssistantRegistry};
 use aionui_auth::extract_token_from_ws_headers;
 use aionui_channel::ChannelRouterState;
@@ -232,6 +234,15 @@ pub fn build_conversation_state(
     if let Some(cron_service) = cron_service {
         conversation_service.with_delete_hook(cron_service.clone());
         conversation_service.with_cron_service(Some(cron_service));
+    }
+    // M06: mirror rename / archive of an OpenCode-bound conversation to its
+    // server session via PATCH /session/{id}.
+    {
+        let encryption_key = derive_encryption_key(&services.jwt_secret_raw);
+        let remote_repo = Arc::new(SqliteRemoteAgentRepository::new(services.database.pool().clone()));
+        let remote_service = Arc::new(RemoteAgentService::new(remote_repo, encryption_key));
+        let hook = Arc::new(RemoteSessionSyncHook::new(remote_service, services.conversation_repo.clone()));
+        conversation_service.with_update_hook(hook);
     }
     ConversationRouterState {
         service: conversation_service,
