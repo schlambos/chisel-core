@@ -130,7 +130,7 @@ struct RemoteState {
     opencode_tool_call_ids: HashSet<String>,
     /// Registered OpenCode child sessions (sub-agent invocations) whose
     /// `parentID` matches `opencode_session_id`. Events on the global
-    /// `/event` stream whose `sessionID` matches a registered child are
+    /// `/global/event` stream whose `sessionID` matches a registered child are
     /// routed through this manager's runtime so the renderer can render
     /// the sub-agent's transcript inline. See [`super::subagent`].
     ///
@@ -159,6 +159,75 @@ pub struct RemoteAgentConfig {
 
 fn is_opencode_protocol(protocol: &str) -> bool {
     protocol == "opencode"
+}
+
+/// Unwrap an OpenCode SSE event payload.
+///
+/// The canonical `/global/event` stream wraps each event under a `payload`
+/// key: `{"payload": {"id", "type", "properties"}}`. The legacy `/event`
+/// stream emits the event object raw: `{"id", "type", "properties"}`.
+///
+/// This helper normalizes both shapes to the inner event object so the rest
+/// of the dispatcher can read `type` / `properties` directly, regardless of
+/// which endpoint the server build serves. Applied once at the parser
+/// boundary (see `handle_opencode_sse_event`).
+///
+/// A no-op for the legacy raw shape (no `payload` key) — safe during the
+/// rollout and against older self-hosted servers.
+fn unwrap_event(raw: Value) -> Value {
+    match raw {
+        Value::Object(mut map) => match map.remove("payload") {
+            Some(payload) => payload,
+            None => Value::Object(map),
+        },
+        other => other,
+    }
+}
+
+/// Decide which SSE path to subscribe to (`/global/event` vs legacy `/event`).
+///
+/// Probes the server's OpenAPI document (`GET /doc`) once at connect time and
+/// returns `"/global/event"` if that route is listed, otherwise `"/event"`.
+/// This protects users on older self-hosted OpenCode builds that predate
+/// `/global/event` while defaulting everyone else to the canonical stream.
+///
+/// Best-effort: any failure (network, non-2xx, unparsable JSON, or simply not
+/// finding the key) falls back to `/global/event` for modern servers — the
+/// probe only *downgrades* to `/event` when it can positively confirm the
+/// canonical route is absent. Returns a `&'static str` so the caller can build
+/// the full URL without extra allocation.
+async fn resolve_event_path(client: &reqwest::Client, base_url: &str, auth_header: Option<&str>) -> &'static str {
+    let mut req = client.get(format!("{base_url}/doc")).timeout(Duration::from_secs(5));
+    if let Some(h) = auth_header {
+        req = req.header(AUTHORIZATION, h);
+    }
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
+            Ok(doc) => {
+                let has_global = doc
+                    .get("paths")
+                    .and_then(|p| p.as_object())
+                    .map(|paths| paths.contains_key("/global/event"))
+                    .unwrap_or(false);
+                if has_global {
+                    "/global/event"
+                } else if doc
+                    .get("paths")
+                    .and_then(|p| p.as_object())
+                    .map(|paths| paths.contains_key("/event"))
+                    .unwrap_or(false)
+                {
+                    // Positively confirmed: canonical absent, legacy present.
+                    "/event"
+                } else {
+                    // Doc shape unexpected — default to canonical.
+                    "/global/event"
+                }
+            }
+            Err(_) => "/global/event",
+        },
+        _ => "/global/event",
+    }
 }
 
 fn normalize_base_url(url: &str) -> String {
@@ -711,7 +780,18 @@ impl RemoteAgentManager {
         let _ = self.ensure_opencode_commands().await;
 
         let this = Arc::clone(self);
-        let event_url = format!("{base_url}/event");
+        // Prefer the canonical `/global/event` stream (events wrapped under
+        // `payload`, cross-directory lifecycle events emitted). Fall back to
+        // the legacy `/event` stream for older self-hosted servers that don't
+        // list `/global/event` in their OpenAPI document. The parser
+        // (`handle_opencode_sse_event` → `unwrap_event`) tolerates both shapes.
+        let event_path = resolve_event_path(&self.http_client, &base_url, auth_header.as_deref()).await;
+        let event_url = format!("{base_url}{event_path}");
+        info!(
+            conversation_id = %self.runtime.conversation_id(),
+            event_url = %event_url,
+            "Subscribing to OpenCode SSE stream"
+        );
         let client = self.http_client.clone();
         let auth = auth_header.clone();
         let conversation_id = self.runtime.conversation_id().to_string();
@@ -786,10 +866,15 @@ impl RemoteAgentManager {
     }
 
     async fn handle_opencode_sse_event(&self, data: &str) {
-        let raw: Value = match serde_json::from_str(data) {
+        let parsed: Value = match serde_json::from_str(data) {
             Ok(v) => v,
             Err(_) => return,
         };
+
+        // `/global/event` wraps the event under `payload`; `/event` (legacy)
+        // emits it raw. Normalize both to the inner event object here so every
+        // `raw.get("type")` / `raw.get("properties")` below works unchanged.
+        let raw = unwrap_event(parsed);
 
         let event_type = match raw.get("type").and_then(|v| v.as_str()) {
             Some(t) => t,
@@ -803,7 +888,7 @@ impl RemoteAgentManager {
 
         let session_id = props.get("sessionID").and_then(|v| v.as_str()).map(String::from);
 
-        // OpenCode's `/event` SSE stream is global: a single connection
+        // OpenCode's `/global/event` SSE stream is global: a single connection
         // receives events for EVERY session on the server, including sessions
         // owned by other AionUi conversations pointed at the same server. Each
         // `RemoteAgentManager` runs its own reader, so without this guard every
@@ -3232,6 +3317,32 @@ mod tests {
     }
 
     #[test]
+    fn unwrap_event_unwraps_global_payload() {
+        // `/global/event` shape: event nested under `payload`.
+        let wrapped = json!({
+            "payload": { "id": "evt_1", "type": "server.connected", "properties": {} }
+        });
+        let inner = unwrap_event(wrapped);
+        assert_eq!(inner.get("type").and_then(|v| v.as_str()), Some("server.connected"));
+        assert!(inner.get("payload").is_none());
+    }
+
+    #[test]
+    fn unwrap_event_passthrough_for_legacy_shape() {
+        // Legacy `/event` shape: raw event object with no `payload` key.
+        let raw = json!({ "id": "evt_2", "type": "server.heartbeat", "properties": {} });
+        let inner = unwrap_event(raw.clone());
+        assert_eq!(inner, raw);
+        assert_eq!(inner.get("type").and_then(|v| v.as_str()), Some("server.heartbeat"));
+    }
+
+    #[test]
+    fn unwrap_event_non_object_is_identity() {
+        let v = json!("not-an-object");
+        assert_eq!(unwrap_event(v.clone()), v);
+    }
+
+    #[test]
     fn permission_reply_uses_canonical_endpoint() {
         // Canonical (non-deprecated) endpoint verified against opencode
         // 1.15.11: POST /permission/{id}/reply with body { "reply": <decision> }.
@@ -3417,7 +3528,7 @@ mod tests {
 
     #[tokio::test]
     async fn sse_event_for_foreign_session_is_ignored() {
-        // The OpenCode `/event` stream is global; this manager owns `sess_1`
+        // The OpenCode `/global/event` stream is global; this manager owns `sess_1`
         // (seeded by `opencode_test_agent`). An event tagged with a different
         // session must not bleed into this conversation's stream.
         let agent = opencode_test_agent().await;
