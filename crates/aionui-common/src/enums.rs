@@ -187,6 +187,7 @@ pub enum RemoteAgentProtocol {
 #[serde(rename_all = "lowercase")]
 pub enum RemoteAgentAuthType {
     Bearer,
+    Basic,
     Password,
     None,
 }

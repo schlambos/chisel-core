@@ -357,7 +357,15 @@ impl RemoteAgentService {
 
         let auth_type = parse_auth_type(&row.auth_type);
         let auth_token = decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
-        patch_opencode_session(&row.url, auth_type, auth_token.as_deref(), row.allow_insecure, session_id, &body).await
+        patch_opencode_session(
+            &row.url,
+            auth_type,
+            auth_token.as_deref(),
+            row.allow_insecure,
+            session_id,
+            &body,
+        )
+        .await
     }
 
     // ── Private helpers ──────────────────────────────────────────
@@ -1071,6 +1079,7 @@ fn build_opencode_auth_headers(
 
     let value = match auth_type {
         RemoteAgentAuthType::Bearer => format!("Bearer {token}"),
+        RemoteAgentAuthType::Basic => format!("Basic {}", BASE64.encode(token)),
         RemoteAgentAuthType::Password => format!("Basic {}", BASE64.encode(format!("opencode:{token}"))),
         RemoteAgentAuthType::None => return Ok(headers),
     };
@@ -1247,6 +1256,7 @@ mod tests {
     #[test]
     fn enum_to_str_auth_type() {
         assert_eq!(enum_to_str(&RemoteAgentAuthType::Bearer), "bearer");
+        assert_eq!(enum_to_str(&RemoteAgentAuthType::Basic), "basic");
         assert_eq!(enum_to_str(&RemoteAgentAuthType::Password), "password");
         assert_eq!(enum_to_str(&RemoteAgentAuthType::None), "none");
     }
@@ -1278,7 +1288,10 @@ mod tests {
             archived: Some(true),
         };
         let body = build_session_patch_body(&patch, 1_700_000_000_000).unwrap();
-        assert_eq!(body, serde_json::json!({ "time": { "archived": 1_700_000_000_000_i64 } }));
+        assert_eq!(
+            body,
+            serde_json::json!({ "time": { "archived": 1_700_000_000_000_i64 } })
+        );
     }
 
     #[test]
@@ -1319,6 +1332,16 @@ mod tests {
     }
 
     #[test]
+    fn build_opencode_basic_auth_uses_supplied_credentials() {
+        let headers = build_opencode_auth_headers(RemoteAgentAuthType::Basic, Some("user:secret")).unwrap();
+
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            format!("Basic {}", BASE64.encode("user:secret"))
+        );
+    }
+
+    #[test]
     fn parse_protocol_unknown_defaults() {
         assert_eq!(parse_protocol("unknown_proto"), RemoteAgentProtocol::Acp);
     }
@@ -1326,6 +1349,7 @@ mod tests {
     #[test]
     fn parse_auth_type_known_values() {
         assert_eq!(parse_auth_type("bearer"), RemoteAgentAuthType::Bearer);
+        assert_eq!(parse_auth_type("basic"), RemoteAgentAuthType::Basic);
         assert_eq!(parse_auth_type("password"), RemoteAgentAuthType::Password);
         assert_eq!(parse_auth_type("none"), RemoteAgentAuthType::None);
     }

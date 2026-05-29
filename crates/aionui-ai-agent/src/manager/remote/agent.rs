@@ -563,6 +563,7 @@ fn build_auth_header(auth_type: &str, auth_token: Option<&str>) -> Option<String
     let token = auth_token.filter(|t| !t.is_empty())?;
     let value = match auth_type {
         "bearer" | "Bearer" => format!("Bearer {token}"),
+        "basic" | "Basic" => format!("Basic {}", BASE64.encode(token)),
         "password" | "Password" => format!("Basic {}", BASE64.encode(format!("opencode:{token}"))),
         _ => return None,
     };
@@ -1952,9 +1953,10 @@ impl RemoteAgentManager {
                 let confirmations = opencode_question::build_question_confirmations(&parsed);
                 {
                     let mut state = self.state.write().await;
-                    state
-                        .pending_questions
-                        .insert(parsed.request_id.clone(), opencode_question::PendingQuestion::new(&parsed));
+                    state.pending_questions.insert(
+                        parsed.request_id.clone(),
+                        opencode_question::PendingQuestion::new(&parsed),
+                    );
                     for conf in &confirmations {
                         state.confirmations.retain(|c| c.call_id != conf.call_id);
                         state.confirmations.push(conf.clone());
@@ -1970,7 +1972,9 @@ impl RemoteAgentManager {
 
                 for conf in confirmations {
                     self.runtime
-                        .emit(AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(conf)));
+                        .emit(AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(
+                            conf,
+                        )));
                 }
             }
             "question.replied" | "question.rejected" => {
@@ -1987,9 +1991,11 @@ impl RemoteAgentManager {
                 if let Some(id) = request_id {
                     let mut state = self.state.write().await;
                     let was_pending = state.pending_questions.remove(&id).is_some();
-                    state
-                        .confirmations
-                        .retain(|c| opencode_question::parse_question_call_id(&c.call_id).map(|(rid, _)| rid != id).unwrap_or(true));
+                    state.confirmations.retain(|c| {
+                        opencode_question::parse_question_call_id(&c.call_id)
+                            .map(|(rid, _)| rid != id)
+                            .unwrap_or(true)
+                    });
                     state.recently_replied_questions.insert(id.clone(), now_ms());
                     prune_replied_map(&mut state.recently_replied_questions, QUESTION_DEDUP_CAP);
                     if was_pending {
@@ -3933,11 +3939,7 @@ impl RemoteAgentManager {
                 .collect();
 
             // Distinct question requestIDs still pending — reject each once.
-            let question_request_ids: HashSet<String> = state
-                .pending_questions
-                .keys()
-                .cloned()
-                .collect();
+            let question_request_ids: HashSet<String> = state.pending_questions.keys().cloned().collect();
             state.pending_questions.clear();
             for id in &question_request_ids {
                 state.recently_replied_questions.insert(id.clone(), now_ms());
@@ -4097,7 +4099,10 @@ mod tests {
         assert_eq!(event_property_fingerprint(&json!({})).len(), 16);
         assert_eq!(event_property_fingerprint(&Value::Null).len(), 16);
         // Empty object and JSON null share the empty-key-set fingerprint.
-        assert_eq!(event_property_fingerprint(&json!({})), event_property_fingerprint(&Value::Null));
+        assert_eq!(
+            event_property_fingerprint(&json!({})),
+            event_property_fingerprint(&Value::Null)
+        );
     }
 
     #[test]
@@ -4123,6 +4128,13 @@ mod tests {
     fn auth_header_password() {
         let h = build_auth_header("password", Some("secret"));
         let expected = format!("Basic {}", BASE64.encode("opencode:secret"));
+        assert_eq!(h, Some(expected));
+    }
+
+    #[test]
+    fn auth_header_basic_uses_supplied_credentials() {
+        let h = build_auth_header("basic", Some("user:secret"));
+        let expected = format!("Basic {}", BASE64.encode("user:secret"));
         assert_eq!(h, Some(expected));
     }
 
