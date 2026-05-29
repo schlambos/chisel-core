@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::fs;
 use tracing::warn;
 
-use super::shell::{self, ShellApproval, ShellApprover};
+use super::shell::{self, ElicitationHandler, McpRequestContext, ShellApproval, ShellApprover};
 
 const MAX_READ_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB cap per read
 const MAX_GREP_FILES: usize = 5000;
@@ -260,12 +260,24 @@ struct ListEntry {
 /// the user approves it through the host agent's confirmation UI. It is
 /// `None` for the filesystem tools (which need no approval) and when no
 /// approval channel is wired up — in which case `run_shell` fails closed.
+///
+/// `elicitation` lets a tool raise a free-form, schema-driven prompt back to
+/// the host UI (MCP `elicitation/create`-style flow). `None` disables it; the
+/// filesystem tools today don't elicit, so they are unaffected.
+///
+/// `context` carries the OpenCode-injected session-attribution headers (see
+/// [`McpRequestContext`]) so the approver / elicitation handler can route the
+/// resulting UI prompt to the right sub-agent transcript instead of bubbling
+/// it up at the parent transcript level.
 pub async fn dispatch(
     root: &Path,
     tool: &str,
     args: &Value,
     approver: Option<&Arc<dyn ShellApprover>>,
+    elicitation: Option<&Arc<dyn ElicitationHandler>>,
+    context: &McpRequestContext,
 ) -> (String, bool) {
+    let _ = elicitation; // reserved for future per-tool elicitation calls.
     match tool {
         "read_file" => match serde_json::from_value::<ReadInput>(args.clone()) {
             Ok(input) => match read_file(root, &input.path).await {
@@ -310,7 +322,7 @@ pub async fn dispatch(
             Err(e) => (format!("invalid params: {e}"), true),
         },
         "run_shell" => match serde_json::from_value::<ShellInput>(args.clone()) {
-            Ok(input) => run_shell(root, &input.command, approver).await,
+            Ok(input) => run_shell(root, &input.command, approver, context).await,
             Err(e) => (format!("invalid params: {e}"), true),
         },
         _ => (format!("unknown tool: {tool}"), true),
@@ -319,7 +331,12 @@ pub async fn dispatch(
 
 /// Gate a shell command on user approval, then run it locally. Fails closed:
 /// an empty command or a missing approval channel never executes anything.
-async fn run_shell(root: &Path, command: &str, approver: Option<&Arc<dyn ShellApprover>>) -> (String, bool) {
+async fn run_shell(
+    root: &Path,
+    command: &str,
+    approver: Option<&Arc<dyn ShellApprover>>,
+    context: &McpRequestContext,
+) -> (String, bool) {
     let command = command.trim();
     if command.is_empty() {
         return ("empty command".to_string(), true);
@@ -332,7 +349,7 @@ async fn run_shell(root: &Path, command: &str, approver: Option<&Arc<dyn ShellAp
         );
     };
     let cwd = root.to_string_lossy();
-    match approver.approve_shell(command, &cwd).await {
+    match approver.approve_shell_with_context(command, &cwd, context).await {
         ShellApproval::Allow => shell::run_shell(root, command).await,
         ShellApproval::Reject => ("command was rejected by the user".to_string(), true),
     }
@@ -573,6 +590,8 @@ mod tests {
             "write_file",
             &json!({"path": "newly/nested/dir/hello.txt", "content": "hi"}),
             None,
+            None,
+            &McpRequestContext::default(),
         )
         .await;
         assert!(!err, "write_file should succeed: {out}");
@@ -587,11 +606,21 @@ mod tests {
             "write_file",
             &json!({"path": "hello.txt", "content": "hi"}),
             None,
+            None,
+            &McpRequestContext::default(),
         )
         .await;
         assert!(!err, "write_file should succeed: {out}");
 
-        let (out, err) = dispatch(&root, "read_file", &json!({"path": "hello.txt"}), None).await;
+        let (out, err) = dispatch(
+            &root,
+            "read_file",
+            &json!({"path": "hello.txt"}),
+            None,
+            None,
+            &McpRequestContext::default(),
+        )
+        .await;
         assert!(!err, "read_file should succeed: {out}");
         assert_eq!(out, "hi");
     }
@@ -601,7 +630,15 @@ mod tests {
         let (_g, root) = tmp();
         std::fs::create_dir(root.join("sub")).unwrap();
         std::fs::write(root.join("a.txt"), "x").unwrap();
-        let (out, err) = dispatch(&root, "list_dir", &json!({"path": ""}), None).await;
+        let (out, err) = dispatch(
+            &root,
+            "list_dir",
+            &json!({"path": ""}),
+            None,
+            None,
+            &McpRequestContext::default(),
+        )
+        .await;
         assert!(!err);
         let v: Value = serde_json::from_str(&out).unwrap();
         let entries = v["entries"].as_array().unwrap();
@@ -611,7 +648,15 @@ mod tests {
     #[tokio::test]
     async fn read_rejects_escape() {
         let (_g, root) = tmp();
-        let (out, err) = dispatch(&root, "read_file", &json!({"path": "../etc/passwd"}), None).await;
+        let (out, err) = dispatch(
+            &root,
+            "read_file",
+            &json!({"path": "../etc/passwd"}),
+            None,
+            None,
+            &McpRequestContext::default(),
+        )
+        .await;
         assert!(err);
         assert!(out.contains("escapes project root"));
     }
@@ -625,6 +670,8 @@ mod tests {
             "grep_dir",
             &json!({"pattern": "hello", "case_insensitive": true}),
             None,
+            None,
+            &McpRequestContext::default(),
         )
         .await;
         assert!(!err, "grep failed: {out}");
@@ -660,6 +707,8 @@ mod tests {
             "run_shell",
             &json!({"command": "echo gated_ok"}),
             Some(&approver),
+            None,
+            &McpRequestContext::default(),
         )
         .await;
         assert!(!err, "approved command should run: {out}");
@@ -679,6 +728,8 @@ mod tests {
             "run_shell",
             &json!({"command": "echo should_not_run"}),
             Some(&approver),
+            None,
+            &McpRequestContext::default(),
         )
         .await;
         assert!(err, "rejected command must report an error");
@@ -692,7 +743,15 @@ mod tests {
     #[tokio::test]
     async fn run_shell_fails_closed_without_approver() {
         let (_g, root) = tmp();
-        let (out, err) = dispatch(&root, "run_shell", &json!({"command": "echo nope"}), None).await;
+        let (out, err) = dispatch(
+            &root,
+            "run_shell",
+            &json!({"command": "echo nope"}),
+            None,
+            None,
+            &McpRequestContext::default(),
+        )
+        .await;
         assert!(err, "must fail closed with no approver");
         assert!(out.contains("no approval channel"), "unexpected message: {out}");
     }
@@ -704,7 +763,15 @@ mod tests {
             decision: ShellApproval::Allow,
             seen: std::sync::Mutex::new(Vec::new()),
         });
-        let (out, err) = dispatch(&root, "run_shell", &json!({"command": "   "}), Some(&approver)).await;
+        let (out, err) = dispatch(
+            &root,
+            "run_shell",
+            &json!({"command": "   "}),
+            Some(&approver),
+            None,
+            &McpRequestContext::default(),
+        )
+        .await;
         assert!(err, "empty command must error");
         assert!(out.contains("empty command"), "unexpected message: {out}");
     }

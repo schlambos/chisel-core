@@ -122,6 +122,8 @@ mod tests {
                 value: json!("allow"),
                 params: None,
             }],
+            session_id: None,
+            parent_session_id: None,
         }];
         let json = serde_json::to_value(&list).unwrap();
         let arr = json.as_array().unwrap();

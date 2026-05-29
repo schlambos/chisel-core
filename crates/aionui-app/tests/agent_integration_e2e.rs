@@ -305,6 +305,8 @@ async fn confirm_and_check_approval() {
         description: String::new(),
         command_type: None,
         options: vec![],
+        session_id: None,
+        parent_session_id: None,
     });
 
     // Confirm a call with alwaysAllow=true

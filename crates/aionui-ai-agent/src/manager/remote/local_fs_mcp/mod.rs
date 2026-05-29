@@ -11,4 +11,6 @@ pub mod shell;
 pub mod tools;
 
 pub use server::{ContactProbe, LocalFsMcpServer};
-pub use shell::{ShellApproval, ShellApprover};
+pub use shell::{
+    ElicitationHandler, ElicitationOutcome, ElicitationRequest, McpRequestContext, ShellApproval, ShellApprover,
+};

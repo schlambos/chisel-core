@@ -1334,6 +1334,7 @@ mod tests {
 
         tx.send(AgentStreamEvent::AcpToolCall(AcpToolCallEventData {
             session_id: "sess-1".into(),
+            parent_session_id: None,
             update: AcpToolCallUpdateData {
                 session_update: AcpToolCallSessionUpdateKind::ToolCall,
                 tool_call_id: "atc-001".into(),
@@ -1351,6 +1352,7 @@ mod tests {
 
         tx.send(AgentStreamEvent::AcpToolCall(AcpToolCallEventData {
             session_id: "sess-1".into(),
+            parent_session_id: None,
             update: AcpToolCallUpdateData {
                 session_update: AcpToolCallSessionUpdateKind::ToolCallUpdate,
                 tool_call_id: "atc-001".into(),

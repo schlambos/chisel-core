@@ -194,7 +194,13 @@ impl ChannelMessageService {
             | AgentStreamEvent::System(_)
             | AgentStreamEvent::RequestTrace(_)
             | AgentStreamEvent::SlashCommandsUpdated(_)
-            | AgentStreamEvent::SessionAssigned(_) => None,
+            | AgentStreamEvent::SessionAssigned(_)
+            // Sub-agent + streamed tool I/O events are renderer-only — they
+            // are not surfaced to IM channels (where a flat text transcript
+            // wouldn't meaningfully represent the nested sub-agent UI anyway).
+            | AgentStreamEvent::OpencodeSubtask(_)
+            | AgentStreamEvent::ToolInput(_)
+            | AgentStreamEvent::ToolProgress(_) => None,
         }
     }
 

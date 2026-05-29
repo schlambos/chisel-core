@@ -56,6 +56,8 @@ impl BackendProtocolSink {
                     params: None,
                 },
             ],
+            session_id: None,
+            parent_session_id: None,
         }
     }
 }

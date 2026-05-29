@@ -47,6 +47,7 @@ pub(crate) fn session_notification_to_events(notif: &SessionNotification) -> Vec
         SessionUpdate::ToolCall(tc) => {
             events.push(AgentStreamEvent::AcpToolCall(AcpToolCallEventData {
                 session_id,
+                parent_session_id: None,
                 update: AcpToolCallUpdateData {
                     session_update: AcpToolCallSessionUpdateKind::ToolCall,
                     tool_call_id: tc.tool_call_id.to_string(),
@@ -65,6 +66,7 @@ pub(crate) fn session_notification_to_events(notif: &SessionNotification) -> Vec
         SessionUpdate::ToolCallUpdate(tcu) => {
             events.push(AgentStreamEvent::AcpToolCall(AcpToolCallEventData {
                 session_id,
+                parent_session_id: None,
                 update: AcpToolCallUpdateData {
                     session_update: AcpToolCallSessionUpdateKind::ToolCallUpdate,
                     tool_call_id: tcu.tool_call_id.to_string(),

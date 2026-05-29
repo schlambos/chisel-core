@@ -2286,6 +2286,17 @@ impl RemoteAgentManager {
             }
             state.opencode_session_id.clone().unwrap()
         };
+        // F02: persist the freshly-created session id to
+        // `conversation.extra.sessionKey` immediately (not only at turn
+        // completion). The 60s `remote_session_sync` loop dedups by
+        // `extra.sessionKey`; if a sync tick runs mid-turn before the key is
+        // persisted, it sees our just-created server session as "new" and
+        // mirrors it into a duplicate Chisl conversation. Writing it here, at
+        // creation time, closes that window. Best-effort: failure is logged and
+        // never blocks the prompt (the completion-path persist still runs).
+        if session_just_created {
+            self.persist_session_key_now(&session_id).await;
+        }
         let context_prefix = if session_just_created {
             self.build_context_transcript_prefix().await
         } else {
@@ -2473,6 +2484,45 @@ impl RemoteAgentManager {
     /// after the block by the caller, so the model sees one merged
     /// user turn — splitting would make OpenCode emit an assistant
     /// reply to the framing before reaching the real question.
+    /// Persist the OpenCode session id into `conversation.extra.sessionKey`
+    /// right after the session is created (F02). Mirrors
+    /// `aionui_conversation::service::persist_session_key`, duplicated here
+    /// (rather than shared) to avoid a dependency cycle: this crate is below
+    /// `aionui-conversation`. Best-effort and idempotent — no-op when no repo
+    /// is wired (test constructors) or the key is already current.
+    async fn persist_session_key_now(&self, session_key: &str) {
+        let Some(repo) = self.conversation_repo.as_ref() else {
+            return;
+        };
+        let conv_id = self.runtime.conversation_id().to_string();
+        let row = match repo.get(&conv_id).await {
+            Ok(Some(r)) => r,
+            _ => return,
+        };
+        let mut extra: Value = serde_json::from_str(&row.extra).unwrap_or_else(|_| json!({}));
+        if extra.get("sessionKey").and_then(|v| v.as_str()) == Some(session_key) {
+            return;
+        }
+        extra["sessionKey"] = Value::String(session_key.to_owned());
+        let extra_json = match serde_json::to_string(&extra) {
+            Ok(j) => j,
+            Err(e) => {
+                warn!(conversation_id = %conv_id, error = %e, "F02: failed to serialize extra for early session-key persist");
+                return;
+            }
+        };
+        let update = aionui_db::ConversationRowUpdate {
+            extra: Some(extra_json),
+            updated_at: Some(now_ms()),
+            ..Default::default()
+        };
+        if let Err(e) = repo.update(&conv_id, &update).await {
+            warn!(conversation_id = %conv_id, error = %e, "F02: failed to persist session key at creation time");
+        } else {
+            debug!(conversation_id = %conv_id, "F02: persisted session key to conversation.extra at creation time");
+        }
+    }
+
     async fn build_context_transcript_prefix(&self) -> Option<String> {
         let repo = self.conversation_repo.as_ref()?;
         let conv_id = self.runtime.conversation_id().to_string();

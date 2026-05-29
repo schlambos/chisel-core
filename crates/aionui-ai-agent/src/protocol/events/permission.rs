@@ -104,6 +104,8 @@ impl AcpPermissionRequestData {
                     params: None,
                 })
                 .collect(),
+            session_id: Some(self.session_id.clone()),
+            parent_session_id: None,
         }
     }
 }

@@ -57,6 +57,17 @@ pub struct Confirmation {
     pub description: String,
     pub command_type: Option<String>,
     pub options: Vec<ConfirmationOption>,
+    /// OpenCode session that raised this confirmation. For sub-agent
+    /// (child-session) permissions this is the **child** session id; pair with
+    /// `parent_session_id` to route the prompt to the right nested transcript
+    /// in the renderer. `None` for local / non-routable confirmations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Parent session of [`Self::session_id`] when the confirmation came from a
+    /// sub-agent — lets the renderer attach the prompt to the right sub-agent
+    /// bubble instead of bubbling it up at the top of the parent transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 /// A single option within a confirmation dialog.
@@ -147,6 +158,8 @@ mod tests {
                 value: serde_json::json!(true),
                 params: None,
             }],
+            session_id: None,
+            parent_session_id: None,
         };
         let json = serde_json::to_value(&c).unwrap();
         assert_eq!(json["call_id"], "call1");

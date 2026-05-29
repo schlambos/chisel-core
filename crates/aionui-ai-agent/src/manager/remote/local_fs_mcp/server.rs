@@ -27,8 +27,35 @@ use super::protocol::{
     INTERNAL_ERROR, INVALID_PARAMS, JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PROTOCOL_VERSION, SERVER_NAME,
     SERVER_VERSION,
 };
-use super::shell::ShellApprover;
+use super::shell::{ElicitationHandler, McpRequestContext, ShellApprover};
 use super::tools::{all_tool_descriptors, dispatch};
+
+/// Header names OpenCode injects on tool-call forwarding so the MCP server can
+/// attribute the call back to the originating session. Names match the
+/// canonical case the OpenCode runtime uses; HTTP header lookup is
+/// case-insensitive so both flavours work.
+const HEADER_SESSION_ID: &str = "x-opencode-session-id";
+const HEADER_PARENT_SESSION_ID: &str = "x-opencode-parent-session-id";
+
+/// Read the session-attribution headers OpenCode injects on tool-call
+/// forwarding. Both header reads are best-effort: a missing or invalid header
+/// yields `None` (the host falls back to a conversation-level prompt).
+fn extract_request_context(headers: &HeaderMap) -> McpRequestContext {
+    let session_id = headers
+        .get(HEADER_SESSION_ID)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .filter(|s| !s.is_empty());
+    let parent_session_id = headers
+        .get(HEADER_PARENT_SESSION_ID)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .filter(|s| !s.is_empty());
+    McpRequestContext {
+        session_id,
+        parent_session_id,
+    }
+}
 
 /// Cloneable handle over the server's "has a remote client reached us yet"
 /// signal. Handed to the registration/guardian code so it can verify
@@ -100,6 +127,11 @@ struct McpAppState {
     /// `None` leaves shell execution disabled (it fails closed); the fs
     /// tools are unaffected either way.
     approver: Option<Arc<dyn ShellApprover>>,
+    /// Raises a free-form, schema-driven prompt back to the host agent's UI
+    /// for MCP `elicitation/create`-style flows. `None` leaves elicitation
+    /// disabled (tools that need it fail closed); shell + filesystem tools
+    /// are unaffected.
+    elicitation: Option<Arc<dyn ElicitationHandler>>,
 }
 
 /// Running MCP server handle. Drops trigger graceful shutdown.
@@ -120,11 +152,16 @@ impl LocalFsMcpServer {
     /// `approver`, when `Some`, gates the `run_shell` tool through the host
     /// agent's confirmation flow; `None` disables shell execution (the
     /// filesystem tools still work).
+    ///
+    /// `elicitation`, when `Some`, wires the host agent's elicitation flow so
+    /// tools can prompt the user mid-call. `None` disables elicitation
+    /// (tools requiring it fail closed).
     pub async fn start(
         project_root: PathBuf,
         bind: SocketAddr,
         auth_token: String,
         approver: Option<Arc<dyn ShellApprover>>,
+        elicitation: Option<Arc<dyn ElicitationHandler>>,
     ) -> std::io::Result<Self> {
         if !project_root.is_dir() {
             return Err(std::io::Error::new(
@@ -139,6 +176,7 @@ impl LocalFsMcpServer {
             auth_token: Arc::from(auth_token.as_str()),
             probe: probe.clone(),
             approver,
+            elicitation,
         };
         let app = Router::new().route("/", post(handle_rpc)).with_state(state);
 
@@ -289,12 +327,34 @@ async fn handle_rpc(
                 JsonRpcResponse::error(id, INVALID_PARAMS, "missing tool name")
             } else {
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-                let (text, is_error) =
-                    dispatch(&state.project_root, tool_name, &arguments, state.approver.as_ref()).await;
+                // Capture per-request session attribution from OpenCode's
+                // forwarded headers. Threaded through dispatch so the approver
+                // / elicitation handler can stamp the resulting UI prompt
+                // with the originating (parent or child) session id.
+                let request_context = extract_request_context(&headers);
+                let has_session_attribution = request_context.session_id.is_some();
+                let (text, is_error) = dispatch(
+                    &state.project_root,
+                    tool_name,
+                    &arguments,
+                    state.approver.as_ref(),
+                    state.elicitation.as_ref(),
+                    &request_context,
+                )
+                .await;
                 if is_error {
-                    warn!(tool = tool_name, error = %text, "fs MCP tool returned error");
+                    warn!(
+                        tool = tool_name,
+                        attributed = has_session_attribution,
+                        error = %text,
+                        "fs MCP tool returned error"
+                    );
                 } else {
-                    debug!(tool = tool_name, "fs MCP tool dispatch");
+                    debug!(
+                        tool = tool_name,
+                        attributed = has_session_attribution,
+                        "fs MCP tool dispatch"
+                    );
                 }
                 JsonRpcResponse::success(
                     id,
@@ -354,6 +414,7 @@ mod tests {
             dir.path().to_path_buf(),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             token.clone(),
+            None,
             None,
         )
         .await

@@ -21,6 +21,13 @@ pub struct ToolCallEventData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcpToolCallEventData {
     pub session_id: String,
+    /// Present when this tool call originates from a sub-agent (OpenCode child
+    /// session). Lets the renderer attach the tool-call bubble to the right
+    /// sub-agent transcript rather than the parent's top-level transcript.
+    /// `None` for parent-session tool calls — preserved for backwards
+    /// compatibility on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     pub update: AcpToolCallUpdateData,
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<SdkMeta>,

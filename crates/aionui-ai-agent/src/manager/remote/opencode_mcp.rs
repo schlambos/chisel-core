@@ -457,6 +457,7 @@ pub async fn start_and_register(
     conversation_id: &str,
     workspace_root: &str,
     approver: Option<Arc<dyn ShellApprover>>,
+    elicitation: Option<Arc<dyn super::local_fs_mcp::ElicitationHandler>>,
 ) -> Result<LocalFsMcpServer, String> {
     // First-touch-per-process: clear any aionui-local-fs* leftovers from a
     // prior aioncore run before registering ours. Idempotent across
@@ -467,7 +468,7 @@ pub async fn start_and_register(
     let bind = plan.bind_addr();
 
     let token = Uuid::new_v4().to_string();
-    let server = LocalFsMcpServer::start(workspace_root.into(), bind, token.clone(), approver)
+    let server = LocalFsMcpServer::start(workspace_root.into(), bind, token.clone(), approver, elicitation)
         .await
         .map_err(|e| format!("failed to start local fs MCP server: {e}"))?;
     let probe = server.contact_probe();

@@ -32,7 +32,15 @@ use crate::protocol::events::{
 /// `session_id` is threaded through from the SSE envelope so the renderer
 /// can correlate the update with its conversation. `props` is the
 /// `properties` object of the SSE event, *not* the whole event.
-pub fn translate_message_part_updated(props: &Value, session_id: Option<String>) -> Option<AcpToolCallEventData> {
+///
+/// `parent_session_id` is set when the event came from a sub-agent (OpenCode
+/// child session) — it threads up to the renderer so the tool-call bubble lands
+/// inside the right sub-agent transcript. `None` for parent-session calls.
+pub fn translate_message_part_updated(
+    props: &Value,
+    session_id: Option<String>,
+    parent_session_id: Option<String>,
+) -> Option<AcpToolCallEventData> {
     let part = props.get("part")?;
     if part.get("type").and_then(|v| v.as_str()) != Some("tool") {
         return None;
@@ -130,6 +138,7 @@ pub fn translate_message_part_updated(props: &Value, session_id: Option<String>)
 
     Some(AcpToolCallEventData {
         session_id: session_id.unwrap_or_default(),
+        parent_session_id,
         update: AcpToolCallUpdateData {
             // The frontend merges by `tool_call_id` regardless of `sessionUpdate`
             // kind, so we always emit `ToolCallUpdate` — the first hit becomes
@@ -215,7 +224,7 @@ mod tests {
                 "state": { "status": "pending", "input": {}, "raw": "" }
             }
         });
-        let event = translate_message_part_updated(&props, Some("ses_abc".into())).expect("event");
+        let event = translate_message_part_updated(&props, Some("ses_abc".into()), None).expect("event");
         let (call_id, status, kind, text, input) = extract(event);
         assert_eq!(call_id, "call_1");
         assert!(matches!(status, AcpToolCallStatus::Pending));
@@ -239,7 +248,7 @@ mod tests {
                 }
             }
         });
-        let event = translate_message_part_updated(&props, None).expect("event");
+        let event = translate_message_part_updated(&props, None, None).expect("event");
         let (_, status, kind, text, input) = extract(event);
         assert!(matches!(status, AcpToolCallStatus::InProgress));
         assert!(matches!(kind, AcpToolCallKind::Execute));
@@ -263,7 +272,7 @@ mod tests {
                 }
             }
         });
-        let event = translate_message_part_updated(&props, None).expect("event");
+        let event = translate_message_part_updated(&props, None, None).expect("event");
         let (_, status, _kind, text, _) = extract(event);
         assert!(matches!(status, AcpToolCallStatus::Completed));
         assert_eq!(text.as_deref(), Some("hi\n"));
@@ -283,7 +292,7 @@ mod tests {
                 }
             }
         });
-        let event = translate_message_part_updated(&props, None).expect("event");
+        let event = translate_message_part_updated(&props, None, None).expect("event");
         let (_, status, _, _, _) = extract(event);
         assert!(matches!(status, AcpToolCallStatus::Failed));
     }
@@ -298,7 +307,7 @@ mod tests {
                 "state": { "status": "error" }
             }
         });
-        let event = translate_message_part_updated(&props, None).expect("event");
+        let event = translate_message_part_updated(&props, None, None).expect("event");
         let (_, status, _, _, _) = extract(event);
         assert!(matches!(status, AcpToolCallStatus::Failed));
     }
@@ -324,7 +333,7 @@ mod tests {
                     "state": {"status": "running"}
                 }
             });
-            let event = translate_message_part_updated(&props, None).expect("event");
+            let event = translate_message_part_updated(&props, None, None).expect("event");
             let actual = event.update.kind.unwrap();
             assert!(
                 std::mem::discriminant(&actual) == std::mem::discriminant(&expected),
@@ -343,7 +352,7 @@ mod tests {
                 "state": {"status": "running"}
             }
         });
-        let event = translate_message_part_updated(&props, None).expect("event");
+        let event = translate_message_part_updated(&props, None, None).expect("event");
         assert!(matches!(event.update.kind.unwrap(), AcpToolCallKind::Read));
     }
 
@@ -357,7 +366,7 @@ mod tests {
                 "state": {"status": "running"}
             }
         });
-        assert!(translate_message_part_updated(&props, None).is_none());
+        assert!(translate_message_part_updated(&props, None, None).is_none());
     }
 
     #[test]
@@ -365,12 +374,12 @@ mod tests {
         let props = json!({
             "part": { "type": "reasoning", "id": "prt_1" }
         });
-        assert!(translate_message_part_updated(&props, None).is_none());
+        assert!(translate_message_part_updated(&props, None, None).is_none());
 
         let props = json!({
             "part": { "type": "text", "text": "hello" }
         });
-        assert!(translate_message_part_updated(&props, None).is_none());
+        assert!(translate_message_part_updated(&props, None, None).is_none());
     }
 
     #[test]
@@ -382,7 +391,7 @@ mod tests {
                 "state": {"status": "running"}
             }
         });
-        assert!(translate_message_part_updated(&props, None).is_none());
+        assert!(translate_message_part_updated(&props, None, None).is_none());
     }
 
     #[test]
@@ -399,7 +408,7 @@ mod tests {
                 }
             }
         });
-        let event = translate_message_part_updated(&props, None).expect("event");
+        let event = translate_message_part_updated(&props, None, None).expect("event");
         let (_, _, _, text, _) = extract(event);
         assert_eq!(text.as_deref(), Some("final\n"));
     }

@@ -246,6 +246,8 @@ fn map_approval_event(event: &EventFrame) -> Vec<AgentStreamEvent> {
         description: String::new(),
         command_type: tool_call.and_then(|tc| tc.kind.as_deref()).map(ToOwned::to_owned),
         options: Vec::new(),
+        session_id: None,
+        parent_session_id: None,
     };
 
     vec![AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(

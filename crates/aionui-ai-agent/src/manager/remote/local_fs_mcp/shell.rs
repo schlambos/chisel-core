@@ -36,6 +36,24 @@ pub enum ShellApproval {
     Reject,
 }
 
+/// Per-request session context captured from incoming MCP headers.
+///
+/// OpenCode injects `X-OpenCode-Session-Id` (and, for sub-agent invocations,
+/// `X-OpenCode-Parent-Session-Id`) on every tool-call request it forwards to a
+/// client-advertised MCP server. The MCP server threads this context into the
+/// approver / elicitation handler so the resulting UI prompt can be routed to
+/// the right nested sub-agent transcript rather than surfacing at the parent
+/// level.
+///
+/// Both fields are `None` when OpenCode is older than the header extension or
+/// when the call did not carry session attribution; in that case the host
+/// surfaces the prompt at conversation level with a "Sub-agent unknown" label.
+#[derive(Debug, Clone, Default)]
+pub struct McpRequestContext {
+    pub session_id: Option<String>,
+    pub parent_session_id: Option<String>,
+}
+
 /// Bridges a shell-tool call back to the host agent's confirmation flow.
 ///
 /// Implemented by the remote agent; the MCP server holds it as a trait
@@ -48,7 +66,61 @@ pub trait ShellApprover: Send + Sync {
     /// root). Returns whether to proceed. Implementations should fail
     /// closed — if the request can't be presented or is cancelled, return
     /// [`ShellApproval::Reject`].
+    ///
+    /// `context` carries per-request session attribution from the inbound MCP
+    /// headers (see [`McpRequestContext`]) so the host can route the
+    /// confirmation prompt to the right sub-agent UI surface. A default
+    /// implementation forwards to [`Self::approve_shell`] for back-compat with
+    /// older approvers that didn't take the context.
+    async fn approve_shell_with_context(&self, command: &str, cwd: &str, context: &McpRequestContext) -> ShellApproval {
+        let _ = context;
+        self.approve_shell(command, cwd).await
+    }
+
     async fn approve_shell(&self, command: &str, cwd: &str) -> ShellApproval;
+}
+
+/// Bridges a tool's elicitation request (free-form user input mid-tool-call,
+/// MCP-spec `elicitation/create`) back to the host agent's confirmation flow.
+///
+/// MCP's HTTP-only transport in this codebase cannot do server-initiated
+/// reverse calls, so we fold elicitation into the same approver pattern: the
+/// tool calls [`Self::request_elicitation`] and parks until the user answers.
+/// The response is forwarded back to the tool, which can either embed it in
+/// the tool's return value or use it to decide whether to proceed.
+///
+/// Like [`ShellApprover`], implementations should fail closed — return
+/// [`ElicitationOutcome::Declined`] when the prompt can't be raised or the
+/// user dismisses it.
+#[async_trait]
+pub trait ElicitationHandler: Send + Sync {
+    async fn request_elicitation(
+        &self,
+        request: ElicitationRequest<'_>,
+        context: &McpRequestContext,
+    ) -> ElicitationOutcome;
+}
+
+/// One free-form prompt the tool wants to surface to the user.
+#[derive(Debug, Clone)]
+pub struct ElicitationRequest<'a> {
+    /// Tool that raised the request — surfaced in the prompt header.
+    pub tool_name: &'a str,
+    /// Short human-readable explanation, e.g. "Confirm overwrite of foo.ts".
+    pub message: &'a str,
+    /// JSON Schema describing the response shape. The renderer uses it to
+    /// build a form (text input by default). Free-form `{ raw: <text> }`
+    /// fallback is used when the schema can't be rendered.
+    pub requested_schema: Option<serde_json::Value>,
+}
+
+/// Outcome the tool gets back from the user.
+#[derive(Debug, Clone)]
+pub enum ElicitationOutcome {
+    /// User supplied a response payload matching `requested_schema`.
+    Accepted(serde_json::Value),
+    /// User explicitly cancelled.
+    Declined,
 }
 
 /// A resolved native shell invocation: the program plus the flag that makes

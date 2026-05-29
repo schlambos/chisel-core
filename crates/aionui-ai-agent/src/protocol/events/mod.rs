@@ -1,6 +1,8 @@
 pub mod permission;
 pub mod session_updates;
+pub mod subtask;
 pub mod tool_call;
+pub mod tool_streaming;
 pub mod translate;
 
 use serde::{Deserialize, Serialize};
@@ -13,11 +15,13 @@ pub use session_updates::{
     AgentStatusEventData, AvailableCommandsEventData, CronTriggerEventData, PlanEventData, SkillSuggestEventData,
     ThinkingEventData,
 };
+pub use subtask::{OpencodeSubtaskEventData, OpencodeSubtaskLiveSummary, OpencodeSubtaskPhase, OpencodeSubtaskStatus};
 pub use tool_call::{
     AcpToolCallContentItem, AcpToolCallEventData, AcpToolCallKind, AcpToolCallLocationItem,
     AcpToolCallSessionUpdateKind, AcpToolCallStatus, AcpToolCallTextBlock, AcpToolCallTextBlockType,
     AcpToolCallUpdateData, ToolCallEventData, ToolCallStatus, ToolGroupEntry,
 };
+pub use tool_streaming::{ToolInputEventData, ToolInputPhase, ToolProgressEventData, normalize_progress_payload};
 pub(crate) use translate::{permission_request_to_event_data, session_notification_to_events};
 
 /// Events emitted by an Agent during a message processing turn.
@@ -52,6 +56,15 @@ pub enum AgentStreamEvent {
     System(serde_json::Value),
     RequestTrace(serde_json::Value),
     SessionAssigned(SessionAssignedEventData),
+    /// Sub-agent (OpenCode child session) lifecycle update — emitted when the
+    /// parent session spawns, progresses, or finishes a delegated child.
+    OpencodeSubtask(OpencodeSubtaskEventData),
+    /// Streamed tool-call input arguments — the model constructing JSON before
+    /// the tool runs. Three phases: `started`, `delta`, `ended`.
+    ToolInput(ToolInputEventData),
+    /// Long-running tool progress — stdout/stderr chunks, counters, or
+    /// tool-specific status payloads emitted between tool start and completion.
+    ToolProgress(ToolProgressEventData),
 }
 
 /// Data for the `Start` event.
