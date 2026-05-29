@@ -184,6 +184,135 @@ fn unwrap_event(raw: Value) -> Value {
     }
 }
 
+/// Initial reconnect delay after the SSE reader drops (C02). Doubles each
+/// failed pass up to [`RECONNECT_DELAY_MAX`]; resets to this on a confirmed
+/// `server.connected`.
+const RECONNECT_DELAY_MIN: Duration = Duration::from_millis(250);
+/// Upper bound on the exponential reconnect backoff.
+const RECONNECT_DELAY_MAX: Duration = Duration::from_secs(5);
+/// If no SSE event (any type, including `server.heartbeat`) arrives within this
+/// window, the reader assumes a silent half-open connection and exits with
+/// [`ReaderExit::HeartbeatTimeout`] so the supervisor reconnects.
+///
+/// Sized comfortably above the server's observed heartbeat cadence (~10 s) and
+/// above the worst-case delay before the *first* heartbeat after
+/// `server.connected` (which can lag when a turn is queued behind the shared
+/// MCP slot on a multi-session server). Too small a value tears down a slow but
+/// healthy stream mid-turn — see the C02 regression where a 15 s window killed
+/// a session that was simply waiting for its first heartbeat.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Why a single `run_event_reader` pass returned. Drives the supervisor's
+/// decision to reconnect or stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReaderExit {
+    /// The initial HTTP request for the SSE stream failed.
+    ConnectFailed,
+    /// The stream ended cleanly (server closed the connection).
+    Eof,
+    /// A transport error occurred mid-stream.
+    StreamError,
+    /// No event arrived within [`HEARTBEAT_TIMEOUT`].
+    HeartbeatTimeout,
+    /// `server.instance.disposed` was observed — terminal, do not reconnect.
+    ServerDisposed,
+}
+
+/// Run one SSE reader pass against `event_url`. Returns a [`ReaderExit`]
+/// describing why it stopped so the supervised loop in `connect_opencode` can
+/// decide whether to reconnect.
+///
+/// Heartbeat tracking: every parsed event (including `server.heartbeat`) resets
+/// an idle timer; if [`HEARTBEAT_TIMEOUT`] elapses with no event, the pass
+/// returns `HeartbeatTimeout`. On the first `server.connected` of a pass the
+/// shared `connection_status` flips to `Connected` (so the supervisor can reset
+/// its backoff). `server.instance.disposed` short-circuits to `ServerDisposed`.
+async fn run_event_reader(
+    this: &Arc<RemoteAgentManager>,
+    client: &reqwest::Client,
+    event_url: &str,
+    auth: Option<&str>,
+    conversation_id: &str,
+) -> ReaderExit {
+    let mut req_builder = client.get(event_url).header("Accept", "text/event-stream");
+    if let Some(h) = auth {
+        req_builder = req_builder.header(AUTHORIZATION, h);
+    }
+
+    let resp = match req_builder.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(
+                conversation_id = %conversation_id,
+                error = %ErrorChain(&e),
+                "OpenCode SSE connection failed"
+            );
+            return ReaderExit::ConnectFailed;
+        }
+    };
+
+    let mut stream = resp.bytes_stream();
+    let mut buffer = String::new();
+    let mut saw_connected = false;
+
+    loop {
+        let next = tokio::time::timeout(HEARTBEAT_TIMEOUT, stream.next()).await;
+        let chunk_result = match next {
+            // No bytes within the heartbeat window — assume a silent half-open
+            // connection and let the supervisor reconnect. (We never treat a
+            // missing heartbeat as fatal: the first heartbeat after connect can
+            // legitimately lag, and any real activity resets this timer.)
+            Err(_elapsed) => return ReaderExit::HeartbeatTimeout,
+            Ok(None) => return ReaderExit::Eof,
+            Ok(Some(r)) => r,
+        };
+
+        let chunk = match chunk_result {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    conversation_id = %conversation_id,
+                    error = %ErrorChain(&e),
+                    "OpenCode SSE stream error"
+                );
+                return ReaderExit::StreamError;
+            }
+        };
+
+        let text = String::from_utf8_lossy(&chunk);
+        buffer.push_str(&text);
+
+        while let Some(pos) = buffer.find("\n\n") {
+            let event_text = buffer[..pos].to_string();
+            buffer = buffer[pos + 2..].to_string();
+
+            for line in event_text.lines() {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    // Peek the event type for lifecycle handling before the full
+                    // dispatch. Cheap parse; the dispatcher re-parses but this
+                    // path only runs per-event and avoids threading state out of
+                    // the handler.
+                    if let Ok(parsed) = serde_json::from_str::<Value>(data) {
+                        let inner = unwrap_event(parsed);
+                        match inner.get("type").and_then(|v| v.as_str()) {
+                            Some("server.connected") if !saw_connected => {
+                                saw_connected = true;
+                                let mut state = this.state.write().await;
+                                state.connection_status = RemoteAgentStatus::Connected;
+                            }
+                            Some("server.instance.disposed") => {
+                                return ReaderExit::ServerDisposed;
+                            }
+                            _ => {}
+                        }
+                    }
+                    this.handle_opencode_sse_event(data).await;
+                }
+            }
+        }
+    }
+}
+
 /// Decide which SSE path to subscribe to (`/global/event` vs legacy `/event`).
 ///
 /// Probes the server's OpenAPI document (`GET /doc`) once at connect time and
@@ -805,58 +934,54 @@ impl RemoteAgentManager {
         // available as the local MCP project root via `self.runtime`.
         let _ = workspace;
         let reader_handle = tokio::spawn(async move {
-            let mut req_builder = client.get(&event_url).header("Accept", "text/event-stream");
-            if let Some(ref h) = auth {
-                req_builder = req_builder.header(AUTHORIZATION, h.as_str());
-            }
-
-            let resp = match req_builder.send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(
-                        conversation_id = %conversation_id,
-                        error = %ErrorChain(&e),
-                        "OpenCode SSE connection failed"
-                    );
-                    return;
+            // Supervised reconnect loop (C02). Each pass runs one SSE reader;
+            // on any non-cancel exit (network error, EOF, or heartbeat timeout)
+            // we mark the connection `Reconnecting`, back off, and retry. The
+            // backoff resets once a fresh `server.connected` is observed.
+            let mut backoff = RECONNECT_DELAY_MIN;
+            loop {
+                let exit = run_event_reader(&this, &client, &event_url, auth.as_deref(), &conversation_id).await;
+                // If the pass reached `Connected`, reset the backoff so the next
+                // transient drop retries fast. Read BEFORE the arms below mutate
+                // status to `Reconnecting`.
+                if this.state.read().await.connection_status == RemoteAgentStatus::Connected {
+                    backoff = RECONNECT_DELAY_MIN;
                 }
-            };
-
-            let mut stream = resp.bytes_stream();
-            let mut buffer = String::new();
-
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                        let text = String::from_utf8_lossy(&chunk);
-                        buffer.push_str(&text);
-
-                        while let Some(pos) = buffer.find("\n\n") {
-                            let event_text = buffer[..pos].to_string();
-                            buffer = buffer[pos + 2..].to_string();
-
-                            for line in event_text.lines() {
-                                if let Some(data) = line.strip_prefix("data: ") {
-                                    this.handle_opencode_sse_event(data).await;
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
+                match exit {
+                    ReaderExit::ServerDisposed => {
+                        // Server-side teardown — do NOT auto-reconnect.
                         warn!(
                             conversation_id = %conversation_id,
-                            error = %ErrorChain(&e),
-                            "OpenCode SSE stream error"
+                            "OpenCode server instance disposed; stopping reconnect loop"
                         );
+                        let mut state = this.state.write().await;
+                        state.connection_status = RemoteAgentStatus::Error;
+                        if this.runtime.status() == Some(ConversationStatus::Running) {
+                            this.runtime.transition_to(ConversationStatus::Finished);
+                        }
                         break;
                     }
+                    ReaderExit::ConnectFailed
+                    | ReaderExit::Eof
+                    | ReaderExit::StreamError
+                    | ReaderExit::HeartbeatTimeout => {
+                        {
+                            let mut state = this.state.write().await;
+                            // Don't clobber a terminal Error set elsewhere.
+                            if state.connection_status != RemoteAgentStatus::Error {
+                                state.connection_status = RemoteAgentStatus::Reconnecting;
+                            }
+                        }
+                        info!(
+                            conversation_id = %conversation_id,
+                            reason = ?exit,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "OpenCode SSE reader exited; reconnecting"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(RECONNECT_DELAY_MAX);
+                    }
                 }
-            }
-
-            let mut state = this.state.write().await;
-            state.connection_status = RemoteAgentStatus::Error;
-            if this.runtime.status() == Some(ConversationStatus::Running) {
-                this.runtime.transition_to(ConversationStatus::Finished);
             }
         });
 

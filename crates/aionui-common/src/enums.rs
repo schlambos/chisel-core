@@ -198,6 +198,11 @@ pub enum RemoteAgentStatus {
     Unknown,
     Connected,
     Pending,
+    /// The SSE reader dropped (network error, EOF, or heartbeat timeout) and the
+    /// supervised loop is attempting to re-establish the stream. Distinct from
+    /// `Error`: the renderer should treat this as a soft/transient state and
+    /// suppress the hard "connection lost" banner unless it persists.
+    Reconnecting,
     Error,
 }
 
