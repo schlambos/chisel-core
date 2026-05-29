@@ -40,13 +40,14 @@ impl IRemoteAgentRepository for SqliteRemoteAgentRepository {
         let id = aionui_common::generate_prefixed_id("ra");
         let now = aionui_common::now_ms();
         let status = "unknown";
+        let tool_host = params.tool_host.unwrap_or("local");
 
         sqlx::query(
             "INSERT INTO remote_agents \
                 (id, name, protocol, url, auth_type, auth_token, allow_insecure, \
                  avatar, description, device_id, device_public_key, device_private_key, \
-                 device_token, status, last_connected_at, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 device_token, status, last_connected_at, created_at, updated_at, tool_host) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(params.name)
@@ -65,6 +66,7 @@ impl IRemoteAgentRepository for SqliteRemoteAgentRepository {
         .bind(Option::<TimestampMs>::None)
         .bind(now)
         .bind(now)
+        .bind(tool_host)
         .execute(&self.pool)
         .await?;
 
@@ -83,6 +85,7 @@ impl IRemoteAgentRepository for SqliteRemoteAgentRepository {
             device_private_key: params.device_private_key.map(String::from),
             device_token: params.device_token.map(String::from),
             status: status.to_string(),
+            tool_host: tool_host.to_string(),
             last_connected_at: None,
             created_at: now,
             updated_at: now,
@@ -100,7 +103,7 @@ impl IRemoteAgentRepository for SqliteRemoteAgentRepository {
         sqlx::query(
             "UPDATE remote_agents SET \
                 name = ?, protocol = ?, url = ?, auth_type = ?, auth_token = ?, \
-                allow_insecure = ?, avatar = ?, description = ?, updated_at = ? \
+                allow_insecure = ?, avatar = ?, description = ?, tool_host = ?, updated_at = ? \
              WHERE id = ?",
         )
         .bind(&merged.name)
@@ -111,6 +114,7 @@ impl IRemoteAgentRepository for SqliteRemoteAgentRepository {
         .bind(merged.allow_insecure)
         .bind(&merged.avatar)
         .bind(&merged.description)
+        .bind(&merged.tool_host)
         .bind(merged.updated_at)
         .bind(id)
         .execute(&self.pool)
@@ -179,6 +183,7 @@ fn merge_update(existing: RemoteAgentRow, params: UpdateRemoteAgentParams<'_>) -
         device_private_key: existing.device_private_key,
         device_token: existing.device_token,
         status: existing.status,
+        tool_host: params.tool_host.unwrap_or(&existing.tool_host).to_string(),
         last_connected_at: existing.last_connected_at,
         created_at: existing.created_at,
         updated_at: now,
@@ -210,6 +215,7 @@ mod tests {
             device_public_key: None,
             device_private_key: None,
             device_token: None,
+            tool_host: None,
         }
     }
 

@@ -155,6 +155,18 @@ pub struct RemoteAgentConfig {
     pub auth_type: String,
     pub auth_token: Option<String>,
     pub allow_insecure: bool,
+    /// Tool-host mode for OpenCode agents (C04): "local" (default) injects the
+    /// client-side fs MCP and denies the server's built-in tools; "server"
+    /// skips the MCP and uses the server's own tools (permission prompts flow
+    /// through the normal `permission.asked` handler). Empty/unknown → "local".
+    pub tool_host: String,
+}
+
+/// Whether this config requests the OpenCode server's own tools instead of the
+/// client-side local-fs MCP. Only meaningful for the opencode protocol; any
+/// value other than exactly "server" is treated as the default "local".
+fn is_server_tool_host(cfg: &RemoteAgentConfig) -> bool {
+    is_opencode_protocol(&cfg.protocol) && cfg.tool_host == "server"
 }
 
 fn is_opencode_protocol(protocol: &str) -> bool {
@@ -892,7 +904,12 @@ impl RemoteAgentManager {
                 // fails with "Unable to connect" from the model because
                 // `opencode_create_session` (the other call site) is skipped
                 // when a session id already exists.
-                self.ensure_local_fs_mcp(&base_url, auth_header.as_deref()).await;
+                //
+                // C04: skip entirely in server-tools mode — that mode never
+                // registers a local-fs MCP, so there is nothing to re-register.
+                if !is_server_tool_host(&self.remote_config) {
+                    self.ensure_local_fs_mcp(&base_url, auth_header.as_deref()).await;
+                }
             } else {
                 warn!(
                     conversation_id = %self.runtime.conversation_id(),
@@ -2125,22 +2142,41 @@ impl RemoteAgentManager {
         let url = format!("{base_url}/session");
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
 
-        // Register the client-side fs MCP with the remote OpenCode before
-        // creating the session, so any tool the agent emits on its first
-        // turn already sees our tools advertised. Best-effort: failure is
-        // logged but does not block session create — the agent will still
-        // function, just without client-side fs (matching prior behavior).
-        self.ensure_local_fs_mcp(base_url, auth_header.as_deref()).await;
+        // C04 tool-host mode. In the default "local" mode we inject the
+        // client-side fs MCP and deny the server's built-in tools, forcing the
+        // model to operate on the user's local files via `aionui-local-fs_*`.
+        // In "server" mode we do neither: no MCP registration, no pre-deny —
+        // the agent uses the OpenCode server's own tools against the server's
+        // working tree, and permission prompts flow through the existing
+        // `permission.asked` handler.
+        let server_tools = is_server_tool_host(&self.remote_config);
 
-        let session_body = json!({
-            "permission": [
-                { "permission": "bash",  "pattern": "*", "action": "deny" },
-                { "permission": "read",  "pattern": "*", "action": "deny" },
-                { "permission": "edit",  "pattern": "*", "action": "deny" },
-                { "permission": "glob",  "pattern": "*", "action": "deny" },
-                { "permission": "grep",  "pattern": "*", "action": "deny" }
-            ]
-        });
+        let session_body = if server_tools {
+            info!(
+                conversation_id = %self.runtime.conversation_id(),
+                "creating OpenCode session in server-tools mode (no local-fs MCP, no tool pre-deny)"
+            );
+            // Omit `permission` entirely so the server applies its own defaults
+            // and emits permission prompts for sensitive operations.
+            json!({})
+        } else {
+            // Register the client-side fs MCP with the remote OpenCode before
+            // creating the session, so any tool the agent emits on its first
+            // turn already sees our tools advertised. Best-effort: failure is
+            // logged but does not block session create — the agent will still
+            // function, just without client-side fs (matching prior behavior).
+            self.ensure_local_fs_mcp(base_url, auth_header.as_deref()).await;
+
+            json!({
+                "permission": [
+                    { "permission": "bash",  "pattern": "*", "action": "deny" },
+                    { "permission": "read",  "pattern": "*", "action": "deny" },
+                    { "permission": "edit",  "pattern": "*", "action": "deny" },
+                    { "permission": "glob",  "pattern": "*", "action": "deny" },
+                    { "permission": "grep",  "pattern": "*", "action": "deny" }
+                ]
+            })
+        };
 
         let mut req = self
             .http_client
@@ -2225,10 +2261,15 @@ impl RemoteAgentManager {
         // it back on our server so the tool calls the model emits this
         // turn land on the right project. No-op when we already own the
         // slot. Best-effort — failures are logged inside, never thrown.
-        let auth_header_for_mcp =
-            build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
-        self.ensure_local_fs_mcp(&base_url, auth_header_for_mcp.as_deref())
-            .await;
+        //
+        // C04: server-tools mode never uses the local-fs MCP, so skip the
+        // per-prompt re-registration entirely.
+        if !is_server_tool_host(&self.remote_config) {
+            let auth_header_for_mcp =
+                build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+            self.ensure_local_fs_mcp(&base_url, auth_header_for_mcp.as_deref())
+                .await;
+        }
 
         // Track whether this call created a fresh server-side session.
         // Phase 4c: when we just spun up a new session AND the
@@ -2308,31 +2349,41 @@ impl RemoteAgentManager {
         };
         let content = expanded_content.as_str();
 
-        let workspace = self.runtime.workspace().to_string();
-        let tree = {
-            let root = std::path::PathBuf::from(&workspace);
-            tokio::task::spawn_blocking(move || render_project_tree_default(&root))
-                .await
-                .unwrap_or_else(|_| String::from("(failed to enumerate project)"))
+        // C04: in server-tools mode the model uses the OpenCode server's own
+        // tools against the server's working tree, so we do NOT inject the
+        // local-fs tool instructions or enumerate the (irrelevant) local
+        // workspace tree. We let the server apply its own system prompt by
+        // omitting `system` from the body below.
+        let server_tools = is_server_tool_host(&self.remote_config);
+        let system_hint: Option<String> = if server_tools {
+            None
+        } else {
+            let workspace = self.runtime.workspace().to_string();
+            let tree = {
+                let root = std::path::PathBuf::from(&workspace);
+                tokio::task::spawn_blocking(move || render_project_tree_default(&root))
+                    .await
+                    .unwrap_or_else(|_| String::from("(failed to enumerate project)"))
+            };
+            let shell_hint = super::local_fs_mcp::shell::shell_hint();
+            Some(format!(
+                "The user's project is located at {workspace} on their local machine. \
+                 Use ONLY the aionui-local-fs_* tools for all file operations \
+                 (aionui-local-fs_read_file, aionui-local-fs_list_dir, aionui-local-fs_write_file, \
+                 aionui-local-fs_grep_dir, aionui-local-fs_run_shell, etc.). \
+                 These tools operate on the user's actual project files. \
+                 All file paths should be relative to the project root (e.g. \"src/main.rs\"), \
+                 not absolute. Before claiming a file or directory does not exist, ALWAYS call \
+                 aionui-local-fs_list_dir or aionui-local-fs_read_file on it — do not rely on \
+                 memory of prior turns. To run terminal commands — build, test, lint, git, anything \
+                 you need to verify your work — you MUST use the aionui-local-fs_run_shell tool; \
+                 your own built-in shell runs on a different machine and cannot see this project. \
+                 Commands execute on the user's machine ({shell_hint}), in the project root, and \
+                 each one requires the user to approve it first, so write commands in that shell's \
+                 syntax and prefer one combined command over many. The current project layout \
+                 (gitignore-respecting; may be truncated) is:\n\n{tree}"
+            ))
         };
-        let shell_hint = super::local_fs_mcp::shell::shell_hint();
-        let system_hint = format!(
-            "The user's project is located at {workspace} on their local machine. \
-             Use ONLY the aionui-local-fs_* tools for all file operations \
-             (aionui-local-fs_read_file, aionui-local-fs_list_dir, aionui-local-fs_write_file, \
-             aionui-local-fs_grep_dir, aionui-local-fs_run_shell, etc.). \
-             These tools operate on the user's actual project files. \
-             All file paths should be relative to the project root (e.g. \"src/main.rs\"), \
-             not absolute. Before claiming a file or directory does not exist, ALWAYS call \
-             aionui-local-fs_list_dir or aionui-local-fs_read_file on it — do not rely on \
-             memory of prior turns. To run terminal commands — build, test, lint, git, anything \
-             you need to verify your work — you MUST use the aionui-local-fs_run_shell tool; \
-             your own built-in shell runs on a different machine and cannot see this project. \
-             Commands execute on the user's machine ({shell_hint}), in the project root, and \
-             each one requires the user to approve it first, so write commands in that shell's \
-             syntax and prefer one combined command over many. The current project layout \
-             (gitignore-respecting; may be truncated) is:\n\n{tree}"
-        );
 
         // Phase 4c: if we just brokered a fresh session and Chisl has
         // a local transcript for this conversation, prepend it. We use
@@ -2346,8 +2397,10 @@ impl RemoteAgentManager {
         };
         let mut body = json!({
             "parts": [{"type": "text", "text": prompt_text}],
-            "system": system_hint
         });
+        if let Some(hint) = system_hint {
+            body["system"] = json!(hint);
+        }
         if let Some(ref m) = model {
             if let Some(id) = m.get("id") {
                 body["model"] = json!({
@@ -2368,7 +2421,9 @@ impl RemoteAgentManager {
         // registered. The user-visible symptom is "Unable to connect" from the
         // model; without this log there is nothing in production logs to
         // explain why. Best-effort observability — never blocks the prompt.
-        if self.local_fs_mcp.lock().await.is_none() {
+        // (Suppressed in server-tools mode, where running without a local-fs
+        // MCP is the intended configuration.)
+        if !server_tools && self.local_fs_mcp.lock().await.is_none() {
             warn!(
                 conversation_id = %self.runtime.conversation_id(),
                 "dispatching OpenCode prompt without a local fs MCP registration — \
@@ -3468,6 +3523,28 @@ mod tests {
     }
 
     #[test]
+    fn server_tool_host_only_for_opencode_server_value() {
+        let mut cfg = RemoteAgentConfig {
+            remote_agent_id: "ra".into(),
+            protocol: "opencode".into(),
+            url: "http://h".into(),
+            auth_type: "none".into(),
+            auth_token: None,
+            allow_insecure: false,
+            tool_host: "server".into(),
+        };
+        assert!(is_server_tool_host(&cfg));
+        cfg.tool_host = "local".into();
+        assert!(!is_server_tool_host(&cfg));
+        cfg.tool_host = "".into();
+        assert!(!is_server_tool_host(&cfg));
+        // Non-opencode protocol never uses server tool-host, even if set.
+        cfg.protocol = "openclaw".into();
+        cfg.tool_host = "server".into();
+        assert!(!is_server_tool_host(&cfg));
+    }
+
+    #[test]
     fn permission_reply_uses_canonical_endpoint() {
         // Canonical (non-deprecated) endpoint verified against opencode
         // 1.15.11: POST /permission/{id}/reply with body { "reply": <decision> }.
@@ -3490,6 +3567,7 @@ mod tests {
             auth_type: "none".to_string(),
             auth_token: None,
             allow_insecure: false,
+            tool_host: "local".to_string(),
         };
         assert_eq!(config.protocol, "opencode");
     }
@@ -3502,6 +3580,7 @@ mod tests {
             auth_type: "none".to_string(),
             auth_token: None,
             allow_insecure: false,
+            tool_host: "local".to_string(),
         };
         let agent = RemoteAgentManager::new("conv_model_info".to_string(), "/ws".to_string(), config, None)
             .await
@@ -3726,6 +3805,7 @@ mod tests {
             auth_type: "none".to_string(),
             auth_token: None,
             allow_insecure: false,
+            tool_host: "local".to_string(),
         };
         let agent = RemoteAgentManager::new("conv1".to_string(), "/ws".to_string(), config, None)
             .await
@@ -3744,6 +3824,7 @@ mod tests {
             auth_type: "none".to_string(),
             auth_token: None,
             allow_insecure: false,
+            tool_host: "local".to_string(),
         };
         // Seeded id is exposed via get_session_key for persistence/reuse.
         let resumed = RemoteAgentManager::new(

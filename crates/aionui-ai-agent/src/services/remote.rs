@@ -78,6 +78,7 @@ impl RemoteAgentService {
                 device_public_key: device_public_key.as_deref(),
                 device_private_key: device_private_key.as_deref(),
                 device_token: None,
+                tool_host: Some(req.tool_host.as_str()),
             })
             .await
             .map_err(db_err)?;
@@ -116,6 +117,7 @@ impl RemoteAgentService {
             allow_insecure: req.allow_insecure,
             avatar: req.avatar.as_ref().map(|o| o.as_deref()),
             description: req.description.as_ref().map(|o| o.as_deref()),
+            tool_host: req.tool_host.as_deref(),
         };
 
         let row = self.repo.update(id, params).await.map_err(|e| match e {
@@ -338,6 +340,7 @@ impl RemoteAgentService {
             avatar: row.avatar,
             description: row.description,
             status: parse_status(&row.status),
+            tool_host: row.tool_host,
             last_connected_at: row.last_connected_at,
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -374,6 +377,7 @@ impl RemoteAgentService {
             device_id: row.device_id,
             device_public_key,
             status: parse_status(&row.status),
+            tool_host: row.tool_host,
             last_connected_at: row.last_connected_at,
             created_at: row.created_at,
             updated_at: row.updated_at,

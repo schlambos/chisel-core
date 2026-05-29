@@ -50,6 +50,8 @@ pub struct CreateRemoteAgentParams<'a> {
     pub device_public_key: Option<&'a str>,
     pub device_private_key: Option<&'a str>,
     pub device_token: Option<&'a str>,
+    /// Tool-host mode ("local" | "server"). `None` → defaults to "local".
+    pub tool_host: Option<&'a str>,
 }
 
 /// Parameters for updating an existing remote agent.
@@ -67,4 +69,6 @@ pub struct UpdateRemoteAgentParams<'a> {
     pub allow_insecure: Option<bool>,
     pub avatar: Option<Option<&'a str>>,
     pub description: Option<Option<&'a str>>,
+    /// Tool-host mode ("local" | "server"). `None` keeps the current value.
+    pub tool_host: Option<&'a str>,
 }

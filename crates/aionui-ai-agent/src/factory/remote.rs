@@ -42,6 +42,7 @@ pub(super) async fn build(
         auth_type: row.auth_type.clone(),
         auth_token,
         allow_insecure: row.allow_insecure,
+        tool_host: row.tool_host.clone(),
     };
     // Reload the persisted OpenCode session id (written back to
     // `conversation.extra.sessionKey` after each send) so a rebuild —

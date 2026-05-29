@@ -34,6 +34,10 @@ pub struct RemoteAgentRow {
     pub device_token: Option<String>,
     /// One of: "unknown", "connected", "pending", "error".
     pub status: String,
+    /// Tool-host mode for OpenCode remote agents. One of "local" (default —
+    /// inject client-side fs MCP, deny server tools) or "server" (use the
+    /// OpenCode server's own tools). Ignored by non-opencode protocols.
+    pub tool_host: String,
     pub last_connected_at: Option<TimestampMs>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,

@@ -21,6 +21,7 @@ fn opencode_config(url: String) -> RemoteAgentConfig {
         auth_type: "none".to_string(),
         auth_token: None,
         allow_insecure: false,
+        tool_host: "local".to_string(),
     }
 }
 

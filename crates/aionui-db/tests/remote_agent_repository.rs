@@ -30,6 +30,7 @@ fn bearer_params() -> CreateRemoteAgentParams<'static> {
         device_public_key: None,
         device_private_key: None,
         device_token: None,
+        tool_host: None,
     }
 }
 
@@ -47,6 +48,7 @@ fn openclaw_params() -> CreateRemoteAgentParams<'static> {
         device_public_key: Some("enc_ed25519_pub"),
         device_private_key: Some("enc_ed25519_priv"),
         device_token: Some("enc_device_tok"),
+        tool_host: None,
     }
 }
 

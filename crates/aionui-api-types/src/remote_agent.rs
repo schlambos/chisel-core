@@ -16,6 +16,14 @@ pub struct CreateRemoteAgentRequest {
     pub avatar: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// Tool-host mode for OpenCode agents: "local" (default) or "server".
+    #[serde(default = "default_tool_host")]
+    pub tool_host: String,
+}
+
+/// Default tool-host mode when the client omits the field.
+fn default_tool_host() -> String {
+    "local".to_string()
 }
 
 /// Request body for updating a remote agent (partial update).
@@ -39,6 +47,9 @@ pub struct UpdateRemoteAgentRequest {
     pub avatar: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_nullable")]
     pub description: Option<Option<String>>,
+    /// Tool-host mode ("local" | "server"). `None` keeps the current value.
+    #[serde(default)]
+    pub tool_host: Option<String>,
 }
 
 /// Remote agent response for list endpoint (auth_token omitted).
@@ -55,6 +66,7 @@ pub struct RemoteAgentListItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub status: RemoteAgentStatus,
+    pub tool_host: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_connected_at: Option<TimestampMs>,
     pub created_at: TimestampMs,
@@ -82,6 +94,7 @@ pub struct RemoteAgentResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_public_key: Option<String>,
     pub status: RemoteAgentStatus,
+    pub tool_host: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_connected_at: Option<TimestampMs>,
     pub created_at: TimestampMs,
