@@ -383,6 +383,37 @@ enum ReaderExit {
     ServerDisposed,
 }
 
+/// Fetch the direct child sessions of `parent_session_id` via
+/// `GET /session/{id}/children` (M08). Returns the raw `Session` JSON objects
+/// (an array per `/doc`); best-effort — any transport/HTTP/JSON failure yields
+/// an empty vec so backfill silently no-ops rather than disrupting connect.
+async fn fetch_child_sessions(
+    client: &reqwest::Client,
+    base_url: &str,
+    auth_header: Option<&str>,
+    parent_session_id: &str,
+) -> Vec<Value> {
+    let url = format!("{base_url}/session/{parent_session_id}/children");
+    let mut req = client.get(&url).timeout(Duration::from_secs(10));
+    if let Some(h) = auth_header {
+        req = req.header(AUTHORIZATION, h);
+    }
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
+            Ok(Value::Array(arr)) => arr,
+            _ => Vec::new(),
+        },
+        Ok(resp) => {
+            debug!(status = %resp.status(), endpoint = %url, "OpenCode children fetch returned non-success");
+            Vec::new()
+        }
+        Err(e) => {
+            debug!(error = %e, endpoint = %url, "OpenCode children fetch failed");
+            Vec::new()
+        }
+    }
+}
+
 /// Run one SSE reader pass against `event_url`. Returns a [`ReaderExit`]
 /// describing why it stopped so the supervised loop in `connect_opencode` can
 /// decide whether to reconnect.
@@ -1112,6 +1143,12 @@ impl RemoteAgentManager {
             // backoff resets once a fresh `server.connected` is observed.
             let mut backoff = RECONNECT_DELAY_MIN;
             loop {
+                // M08: close the sub-agent gap before (re)attaching the stream.
+                // On the first pass this rehydrates children of a resumed
+                // in-progress session; on reconnect it catches any spawned
+                // during the gap. Best-effort and deduped by the registry.
+                this.backfill_child_sessions().await;
+
                 let exit = run_event_reader(&this, &client, &event_url, auth.as_deref(), &conversation_id).await;
                 // If the pass reached `Connected`, reset the backoff so the next
                 // transient drop retries fast. Read BEFORE the arms below mutate
@@ -1160,6 +1197,58 @@ impl RemoteAgentManager {
         *self._reader_handle.lock().await = Some(reader_handle);
 
         Ok(())
+    }
+
+    /// Backfill direct child sessions of the current parent session via
+    /// `GET /session/{id}/children` (M08). Sub-agents are normally registered
+    /// reactively from `session.created` SSE events, but any child spawned
+    /// before this manager subscribed (resume of an in-progress session) or
+    /// during a reconnect gap would otherwise be missed — its progress chip
+    /// never appears. This gap-closer registers each previously-unseen direct
+    /// child and emits `OpencodeSubtask::Started` so the renderer rehydrates
+    /// the chip. New children continue to arrive via the reactive path.
+    ///
+    /// Scoped to **direct** children only — matching the reactive dispatcher,
+    /// which also only registers sessions whose `parentID` is our own. Pure
+    /// additive read; all failures are swallowed (empty fetch → no-op).
+    async fn backfill_child_sessions(&self) {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return;
+        }
+        let parent = { self.state.read().await.opencode_session_id.clone() };
+        let Some(parent) = parent else {
+            return;
+        };
+
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        let children = fetch_child_sessions(&self.http_client, &base_url, auth_header.as_deref(), &parent).await;
+        if children.is_empty() {
+            return;
+        }
+
+        let mut newly_registered = 0usize;
+        for child in &children {
+            let now = now_ms();
+            let registered = {
+                let mut state = self.state.write().await;
+                subagent::try_register_from_session_created(child, &parent, &mut state.child_sessions, now)
+            };
+            if let Some(child_session) = registered {
+                subagent::emit_started(&self.runtime, &parent, &child_session);
+                newly_registered += 1;
+            }
+        }
+
+        if newly_registered > 0 {
+            info!(
+                conversation_id = %self.runtime.conversation_id(),
+                parent_session = %parent,
+                backfilled = newly_registered,
+                total_children = children.len(),
+                "M08: backfilled previously-unseen child sessions"
+            );
+        }
     }
 
     async fn handle_opencode_sse_event(&self, data: &str) {

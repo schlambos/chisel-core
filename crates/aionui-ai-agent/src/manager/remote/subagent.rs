@@ -307,6 +307,33 @@ mod tests {
     }
 
     #[test]
+    fn register_from_raw_children_session_object() {
+        // M08: GET /session/{id}/children returns bare `Session` objects with
+        // top-level id/parentID/agent (no `info` wrapper). `try_register_*`
+        // must handle that shape (it falls back from `info` to the object).
+        let mut registry = ChildSessionRegistry::default();
+        let session = json!({
+            "id": "child-bf",
+            "parentID": "parent-A",
+            "agent": "general",
+            "time": { "created": 1700000000000_i64 }
+        });
+        let s = try_register_from_session_created(&session, "parent-A", &mut registry, 1700000000001)
+            .expect("registers from raw Session object");
+        assert_eq!(s.child_session_id, "child-bf");
+        assert_eq!(s.agent_name.as_deref(), Some("general"));
+        assert_eq!(s.started_at_ms, 1700000000000);
+        assert!(registry.contains("child-bf"));
+
+        // Idempotent — a re-backfill of the same child does not re-register.
+        assert!(try_register_from_session_created(&session, "parent-A", &mut registry, 1700000000002).is_none());
+
+        // A child of a different parent is ignored (direct-children scope).
+        let other = json!({ "id": "child-x", "parentID": "parent-Z" });
+        assert!(try_register_from_session_created(&other, "parent-A", &mut registry, 1700000000003).is_none());
+    }
+
+    #[test]
     fn note_tool_part_dedupes_by_part_id() {
         let mut registry = ChildSessionRegistry::default();
         registry.insert(ChildSession {
