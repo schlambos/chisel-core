@@ -10,6 +10,7 @@
 //! - `POST /api/remote-agents/test-connection`          — test connection to remote agent (without saving it)
 //! - `POST /api/remote-agents/{id}/handshake`          — perform handshake with the remote agent to verify connectivity and retrieve agent info
 //! - `GET  /api/remote-agents/{id}/models`             — fetch available models from an OpenCode remote agent's /provider endpoint
+//! - `GET  /api/remote-agents/{id}/agents`             — fetch the selectable agent catalog from an OpenCode remote agent's /agent endpoint
 //! - `GET  /api/remote-agents/{id}/sessions`           — list active sessions on an OpenCode remote agent (for cross-device attach)
 //! - `POST /api/conversations/{id}/backfill-remote-history` — Phase 4b: lazy-load historical messages from OpenCode into the local conversation
 
@@ -21,7 +22,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 
 use aionui_api_types::{
-    ApiResponse, CreateRemoteAgentRequest, HandshakeResponse, ModelInfoPayload, RemoteAgentListItem,
+    AgentModeOption, ApiResponse, CreateRemoteAgentRequest, HandshakeResponse, ModelInfoPayload, RemoteAgentListItem,
     RemoteAgentResponse, RemoteSessionInfo, TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
 };
 use aionui_auth::CurrentUser;
@@ -39,6 +40,7 @@ pub fn remote_agent_routes(state: RemoteAgentRouterState) -> Router {
         .route("/api/remote-agents/{id}", get(get_one).put(update).delete(delete_one))
         .route("/api/remote-agents/{id}/handshake", post(handshake))
         .route("/api/remote-agents/{id}/models", get(fetch_models))
+        .route("/api/remote-agents/{id}/agents", get(fetch_agents))
         .route("/api/remote-agents/{id}/sessions", get(list_sessions))
         .route(
             "/api/conversations/{id}/backfill-remote-history",
@@ -120,6 +122,15 @@ async fn fetch_models(
 ) -> Result<Json<ApiResponse<ModelInfoPayload>>, AppError> {
     let payload = state.service.fetch_models(&id).await?;
     Ok(Json(ApiResponse::ok(payload)))
+}
+
+async fn fetch_agents(
+    State(state): State<RemoteAgentRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Vec<AgentModeOption>>>, AppError> {
+    let agents = state.service.fetch_agents(&id).await?;
+    Ok(Json(ApiResponse::ok(agents)))
 }
 
 async fn list_sessions(

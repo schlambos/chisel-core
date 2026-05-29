@@ -22,6 +22,7 @@ use aionui_conversation::{conversation_ops_routes, conversation_routes};
 use aionui_cron::cron_routes;
 use aionui_extension::{extension_routes, hub_routes, skill_routes};
 use aionui_file::file_routes;
+use aionui_lsp::{lsp_routes, lsp_ws_routes};
 use aionui_mcp::mcp_routes;
 use aionui_office::{office_proxy_routes, office_routes};
 use aionui_realtime::{WsHandlerState, ws_upgrade_handler};
@@ -153,6 +154,12 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
     let file_authenticated =
         file_routes(states.file).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
+    // LSP control-plane routes protected by auth middleware. The transport
+    // WebSocket (states.lsp passed into lsp_ws_routes) is mounted alongside
+    // /ws below — exempt from CSRF, same as other WS routes.
+    let lsp_authenticated =
+        lsp_routes(states.lsp.clone()).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+
     // MCP routes protected by auth middleware
     let mcp_authenticated =
         mcp_routes(states.mcp).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
@@ -211,6 +218,11 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
     // double-submit) but still gets security response headers.
     let ws_routes = Router::new().route("/ws", get(ws_upgrade_handler)).with_state(ws_state);
 
+    // LSP transport WebSocket — same CSRF-exempt treatment. Bound to its
+    // own state (LspRouterState) so each session id resolves to the same
+    // session map as the HTTP control-plane routes.
+    let lsp_ws = lsp_ws_routes(states.lsp);
+
     let router = Router::new()
         .route("/health", get(health_check))
         .merge(auth_routes(auth_state))
@@ -221,6 +233,7 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
         .merge(agent_authenticated)
         .merge(connection_test_authenticated)
         .merge(file_authenticated)
+        .merge(lsp_authenticated)
         .merge(mcp_authenticated)
         .merge(extension_authenticated)
         .merge(hub_authenticated)
@@ -246,6 +259,7 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
         ))
     }
     .merge(ws_routes)
+    .merge(lsp_ws)
     .merge(office_proxy)
     .merge(public_assets)
     .layer(middleware::from_fn(security_headers_middleware));

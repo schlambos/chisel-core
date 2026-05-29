@@ -180,6 +180,7 @@ impl IMockAgent for RecordingAgent {
         Ok(AgentModeResponse {
             mode: "default".to_owned(),
             initialized: false,
+            available_modes: None,
         })
     }
 }

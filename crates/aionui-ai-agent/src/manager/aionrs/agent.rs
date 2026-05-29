@@ -316,6 +316,7 @@ impl AionrsAgentManager {
         Ok(AgentModeResponse {
             mode: self.approval_manager.current_mode(),
             initialized: true,
+            available_modes: None,
         })
     }
 

@@ -108,6 +108,7 @@ pub trait IMockAgent: IAgentTask {
         Ok(aionui_api_types::AgentModeResponse {
             mode: "default".into(),
             initialized: false,
+            available_modes: None,
         })
     }
     async fn set_mode(&self, _mode: &str) -> Result<(), AppError> {
@@ -331,6 +332,7 @@ impl AgentInstance {
             Self::OpenClaw(_) | Self::Nanobot(_) => Ok(aionui_api_types::AgentModeResponse {
                 mode: "default".into(),
                 initialized: false,
+                available_modes: None,
             }),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.mode().await,

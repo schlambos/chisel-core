@@ -336,6 +336,7 @@ impl AcpAgentManager {
                 .or(desired)
                 .unwrap_or_else(|| normalize_requested_mode(&self.params.metadata, "default")),
             initialized: self.session_id().await.is_some(),
+            available_modes: None,
         })
     }
 

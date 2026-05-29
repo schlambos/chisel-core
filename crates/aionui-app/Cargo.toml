@@ -20,6 +20,7 @@ aionui-assets.workspace = true
 aionui-db.workspace = true
 aionui-api-types.workspace = true
 aionui-realtime.workspace = true
+aionui-lsp.workspace = true
 aionui-auth.workspace = true
 aionui-system.workspace = true
 aionui-file.workspace = true

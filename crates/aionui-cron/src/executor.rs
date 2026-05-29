@@ -2235,6 +2235,7 @@ mod tests {
             Ok(AgentModeResponse {
                 mode: self.mode().await,
                 initialized: self.initialized,
+                available_modes: None,
             })
         }
 

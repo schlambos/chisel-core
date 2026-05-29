@@ -14,6 +14,7 @@ mod custom_agent;
 mod extension;
 mod file;
 mod lifecycle;
+pub mod lsp;
 mod mcp;
 mod office;
 mod provider;
@@ -27,9 +28,9 @@ mod team_mcp;
 mod websocket;
 
 pub use acp::{
-    AcpEnvResponse, AcpHealthCheckRequest, AcpHealthCheckResponse, AgentModeResponse, DetectCliRequest,
-    DetectCliResponse, GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, ProbeModelRequest, SetModeRequest,
-    SetModelRequest, SideQuestionRequest, SideQuestionResponse, TryConnectCustomAgentRequest,
+    AcpEnvResponse, AcpHealthCheckRequest, AcpHealthCheckResponse, AgentModeOption, AgentModeResponse,
+    DetectCliRequest, DetectCliResponse, GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, ProbeModelRequest,
+    SetModeRequest, SetModelRequest, SideQuestionRequest, SideQuestionResponse, TryConnectCustomAgentRequest,
     TryConnectCustomAgentResponse, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 pub use acp_prompt_hook::AcpPromptHookWarningPayload;

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use aionui_api_types::SlashCommandItem;
+use aionui_api_types::{AgentModeOption, SlashCommandItem};
 use aionui_common::{
     AgentKillReason, AgentType, AppError, Confirmation, ConversationStatus, ErrorChain, RemoteAgentStatus, TimestampMs,
     now_ms,
@@ -71,6 +71,10 @@ struct RemoteState {
     /// `opencode_send` for template expansion. Lifetime: tied to this
     /// `RemoteAgentManager` instance — re-fetched only on reconnect.
     opencode_commands: Option<Vec<OpenCodeCommand>>,
+    /// Cached OpenCode primary agents from `GET /agent`, exposed as selectable modes.
+    /// `None` before first fetch; `Some(vec)` afterwards. Defaults are merged in
+    /// so older/failing servers still expose build/plan.
+    opencode_agents: Option<Vec<AgentModeOption>>,
     /// Cached `model_id -> context_window` map (`GET /config/providers`).
     /// `None` before the first fetch; `Some(map)` afterwards (empty map on
     /// fetch failure is allowed so we don't retry every turn). Used to fill
@@ -570,6 +574,56 @@ fn build_auth_header(auth_type: &str, auth_token: Option<&str>) -> Option<String
     Some(value)
 }
 
+pub(crate) fn default_opencode_agent_modes() -> Vec<AgentModeOption> {
+    vec![
+        AgentModeOption {
+            id: "build".to_string(),
+            name: Some("Build".to_string()),
+            description: None,
+        },
+        AgentModeOption {
+            id: "plan".to_string(),
+            name: Some("Plan".to_string()),
+            description: None,
+        },
+    ]
+}
+
+pub(crate) fn parse_opencode_agent_modes(body: &Value) -> Vec<AgentModeOption> {
+    let mut modes = default_opencode_agent_modes();
+    let mut seen: HashSet<String> = modes.iter().map(|m| m.id.clone()).collect();
+
+    let Some(items) = body.as_array() else {
+        return modes;
+    };
+
+    for item in items {
+        if item.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        // Selectable session modes are agents usable as the primary agent:
+        // `mode == "primary"` (native build/plan) or `mode == "all"` (custom
+        // agents usable as both primary and subagent). `subagent`-only agents
+        // (explore, general) are invoked via the task tool, not selectable here.
+        if !matches!(item.get("mode").and_then(|v| v.as_str()), Some("primary") | Some("all")) {
+            continue;
+        }
+        let Some(id) = item.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if !seen.insert(id.to_string()) {
+            continue;
+        }
+        modes.push(AgentModeOption {
+            id: id.to_string(),
+            name: Some(id.to_string()),
+            description: item.get("description").and_then(|v| v.as_str()).map(String::from),
+        });
+    }
+
+    modes
+}
+
 /// Build the canonical OpenCode permission-reply request `(url, body)` for a
 /// given permission id and decision.
 ///
@@ -991,6 +1045,7 @@ impl RemoteAgentManager {
                 desired_model: None,
                 desired_agent: None,
                 opencode_commands: None,
+                opencode_agents: None,
                 model_context_limits: None,
                 pending_shell_approvals: HashMap::new(),
                 pending_elicitations: HashMap::new(),
@@ -1111,6 +1166,7 @@ impl RemoteAgentManager {
         // before the user types `/`. Best-effort: on failure we cache
         // an empty list rather than retry — see `ensure_opencode_commands`.
         let _ = self.ensure_opencode_commands().await;
+        let _ = self.ensure_opencode_agents().await;
 
         let this = Arc::clone(self);
         // Prefer the canonical `/global/event` stream (events wrapped under
@@ -2305,6 +2361,54 @@ impl RemoteAgentManager {
         fetched
     }
 
+    /// Populate the cached OpenCode primary-agent catalog from `GET /agent`.
+    /// Hidden/internal agents and subagents are not selectable as session modes.
+    async fn ensure_opencode_agents(&self) -> Vec<AgentModeOption> {
+        {
+            let guard = self.state.read().await;
+            if let Some(ref cached) = guard.opencode_agents {
+                return cached.clone();
+            }
+        }
+
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        let mut req = self
+            .http_client
+            .get(format!("{base_url}/agent"))
+            .timeout(Duration::from_secs(10));
+        if let Some(ref h) = auth_header {
+            req = req.header(AUTHORIZATION, h.as_str());
+        }
+
+        let fetched = match req.send().await {
+            Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
+                Ok(body) => parse_opencode_agent_modes(&body),
+                Err(e) => {
+                    warn!(error = %e, "M10: failed to parse OpenCode agent catalog");
+                    default_opencode_agent_modes()
+                }
+            },
+            Ok(resp) => {
+                warn!(status = %resp.status(), "M10: OpenCode agent catalog request failed");
+                default_opencode_agent_modes()
+            }
+            Err(e) => {
+                warn!(error = %e, "M10: failed to fetch OpenCode agent catalog");
+                default_opencode_agent_modes()
+            }
+        };
+
+        debug!(
+            conversation_id = %self.runtime.conversation_id(),
+            agent_count = fetched.len(),
+            "M10: populated OpenCode agent mode cache"
+        );
+        let mut guard = self.state.write().await;
+        guard.opencode_agents = Some(fetched.clone());
+        fetched
+    }
+
     /// Resolve a model's context window (in tokens) from OpenCode's provider
     /// catalog, fetching and caching it on first use. Returns `0` when the
     /// model is unknown or the catalog can't be reached — the renderer then
@@ -3146,9 +3250,10 @@ impl RemoteAgentManager {
             )));
         }
         let normalized = mode.trim();
-        if !matches!(normalized, "build" | "plan") {
+        let available = self.ensure_opencode_agents().await;
+        if !available.iter().any(|m| m.id == normalized) {
             return Err(AppError::BadRequest(format!(
-                "Unsupported OpenCode mode '{normalized}'; expected 'build' or 'plan'"
+                "Unsupported OpenCode mode '{normalized}'"
             )));
         }
         {
@@ -3168,15 +3273,18 @@ impl RemoteAgentManager {
     /// matches the contract `AgentModeSelector` expects so it doesn't clobber
     /// `initialMode` while the agent is warming up.
     pub async fn mode(&self) -> Result<aionui_api_types::AgentModeResponse, AppError> {
+        let available_modes = self.ensure_opencode_agents().await;
         let guard = self.state.read().await;
         match guard.desired_agent.as_deref() {
             Some(m) => Ok(aionui_api_types::AgentModeResponse {
                 mode: m.to_owned(),
                 initialized: true,
+                available_modes: Some(available_modes),
             }),
             None => Ok(aionui_api_types::AgentModeResponse {
                 mode: "build".into(),
                 initialized: false,
+                available_modes: Some(available_modes),
             }),
         }
     }
@@ -4136,6 +4244,24 @@ mod tests {
         let h = build_auth_header("basic", Some("user:secret"));
         let expected = format!("Basic {}", BASE64.encode("user:secret"));
         assert_eq!(h, Some(expected));
+    }
+
+    #[test]
+    fn parse_opencode_agent_modes_keeps_primary_visible_agents() {
+        let modes = parse_opencode_agent_modes(&json!([
+            { "name": "build", "mode": "primary", "description": "Default" },
+            { "name": "review", "mode": "primary", "description": "Review code" },
+            { "name": "ui-expert", "mode": "all", "native": false, "description": "Custom UI agent" },
+            { "name": "explore", "mode": "subagent", "description": "Subagent" },
+            { "name": "compaction", "mode": "primary", "hidden": true }
+        ]));
+
+        assert_eq!(
+            modes.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["build", "plan", "review", "ui-expert"]
+        );
+        assert_eq!(modes[2].description.as_deref(), Some("Review code"));
+        assert_eq!(modes[3].description.as_deref(), Some("Custom UI agent"));
     }
 
     #[test]

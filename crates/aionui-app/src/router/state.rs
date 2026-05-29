@@ -25,6 +25,7 @@ use aionui_extension::{
     resolve_scan_paths_for_data_dir, resolve_state_file_path,
 };
 use aionui_file::{FileRouterState, FileService, FileWatchService, SnapshotService};
+use aionui_lsp::{LspRouterState, LspService};
 use aionui_mcp::{
     AionrsAdapter, AionuiAdapter, ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, GeminiAdapter, McpAgentAdapter,
     McpConfigService, McpConnectionTestService, McpRouterState, McpSyncService, OpencodeAdapter, QwenAdapter,
@@ -56,6 +57,7 @@ pub struct ModuleStates {
 
     pub connection_test: ConnectionTestRouterState,
     pub file: FileRouterState,
+    pub lsp: LspRouterState,
     pub mcp: McpRouterState,
     pub extension: ExtensionRouterState,
     pub hub: HubRouterState,
@@ -142,6 +144,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         },
         connection_test: build_connection_test_state(),
         file: build_file_state(services),
+        lsp: build_lsp_state(services),
         mcp: build_mcp_state(services),
         extension: ext_state,
         hub: hub_state,
@@ -283,6 +286,15 @@ pub fn build_file_state(services: &AppServices) -> FileRouterState {
         snapshot_service,
         allowed_roots,
         browse_roots,
+    }
+}
+
+/// Build the default `LspRouterState`. The LSP service is stateful (session
+/// map) but holds no dependency on `AppServices`; we still take `_services`
+/// to keep the builder signature uniform with the rest of the module.
+pub fn build_lsp_state(_services: &AppServices) -> LspRouterState {
+    LspRouterState {
+        service: Arc::new(LspService::new()),
     }
 }
 

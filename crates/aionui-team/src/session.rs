@@ -951,6 +951,7 @@ mod tests {
             Ok(AgentModeResponse {
                 mode: "default".into(),
                 initialized: false,
+                available_modes: None,
             })
         }
     }

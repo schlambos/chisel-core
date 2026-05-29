@@ -254,6 +254,34 @@ impl RemoteAgentService {
         fetch_opencode_model_info(&row.url, auth_type, auth_token.as_deref(), row.allow_insecure).await
     }
 
+    /// Fetch the OpenCode agent catalog (`GET /agent`) and map it to the
+    /// selectable session modes the renderer's mode picker consumes.  Used by
+    /// the Guid (New Chat) page, which has no conversation/agent task yet and
+    /// therefore cannot go through the per-conversation `/mode` endpoint.
+    ///
+    /// Mirrors [`fetch_models`]: reads the row, decrypts the auth token (the
+    /// plaintext never leaves the Rust process), and returns the
+    /// `AgentModeOption` list with `build`/`plan` defaults merged in.
+    pub async fn fetch_agents(&self, id: &str) -> Result<Vec<aionui_api_types::AgentModeOption>, AppError> {
+        let row = self
+            .repo
+            .find_by_id(id)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::NotFound(format!("Remote agent '{id}' not found")))?;
+
+        let protocol = parse_protocol(&row.protocol);
+        if protocol != RemoteAgentProtocol::OpenCode {
+            return Err(AppError::BadRequest(
+                "Agent list is only supported for OpenCode remote agents".into(),
+            ));
+        }
+
+        let auth_type = parse_auth_type(&row.auth_type);
+        let auth_token = decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
+        fetch_opencode_agents(&row.url, auth_type, auth_token.as_deref(), row.allow_insecure).await
+    }
+
     /// List active sessions on a remote OpenCode agent.  Proxies the
     /// upstream `GET /session` call so the renderer can offer an
     /// "Attach to existing session" picker (Phase 4 cross-device
@@ -535,6 +563,46 @@ async fn test_opencode_health(
     Err(AppError::BadGateway(
         "OpenCode health endpoint returned unhealthy status".into(),
     ))
+}
+
+/// Fetch the OpenCode `/agent` catalog and map it to selectable session
+/// modes. Reuses the same primary/all + hidden filtering the live session
+/// path applies (see `manager/remote/agent.rs::parse_opencode_agent_modes`).
+/// On any failure returns the `build`/`plan` defaults so the picker is never
+/// empty.
+async fn fetch_opencode_agents(
+    url: &str,
+    auth_type: RemoteAgentAuthType,
+    auth_token: Option<&str>,
+    allow_insecure: bool,
+) -> Result<Vec<aionui_api_types::AgentModeOption>, AppError> {
+    use crate::manager::remote::agent::{default_opencode_agent_modes, parse_opencode_agent_modes};
+
+    let base_url = normalize_opencode_base_url(url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .danger_accept_invalid_certs(allow_insecure)
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))?;
+    let response = client
+        .get(format!("{base_url}/agent"))
+        .headers(build_opencode_auth_headers(auth_type, auth_token)?)
+        .send()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode agent fetch failed: {e}")))?;
+
+    if !response.status().is_success() {
+        // Older builds without `/agent` (or a transient error): fall back to
+        // the canonical defaults rather than failing the New Chat page.
+        warn!("OpenCode agent fetch returned {}", response.status());
+        return Ok(default_opencode_agent_modes());
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode agent response was not JSON: {e}")))?;
+    Ok(parse_opencode_agent_modes(&body))
 }
 
 /// Fetch the OpenCode `/provider` listing and convert it into the renderer's

@@ -384,6 +384,7 @@ dependencies = [
  "aionui-db",
  "aionui-extension",
  "aionui-file",
+ "aionui-lsp",
  "aionui-mcp",
  "aionui-office",
  "aionui-realtime",
@@ -645,6 +646,26 @@ dependencies = [
  "tracing",
  "walkdir",
  "zip",
+]
+
+[[package]]
+name = "aionui-lsp"
+version = "0.1.11"
+dependencies = [
+ "aionui-api-types",
+ "aionui-common",
+ "aionui-runtime",
+ "axum",
+ "dashmap",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "which",
 ]
 
 [[package]]

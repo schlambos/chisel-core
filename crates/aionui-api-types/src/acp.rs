@@ -46,6 +46,17 @@ pub struct AcpEnvResponse {
 pub struct AgentModeResponse {
     pub mode: String,
     pub initialized: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_modes: Option<Vec<AgentModeOption>>,
+}
+
+/// One selectable agent session mode.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentModeOption {
+    pub id: String,
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Request body for setting session mode.

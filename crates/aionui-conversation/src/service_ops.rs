@@ -24,7 +24,16 @@ impl ConversationService {
     // ── Mode ────────────────────────────────────────────────────────
 
     pub async fn get_mode(&self, conversation_id: &str) -> Result<AgentModeResponse, AppError> {
-        self.task(conversation_id)?.get_mode().await
+        // Use `get_or_build_agent` (not lookup-only `task`) so the mode query
+        // matches `get_model`'s behavior: it warms up / waits for the agent to
+        // attach instead of 404-ing during the pre-warmup race on conversation
+        // open. For remote OpenCode this is what lets the server-discovered
+        // agent catalog (`available_modes`) reach the selector — a bare `task`
+        // lookup returns 404 before the SSE connect finishes, and the renderer
+        // never retries, so it silently falls back to the static build/plan
+        // list. The agent is already built on the same mount by `get_model`, so
+        // this adds no new spawn behavior.
+        self.get_or_build_agent(conversation_id).await?.get_mode().await
     }
 
     pub async fn set_mode(&self, conversation_id: &str, req: SetModeRequest) -> Result<(), AppError> {
