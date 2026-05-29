@@ -26,6 +26,7 @@ use crate::manager::remote::local_fs_mcp::{
 use crate::manager::remote::opencode_commands::{self, OpenCodeCommand};
 use crate::manager::remote::opencode_mcp;
 use crate::manager::remote::opencode_models;
+use crate::manager::remote::opencode_question;
 use crate::manager::remote::opencode_stream;
 use crate::manager::remote::opencode_tool_call;
 use crate::manager::remote::subagent::{self, ChildSessionRegistry};
@@ -144,6 +145,19 @@ struct RemoteState {
     /// progress emission so a busy sub-agent doesn't spam the renderer
     /// at OpenCode's full tick rate. 500 ms cadence is the floor.
     last_subtask_progress_ms: HashMap<String, i64>,
+    /// In-flight OpenCode `/question` requests (M09), keyed by `requestID`.
+    /// A `question.asked` event stores one entry here and emits one Approvals
+    /// card per question; `confirm()` accumulates the per-question answer into
+    /// the buffer and, once every question is answered, POSTs the full reply.
+    /// Cleared on reply/reject, on a `question.replied`/`question.rejected`
+    /// reconciliation, and on teardown.
+    pending_questions: HashMap<String, opencode_question::PendingQuestion>,
+    /// Recently-answered question `requestID`s → reply timestamp (ms). Mirrors
+    /// `recently_replied_permissions`: suppresses a double reply when the SSE
+    /// `question.replied`/`question.rejected` echo races our own POST, and
+    /// drops a re-emitted `question.asked` on reconnect. Pruned by the same
+    /// TTL/cap logic in `confirm()`.
+    recently_replied_questions: HashMap<String, TimestampMs>,
 }
 
 /// Configuration for connecting to a remote agent.
@@ -286,9 +300,6 @@ const KNOWN_IGNORED_EVENTS: &[&str] = &[
     "session.deleted",
     "session.diff",
     "session.compacted",
-    "question.asked",
-    "question.replied",
-    "question.rejected",
     "message.removed",
     "message.part.removed",
 ];
@@ -319,6 +330,23 @@ fn event_property_fingerprint(props: &Value) -> String {
     let mut hasher = DefaultHasher::new();
     keys.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+/// Upper bound on the `recently_replied_questions` dedup map (M09).
+const QUESTION_DEDUP_CAP: usize = 1024;
+
+/// Cap a recently-replied dedup map at `cap` entries, evicting the oldest by
+/// timestamp first. Keeps the question dedup map bounded over a long session.
+fn prune_replied_map(map: &mut HashMap<String, TimestampMs>, cap: usize) {
+    if map.len() <= cap {
+        return;
+    }
+    let mut entries: Vec<(String, TimestampMs)> = map.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    entries.sort_by_key(|(_, ts)| *ts);
+    let remove = map.len() - cap;
+    for (k, _) in entries.into_iter().take(remove) {
+        map.remove(&k);
+    }
 }
 
 /// Initial reconnect delay after the SSE reader drops (C02). Doubles each
@@ -940,6 +968,8 @@ impl RemoteAgentManager {
                 opencode_tool_call_ids: HashSet::new(),
                 child_sessions: ChildSessionRegistry::default(),
                 last_subtask_progress_ms: HashMap::new(),
+                pending_questions: HashMap::new(),
+                recently_replied_questions: HashMap::new(),
             })),
             ws_sink: Mutex::new(None),
             _reader_handle: Mutex::new(None),
@@ -1803,6 +1833,86 @@ impl RemoteAgentManager {
                     self.runtime.emit(event);
                 }
             }
+            "question.asked" => {
+                // The model is asking the user a clarifying question via the
+                // `ask` tool (M09). Map each question to an Approvals card so it
+                // rides the same queue as permission prompts; buffer the request
+                // so `confirm()` can accumulate answers and POST one reply.
+                let parsed = match opencode_question::parse_question_request(props) {
+                    Some(p) => p,
+                    None => {
+                        warn!(
+                            conversation_id = %self.runtime.conversation_id(),
+                            "question.asked missing id/questions; cannot prompt user"
+                        );
+                        return;
+                    }
+                };
+
+                // Dedup: drop a re-emitted question we already answered, and
+                // don't double-queue one already pending.
+                {
+                    let state = self.state.read().await;
+                    if state.recently_replied_questions.contains_key(&parsed.request_id)
+                        || state.pending_questions.contains_key(&parsed.request_id)
+                    {
+                        return;
+                    }
+                }
+
+                let confirmations = opencode_question::build_question_confirmations(&parsed);
+                {
+                    let mut state = self.state.write().await;
+                    state
+                        .pending_questions
+                        .insert(parsed.request_id.clone(), opencode_question::PendingQuestion::new(&parsed));
+                    for conf in &confirmations {
+                        state.confirmations.retain(|c| c.call_id != conf.call_id);
+                        state.confirmations.push(conf.clone());
+                    }
+                }
+
+                info!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    request_id = %parsed.request_id,
+                    question_count = confirmations.len(),
+                    "queued OpenCode question for UI prompt"
+                );
+
+                for conf in confirmations {
+                    self.runtime
+                        .emit(AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(conf)));
+                }
+            }
+            "question.replied" | "question.rejected" => {
+                // The question was answered/closed — possibly by another client
+                // pointed at the same server, or the echo of our own POST.
+                // Reconcile: drop the buffered request and any still-pending
+                // cards for it, and stamp the dedup map so a late local reply is
+                // suppressed. Mirrors the `permission.replied` reconciliation.
+                let request_id = props
+                    .get("requestID")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| props.get("id").and_then(|v| v.as_str()))
+                    .map(String::from);
+                if let Some(id) = request_id {
+                    let mut state = self.state.write().await;
+                    let was_pending = state.pending_questions.remove(&id).is_some();
+                    state
+                        .confirmations
+                        .retain(|c| opencode_question::parse_question_call_id(&c.call_id).map(|(rid, _)| rid != id).unwrap_or(true));
+                    state.recently_replied_questions.insert(id.clone(), now_ms());
+                    prune_replied_map(&mut state.recently_replied_questions, QUESTION_DEDUP_CAP);
+                    if was_pending {
+                        debug!(
+                            conversation_id = %self.runtime.conversation_id(),
+                            request_id = %id,
+                            event_type = event_type,
+                            "OpenCode question resolved upstream; cleared pending question"
+                        );
+                    }
+                }
+            }
             "models-dev.refreshed" | "catalog.model.updated" => {
                 // The server's provider/model catalog changed upstream (a
                 // models.dev refresh or a per-model update). Drop the cached
@@ -1973,6 +2083,71 @@ impl RemoteAgentManager {
                         endpoint = %url,
                         "OpenCode permission response request failed (auto)"
                     );
+                }
+            }
+        });
+    }
+
+    /// Fire-and-forget `POST /question/{requestID}/reply` (M09) with the full
+    /// `answers` matrix. Same fire-and-forget contract as
+    /// [`Self::spawn_permission_response`]: returns immediately, logs the
+    /// outcome, never propagates errors.
+    fn spawn_question_reply(&self, request_id: String, answers: Vec<Vec<String>>) {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return;
+        }
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        let http_client = self.http_client.clone();
+        let conversation_id = self.runtime.conversation_id().to_string();
+        tokio::spawn(async move {
+            let (url, body) = opencode_question::build_question_reply_request(&base_url, &request_id, &answers);
+            let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(10));
+            if let Some(h) = auth_header {
+                req = req.header(AUTHORIZATION, h);
+            }
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    debug!(%conversation_id, %request_id, endpoint = %url, "OpenCode question reply sent");
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    warn!(%conversation_id, %request_id, %status, %body, endpoint = %url, "OpenCode question reply returned non-success");
+                }
+                Err(e) => {
+                    warn!(%conversation_id, %request_id, error = %e, endpoint = %url, "OpenCode question reply request failed");
+                }
+            }
+        });
+    }
+
+    /// Fire-and-forget `POST /question/{requestID}/reject` (M09 — no body).
+    fn spawn_question_reject(&self, request_id: String) {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return;
+        }
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        let http_client = self.http_client.clone();
+        let conversation_id = self.runtime.conversation_id().to_string();
+        tokio::spawn(async move {
+            let url = opencode_question::build_question_reject_url(&base_url, &request_id);
+            let mut req = http_client.post(&url).timeout(Duration::from_secs(10));
+            if let Some(h) = auth_header {
+                req = req.header(AUTHORIZATION, h);
+            }
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    debug!(%conversation_id, %request_id, endpoint = %url, "OpenCode question rejected");
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    warn!(%conversation_id, %request_id, %status, %body, endpoint = %url, "OpenCode question reject returned non-success");
+                }
+                Err(e) => {
+                    warn!(%conversation_id, %request_id, error = %e, endpoint = %url, "OpenCode question reject request failed");
                 }
             }
         });
@@ -3125,6 +3300,9 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             // senders resolves them to `Declined` so the tool calls unblock
             // and the MCP server can shut down without hanging.
             state.pending_elicitations.clear();
+            // Pending `/question` buffers (M09) are dropped too; the turn is
+            // ending so there's no one to answer them.
+            state.pending_questions.clear();
         }
 
         // Stop the reachability guardian before teardown so it can't
@@ -3277,6 +3455,54 @@ impl RemoteAgentManager {
                 };
                 let _ = tx.send(payload);
                 return Ok(());
+            }
+
+            // OpenCode `/question` reply (M09)? `call_id` "question-{reqID}-{i}".
+            // The chosen value is the option *label* (or the reject sentinel),
+            // so read `raw_reply` (the verbatim value) rather than the
+            // permission-normalized `reply`.
+            if opencode_question::is_question_call_id(call_id)
+                && let Some((request_id, index)) = opencode_question::parse_question_call_id(call_id)
+            {
+                {
+                    // Drop the card the user just acted on.
+                    state.confirmations.retain(|c| c.call_id != call_id);
+                    let chosen = raw_reply.clone().unwrap_or_default();
+
+                    if chosen == opencode_question::QUESTION_REJECT_VALUE {
+                        // Reject closes the whole request: drop the buffer and
+                        // every sibling card, then POST the reject.
+                        state.pending_questions.remove(&request_id);
+                        state.confirmations.retain(|c| {
+                            opencode_question::parse_question_call_id(&c.call_id)
+                                .map(|(rid, _)| rid != request_id)
+                                .unwrap_or(true)
+                        });
+                        state.recently_replied_questions.insert(request_id.clone(), now_ms());
+                        prune_replied_map(&mut state.recently_replied_questions, QUESTION_DEDUP_CAP);
+                        drop(state);
+                        self.spawn_question_reject(request_id);
+                        return Ok(());
+                    }
+
+                    // Record this question's answer; only POST once every
+                    // question in the request has been answered.
+                    let answers = match state.pending_questions.get_mut(&request_id) {
+                        Some(p) => {
+                            p.record(index, vec![chosen]);
+                            if p.is_complete() { Some(p.collected()) } else { None }
+                        }
+                        None => None,
+                    };
+                    if let Some(answers) = answers {
+                        state.pending_questions.remove(&request_id);
+                        state.recently_replied_questions.insert(request_id.clone(), now_ms());
+                        prune_replied_map(&mut state.recently_replied_questions, QUESTION_DEDUP_CAP);
+                        drop(state);
+                        self.spawn_question_reply(request_id, answers);
+                    }
+                    return Ok(());
+                }
             }
 
             if reply == "always"
@@ -3606,15 +3832,33 @@ impl RemoteAgentManager {
             // Pair each call_id with its originating session_id. The reject
             // HTTP hits the canonical `/permission/{permID}/reply` endpoint
             // (see `build_permission_reply_request`); the session_id is kept
-            // for diagnostics only.
+            // for diagnostics only. Question cards (`question-…`, M09) are NOT
+            // permissions — they must be rejected via `/question/{id}/reject`,
+            // so they're excluded here and collected separately below.
             let opencode_call_ids: Vec<(String, Option<String>)> = state
                 .confirmations
                 .iter()
                 .filter(|c| !local_call_ids.contains(&c.call_id))
+                .filter(|c| !opencode_question::is_question_call_id(&c.call_id))
                 .map(|c| (c.call_id.clone(), c.session_id.clone()))
                 .collect();
 
+            // Distinct question requestIDs still pending — reject each once.
+            let question_request_ids: HashSet<String> = state
+                .pending_questions
+                .keys()
+                .cloned()
+                .collect();
+            state.pending_questions.clear();
+            for id in &question_request_ids {
+                state.recently_replied_questions.insert(id.clone(), now_ms());
+            }
+            prune_replied_map(&mut state.recently_replied_questions, QUESTION_DEDUP_CAP);
+
             state.confirmations.clear();
+            for id in question_request_ids {
+                self.spawn_question_reject(id);
+            }
             (shell_senders, elicitation_senders, opencode_call_ids)
         };
 
