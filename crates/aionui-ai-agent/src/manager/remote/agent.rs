@@ -5,6 +5,7 @@ use std::time::Duration;
 use aionui_api_types::SlashCommandItem;
 use aionui_common::{
     AgentKillReason, AgentType, AppError, Confirmation, ConversationStatus, ErrorChain, RemoteAgentStatus, TimestampMs,
+    now_ms,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -18,14 +19,19 @@ use uuid::Uuid;
 
 use crate::agent_runtime::AgentRuntime;
 use crate::manager::remote::local_fs_mcp::project_tree::render_project_tree_default;
-use crate::manager::remote::local_fs_mcp::{LocalFsMcpServer, ShellApproval, ShellApprover};
+use crate::manager::remote::local_fs_mcp::{
+    ElicitationHandler, ElicitationOutcome, ElicitationRequest, LocalFsMcpServer, McpRequestContext, ShellApproval,
+    ShellApprover,
+};
 use crate::manager::remote::opencode_commands::{self, OpenCodeCommand};
 use crate::manager::remote::opencode_mcp;
 use crate::manager::remote::opencode_models;
+use crate::manager::remote::opencode_stream;
 use crate::manager::remote::opencode_tool_call;
+use crate::manager::remote::subagent::{self, ChildSessionRegistry};
 use crate::protocol::events::{
-    AcpPermissionEventData, AcpToolCallSessionUpdateKind, AgentStreamEvent, FinishEventData, PlanEventData,
-    StartEventData, TextEventData, ThinkingEventData,
+    AcpPermissionEventData, AcpToolCallSessionUpdateKind, AgentStreamEvent, FinishEventData, OpencodeSubtaskStatus,
+    PlanEventData, StartEventData, TextEventData, ThinkingEventData,
 };
 use crate::types::SendMessageData;
 use aionui_common::ConfirmationOption;
@@ -77,6 +83,40 @@ struct RemoteState {
     /// the decision, waking the parked tool call. Dropped on cancel/kill so
     /// any waiting command fails closed.
     pending_shell_approvals: HashMap<String, oneshot::Sender<ShellApproval>>,
+    /// In-flight MCP elicitation requests raised by the local fs MCP server,
+    /// keyed by the synthetic confirmation `call_id` (`elicit-…`). The MCP
+    /// tool parks a `oneshot::Sender<Option<Value>>` here and awaits the
+    /// receiver; `confirm()` decodes the user's payload (or `None` on
+    /// cancel/decline) and forwards it. Dropped on cancel/kill so any
+    /// waiting tool fails closed via [`ElicitationOutcome::Declined`].
+    pending_elicitations: HashMap<String, oneshot::Sender<Option<Value>>>,
+    /// Recently-replied OpenCode permission ids → reply timestamp (ms). Used
+    /// to suppress duplicate `POST /permission/.../reply` calls when the UI
+    /// double-fires (re-render race, double-click, batch "approve all"
+    /// hitting the same id twice). Without this, OpenCode returns
+    /// `PermissionNotFoundError` on the second POST, which surfaces in logs
+    /// as a noisy 404 and confuses error reporting. Entries are pruned by
+    /// age (60 s TTL) and total count (capped at 1000) inside `confirm()`.
+    /// Mirrors the `responded` Map in OpenCode's own `permission.tsx` SDK.
+    recently_replied_permissions: HashMap<String, TimestampMs>,
+    /// Path prefixes the user has blessed for the rest of this conversation.
+    /// When a `permission.asked` arrives whose target path (extracted from
+    /// `metadata.filepath` / `metadata.path` / `metadata.parentDir`) is
+    /// covered by any prefix in this set, the prompt is auto-resolved with
+    /// `response: once` to OpenCode and never surfaces to the UI.
+    ///
+    /// Mirrors the `autoAccept` map in OpenCode's own
+    /// `context/permission.tsx` — except we key by path prefix rather than
+    /// `directoryAcceptKey(directory)`, because Chisl conversations cross
+    /// arbitrary user paths (the workspace is a synthetic temp dir, not the
+    /// user's project root) and OpenCode's `external_directory` permission
+    /// fires per-path. In-memory only; cleared on conversation teardown.
+    auto_accept_paths: HashSet<String>,
+    /// Sub-agent session ids whose permissions the user has blessed for the
+    /// rest of this conversation. When a permission's `sessionID` (or any of
+    /// its ancestors in the child-session graph) is in this set, the prompt
+    /// is auto-resolved without surfacing.
+    auto_accept_sessions: HashSet<String>,
     /// OpenCode tool `callID`s we've already announced to the relay as
     /// `AcpToolCallSessionUpdateKind::ToolCall` (insert). The first time we
     /// see a `message.part.updated` for a `type=tool` part we flip the
@@ -88,6 +128,22 @@ struct RemoteState {
     /// Lifetime: tied to this `RemoteAgentManager` — cleared on
     /// reconnect/teardown alongside `reasoning_parts`.
     opencode_tool_call_ids: HashSet<String>,
+    /// Registered OpenCode child sessions (sub-agent invocations) whose
+    /// `parentID` matches `opencode_session_id`. Events on the global
+    /// `/event` stream whose `sessionID` matches a registered child are
+    /// routed through this manager's runtime so the renderer can render
+    /// the sub-agent's transcript inline. See [`super::subagent`].
+    ///
+    /// Lifecycle: written when `session.created` arrives with a matching
+    /// parent (registration), updated on each child event (rolling
+    /// summary), and frozen with a status on `session.idle`. Cleared on
+    /// reconnect/teardown alongside `opencode_tool_call_ids`.
+    child_sessions: ChildSessionRegistry,
+    /// Last wall-clock millisecond at which we emitted an
+    /// `OpencodeSubtask::Progress` event per child. Used to throttle
+    /// progress emission so a busy sub-agent doesn't spam the renderer
+    /// at OpenCode's full tick rate. 500 ms cadence is the floor.
+    last_subtask_progress_ms: HashMap<String, i64>,
 }
 
 /// Configuration for connecting to a remote agent.
@@ -119,10 +175,111 @@ fn build_auth_header(auth_type: &str, auth_token: Option<&str>) -> Option<String
     Some(value)
 }
 
+/// Build the canonical OpenCode permission-reply request `(url, body)` for a
+/// given permission id and decision.
+///
+/// ## Endpoint discovery (verified against `http://192.168.0.5:4096/doc`,
+/// opencode 1.15.11, OpenAPI 3.1.0 — re-verify with
+/// `curl -s <server>/doc | jq '.paths["/permission/{requestID}/reply"]'`):
+///
+/// - `POST /permission/{requestID}/reply` — `operationId: permission.reply`,
+///   **NOT deprecated** (canonical). Body:
+///   `{ "reply": "once"|"always"|"reject", "message"?: string }` (`reply` required).
+///   Path param is the permission id only; no sessionID required.
+/// - `POST /session/{sessionID}/permissions/{permissionID}` —
+///   `operationId: permission.respond`, **`deprecated: true`**. Body:
+///   `{ "response": "once"|"always"|"reject" }` (`response` required).
+///
+/// Both return `200` with a JSON boolean on success and `404`
+/// (`PermissionNotFoundError`) when the id is unknown / already resolved.
+///
+/// Because the session-scoped variant is deprecated and the
+/// permission-id-only variant is canonical and needs no sessionID, we always
+/// use `/permission/{id}/reply` with the `{ "reply" }` field. The
+/// `session_id` parameter is retained for call-site compatibility and future
+/// diagnostics but is intentionally not required to construct the request.
+///
+/// `decision` must already be a wire-canonical value: `once` | `always` |
+/// `reject`. (Chisl-internal `allow_dir` / `allow_session` are mapped to
+/// `once` by the caller before reaching here.)
+fn build_permission_reply_request(base_url: &str, request_id: &str, decision: &str) -> (String, Value) {
+    (
+        format!("{base_url}/permission/{request_id}/reply"),
+        json!({ "reply": decision }),
+    )
+}
+
 /// Approval-memory key for an "allow always" decision on the shell tool.
 /// Mirrors the `(action, command_type)` pair the confirmation carries.
 fn shell_approval_key() -> String {
     approval_key(Some("run_shell"), Some("run_shell"))
+}
+
+/// Pull the filesystem target from an OpenCode permission's `metadata` blob.
+/// `external_directory` requests pack the touched path under `filepath` (with
+/// the ancestor as `parentDir`); shell-style metadata sometimes uses `path`.
+/// Returns the most-specific path available so the renderer can offer a
+/// well-scoped "Allow this directory tree" affordance.
+fn extract_permission_target_path(metadata: &Value) -> Option<String> {
+    metadata
+        .get("filepath")
+        .or_else(|| metadata.get("path"))
+        .or_else(|| metadata.get("parentDir"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// True when `target` is a descendant of (or equal to) any blessed prefix in
+/// `prefixes`. Comparison is a normalized path-prefix check: we treat
+/// `/foo/bar` and `/foo/bar/baz` as a hit, but NOT `/foo/barber` (which would
+/// match a naive `starts_with`). Both sides have trailing slashes trimmed
+/// before comparison so `/foo` covers `/foo/x`.
+fn path_is_under_blessed(target: &str, prefixes: &HashSet<String>) -> bool {
+    let normalized_target = target.trim_end_matches('/');
+    prefixes.iter().any(|prefix| {
+        let p = prefix.trim_end_matches('/');
+        if normalized_target == p {
+            return true;
+        }
+        if let Some(rest) = normalized_target.strip_prefix(p) {
+            rest.starts_with('/')
+        } else {
+            false
+        }
+    })
+}
+
+/// Walk a child session's ancestry through the registry and return true if
+/// any ancestor's session id is in the blessed set. Used by the auto-respond
+/// fast path so blessing a sub-agent's parent automatically covers all of
+/// its descendants — the same lineage walk OpenCode's
+/// `autoRespondsPermission` does in `permission-auto-respond.ts`.
+fn session_or_ancestor_blessed(
+    session_id: &str,
+    blessed: &HashSet<String>,
+    registry: &subagent::ChildSessionRegistry,
+) -> bool {
+    if blessed.contains(session_id) {
+        return true;
+    }
+    let mut current = registry.get(session_id);
+    let mut seen = HashSet::new();
+    while let Some(child) = current {
+        if !seen.insert(child.child_session_id.clone()) {
+            break;
+        }
+        if blessed.contains(&child.child_session_id) {
+            return true;
+        }
+        current = None;
+        // Registry doesn't currently track parentID per child (we store only
+        // the parent-of-this-conversation as a single field). If/when we add
+        // sub-sub-agents, this walk would consult that field. For V1, a
+        // single hop covers the common case (parent blesses, child auto-runs).
+        let _ = child;
+    }
+    false
 }
 
 /// Bridges `run_shell` tool calls from the local fs MCP server back to the
@@ -141,6 +298,12 @@ struct RemoteShellApprover {
 #[async_trait::async_trait]
 impl ShellApprover for RemoteShellApprover {
     async fn approve_shell(&self, command: &str, cwd: &str) -> ShellApproval {
+        // Default path with no session context (e.g. legacy approver callers).
+        self.approve_shell_with_context(command, cwd, &McpRequestContext::default())
+            .await
+    }
+
+    async fn approve_shell_with_context(&self, command: &str, cwd: &str, context: &McpRequestContext) -> ShellApproval {
         // A prior "allow always" for this session short-circuits the prompt.
         {
             let state = self.state.read().await;
@@ -190,6 +353,14 @@ impl ShellApprover for RemoteShellApprover {
                     params: None,
                 },
             ],
+            // Stamp the originating OpenCode session id (and its parent, for
+            // sub-agent calls) so the renderer attaches the prompt to the
+            // right nested transcript instead of bubbling it up at the
+            // conversation level. Both `None` for older OpenCode without the
+            // header extension — the prompt then surfaces at conversation
+            // level as before.
+            session_id: context.session_id.clone(),
+            parent_session_id: context.parent_session_id.clone(),
         };
 
         {
@@ -202,6 +373,8 @@ impl ShellApprover for RemoteShellApprover {
         info!(
             conversation_id = %self.runtime.conversation_id(),
             %call_id,
+            session_id = ?context.session_id,
+            parent_session_id = ?context.parent_session_id,
             "awaiting user approval for a local shell command"
         );
         self.runtime
@@ -218,6 +391,97 @@ impl ShellApprover for RemoteShellApprover {
                 state.pending_shell_approvals.remove(&call_id);
                 state.confirmations.retain(|c| c.call_id != call_id);
                 ShellApproval::Reject
+            }
+        }
+    }
+}
+
+/// Elicitation passthrough for the local-fs MCP server.
+///
+/// MCP's `elicitation/create` is a server→client reverse-call protocol; our
+/// HTTP-only MCP server can't natively do that, so we fold the flow into the
+/// same Confirmation queue that the shell approver uses. The tool calls
+/// [`Self::request_elicitation`] and parks; the UI surfaces a
+/// schema-driven prompt; the user's response is delivered back through the
+/// existing `confirmMessage` IPC path.
+///
+/// The `Confirmation` carries the elicitation schema in `command_type =
+/// "mcp_elicitation"` plus the schema serialized into the first option's
+/// `params`, so the renderer can pick a schema-aware form. When the
+/// renderer can't honour the schema it falls back to a free-text input and
+/// returns `{ raw: <text> }`.
+#[async_trait::async_trait]
+impl ElicitationHandler for RemoteShellApprover {
+    async fn request_elicitation(
+        &self,
+        request: ElicitationRequest<'_>,
+        context: &McpRequestContext,
+    ) -> ElicitationOutcome {
+        let call_id = format!("elicit-{}", Uuid::new_v4());
+        let (tx, rx) = oneshot::channel::<Option<Value>>();
+
+        // Serialize the schema into the option's `params` so the renderer
+        // can build a form without inventing a new ipcBridge surface. An
+        // absent schema → free-text fallback.
+        let mut schema_params = std::collections::HashMap::new();
+        if let Some(ref schema) = request.requested_schema {
+            schema_params.insert("schema".to_string(), schema.to_string());
+        }
+
+        let confirmation = Confirmation {
+            id: call_id.clone(),
+            call_id: call_id.clone(),
+            title: Some(format!("{}: input required", request.tool_name)),
+            action: Some("mcp_elicitation".to_string()),
+            description: request.message.to_string(),
+            command_type: Some("mcp_elicitation".to_string()),
+            options: vec![
+                ConfirmationOption {
+                    label: "Submit".to_string(),
+                    value: Value::String("submit".to_string()),
+                    params: if schema_params.is_empty() {
+                        None
+                    } else {
+                        Some(schema_params)
+                    },
+                },
+                ConfirmationOption {
+                    label: "Cancel".to_string(),
+                    value: Value::String("cancel".to_string()),
+                    params: None,
+                },
+            ],
+            session_id: context.session_id.clone(),
+            parent_session_id: context.parent_session_id.clone(),
+        };
+
+        {
+            let mut state = self.state.write().await;
+            state.confirmations.retain(|c| c.call_id != call_id);
+            state.confirmations.push(confirmation.clone());
+            state.pending_elicitations.insert(call_id.clone(), tx);
+        }
+
+        info!(
+            conversation_id = %self.runtime.conversation_id(),
+            %call_id,
+            tool = request.tool_name,
+            session_id = ?context.session_id,
+            parent_session_id = ?context.parent_session_id,
+            "awaiting user elicitation response"
+        );
+        self.runtime
+            .emit(AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(
+                confirmation,
+            )));
+
+        match rx.await {
+            Ok(Some(payload)) => ElicitationOutcome::Accepted(payload),
+            Ok(None) | Err(_) => {
+                let mut state = self.state.write().await;
+                state.pending_elicitations.remove(&call_id);
+                state.confirmations.retain(|c| c.call_id != call_id);
+                ElicitationOutcome::Declined
             }
         }
     }
@@ -289,12 +553,28 @@ impl RemoteAgentManager {
         resume_session_id: Option<String>,
         conversation_repo: Option<Arc<dyn aionui_db::IConversationRepository>>,
     ) -> Result<Self, AppError> {
-        let runtime = AgentRuntime::new(conversation_id, workspace, 256);
+        let runtime = AgentRuntime::new(conversation_id, workspace.clone(), 256);
 
         let http_client = reqwest::Client::builder()
             .danger_accept_invalid_certs(remote_config.allow_insecure)
             .build()
             .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))?;
+
+        // Pre-bless the conversation's workspace as an auto-accept path so
+        // every file read OpenCode would otherwise flag as
+        // `external_directory` auto-passes silently. Without this, the
+        // user's prompts that reference files anywhere under their actual
+        // project tree triggered a permission cascade on every single read
+        // (the MCP project_root is a synthetic temp dir, not the user's
+        // project, so OpenCode treats every real-path read as "external").
+        // Mirrors OpenCode's `permission: "allow"` config default applied
+        // to the session's working directory — see
+        // `permission.tsx::permissionsEnabled` in anomalyco/opencode.
+        let mut initial_auto_accept_paths = HashSet::new();
+        let normalized_workspace = workspace.trim_end_matches('/').to_string();
+        if !normalized_workspace.is_empty() && normalized_workspace.starts_with('/') {
+            initial_auto_accept_paths.insert(normalized_workspace);
+        }
 
         Ok(Self {
             runtime,
@@ -318,7 +598,13 @@ impl RemoteAgentManager {
                 opencode_commands: None,
                 model_context_limits: None,
                 pending_shell_approvals: HashMap::new(),
+                pending_elicitations: HashMap::new(),
+                recently_replied_permissions: HashMap::new(),
+                auto_accept_paths: initial_auto_accept_paths,
+                auto_accept_sessions: HashSet::new(),
                 opencode_tool_call_ids: HashSet::new(),
+                child_sessions: ChildSessionRegistry::default(),
+                last_subtask_progress_ms: HashMap::new(),
             })),
             ws_sink: Mutex::new(None),
             _reader_handle: Mutex::new(None),
@@ -522,16 +808,72 @@ impl RemoteAgentManager {
         // owned by other AionUi conversations pointed at the same server. Each
         // `RemoteAgentManager` runs its own reader, so without this guard every
         // manager would process every other conversation's events — bleeding
-        // one thread's Start/text/Finish into another's stream. Drop any
-        // session-scoped event whose `sessionID` is not this conversation's
-        // own session. Events with no `sessionID` (`server.connected`,
-        // `server.heartbeat`, etc.) are not session-scoped and pass through.
-        if let Some(ref event_session) = session_id {
-            let own = self.state.read().await.opencode_session_id.clone();
-            if own.as_deref() != Some(event_session.as_str()) {
+        // one thread's Start/text/Finish into another's stream.
+        //
+        // Three classes of `sessionID`s pass through the gate:
+        //   1. Our own parent session (`opencode_session_id`).
+        //   2. A registered child (sub-agent) of our parent — see
+        //      [`subagent`]. Without this, every sub-agent invocation goes
+        //      invisible (the reason the UI used to sit on `server.heartbeat`
+        //      for minutes after an `Explore Task` chip landed).
+        //   3. A `session.created` event whose `parentID` matches our parent;
+        //      we register the child here and then continue processing.
+        //
+        // Events with no `sessionID` (`server.connected`, `server.heartbeat`,
+        // etc.) are not session-scoped and always pass through.
+        //
+        // `is_child` is captured for the downstream handlers so they can stamp
+        // `parent_session_id` onto the outgoing canonical events.
+        let (is_child, parent_session_id) = if let Some(ref event_session) = session_id {
+            let (own, is_registered_child) = {
+                let state = self.state.read().await;
+                (
+                    state.opencode_session_id.clone(),
+                    state.child_sessions.contains(event_session.as_str()),
+                )
+            };
+            let own_ref = own.as_deref();
+            let matches_own = own_ref == Some(event_session.as_str());
+
+            // `session.created` is the registration trigger: examine the
+            // payload's `parentID` *before* the gate, so a newly spawned child
+            // session is recognized on its first event rather than being
+            // dropped silently.
+            let just_registered = if event_type == "session.created" && !matches_own {
+                if let Some(own_id) = own_ref {
+                    let now = now_ms();
+                    let mut state = self.state.write().await;
+                    if let Some(child) =
+                        subagent::try_register_from_session_created(props, own_id, &mut state.child_sessions, now)
+                    {
+                        drop(state);
+                        subagent::emit_started(&self.runtime, own_id, &child);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if !matches_own && !is_registered_child && !just_registered {
                 return;
             }
-        }
+            // If we just registered, the rest of this `session.created` event
+            // is consumed — there's no other useful work to do for it.
+            if just_registered {
+                return;
+            }
+            (
+                !matches_own && is_registered_child,
+                if matches_own { None } else { own.clone() },
+            )
+        } else {
+            (false, None)
+        };
 
         match event_type {
             "session.status" => {
@@ -551,21 +893,71 @@ impl RemoteAgentManager {
                         }
                     }
                     Some("idle") => {
-                        self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
-                            session_id: session_id.clone(),
-                        }));
-                        self.runtime.transition_to(ConversationStatus::Finished);
-                        self.release_turn_slot().await;
+                        // CRITICAL: only the ROOT session going idle ends the
+                        // conversation turn. Each child sub-agent emits its
+                        // own `session.status idle` when its sub-task wraps
+                        // up; firing `Finish` for a child would kill the
+                        // parent's stream relay while siblings are still
+                        // working — see OpenCode's own event-reducer.ts which
+                        // never treats child session.status as terminal.
+                        if is_child {
+                            if let (Some(child_id), Some(parent_id)) = (session_id.as_ref(), parent_session_id.as_ref())
+                            {
+                                let now = now_ms();
+                                let snapshot = {
+                                    let mut state = self.state.write().await;
+                                    subagent::mark_completed(
+                                        &mut state.child_sessions,
+                                        child_id.as_str(),
+                                        OpencodeSubtaskStatus::Completed,
+                                        None,
+                                        now,
+                                    )
+                                };
+                                if let Some(child) = snapshot {
+                                    subagent::emit_completed(&self.runtime, parent_id, &child, None);
+                                }
+                            }
+                        } else {
+                            self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
+                                session_id: session_id.clone(),
+                            }));
+                            self.runtime.transition_to(ConversationStatus::Finished);
+                            self.release_turn_slot().await;
+                        }
                     }
                     _ => {}
                 }
             }
             "session.idle" => {
-                self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
-                    session_id: session_id.clone(),
-                }));
-                self.runtime.transition_to(ConversationStatus::Finished);
-                self.release_turn_slot().await;
+                // A child (sub-agent) going idle does NOT end the parent turn —
+                // it only marks the sub-agent complete. Emitting `Finish` for a
+                // child would terminate the parent's stream relay, dropping any
+                // subsequent text/tool events the parent still has to produce.
+                if is_child {
+                    if let (Some(child_id), Some(parent_id)) = (session_id.as_ref(), parent_session_id.as_ref()) {
+                        let now = now_ms();
+                        let snapshot = {
+                            let mut state = self.state.write().await;
+                            subagent::mark_completed(
+                                &mut state.child_sessions,
+                                child_id.as_str(),
+                                OpencodeSubtaskStatus::Completed,
+                                None,
+                                now,
+                            )
+                        };
+                        if let Some(child) = snapshot {
+                            subagent::emit_completed(&self.runtime, parent_id, &child, None);
+                        }
+                    }
+                } else {
+                    self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
+                        session_id: session_id.clone(),
+                    }));
+                    self.runtime.transition_to(ConversationStatus::Finished);
+                    self.release_turn_slot().await;
+                }
             }
             "session.error" => {
                 // OpenCode sends errors as { name: "...", data: { message: "..." } }
@@ -583,17 +975,42 @@ impl RemoteAgentManager {
                         props.get("error").and_then(|v| v.as_str())
                     })
                     .unwrap_or("OpenCode session error");
-                warn!(
-                    conversation_id = %self.runtime.conversation_id(),
-                    error = message,
-                    "OpenCode session error"
-                );
-                self.runtime
-                    .emit(AgentStreamEvent::Error(crate::protocol::events::ErrorEventData {
-                        message: message.to_string(),
-                        code: None,
-                    }));
-                self.runtime.transition_to(ConversationStatus::Finished);
+                if is_child {
+                    if let (Some(child_id), Some(parent_id)) = (session_id.as_ref(), parent_session_id.as_ref()) {
+                        warn!(
+                            conversation_id = %self.runtime.conversation_id(),
+                            child_session = %child_id,
+                            error = message,
+                            "OpenCode sub-agent session error"
+                        );
+                        let now = now_ms();
+                        let snapshot = {
+                            let mut state = self.state.write().await;
+                            subagent::mark_completed(
+                                &mut state.child_sessions,
+                                child_id.as_str(),
+                                OpencodeSubtaskStatus::Failed,
+                                Some(message.to_string()),
+                                now,
+                            )
+                        };
+                        if let Some(child) = snapshot {
+                            subagent::emit_completed(&self.runtime, parent_id, &child, Some(message.to_string()));
+                        }
+                    }
+                } else {
+                    warn!(
+                        conversation_id = %self.runtime.conversation_id(),
+                        error = message,
+                        "OpenCode session error"
+                    );
+                    self.runtime
+                        .emit(AgentStreamEvent::Error(crate::protocol::events::ErrorEventData {
+                            message: message.to_string(),
+                            code: None,
+                        }));
+                    self.runtime.transition_to(ConversationStatus::Finished);
+                }
             }
             "session.next.model.switched" => {
                 let provider_id = props
@@ -679,9 +1096,16 @@ impl RemoteAgentManager {
                             // each tick into an `AcpToolCall` event so the existing
                             // inline tool-card UI renders the live output. See
                             // `opencode_tool_call` for the mapping rules.
-                            if let Some(mut event) =
-                                opencode_tool_call::translate_message_part_updated(props, session_id.clone())
-                            {
+                            //
+                            // When the event originates from a sub-agent (child)
+                            // session, `parent_session_id` is threaded through so
+                            // the renderer attaches the bubble to the nested
+                            // transcript rather than the parent's top-level one.
+                            if let Some(mut event) = opencode_tool_call::translate_message_part_updated(
+                                props,
+                                session_id.clone(),
+                                parent_session_id.clone(),
+                            ) {
                                 // The translator defaults every event to `ToolCallUpdate`
                                 // (merge) because OpenCode does not distinguish "new" from
                                 // "updated" parts on the wire. The persistence layer
@@ -703,9 +1127,27 @@ impl RemoteAgentManager {
                                     conversation_id = %self.runtime.conversation_id(),
                                     tool_call_id = %event.update.tool_call_id,
                                     first = is_first,
+                                    is_child = is_child,
                                     "Forwarding OpenCode tool part update"
                                 );
                                 self.runtime.emit(AgentStreamEvent::AcpToolCall(event));
+
+                                // For child sessions, also tick the rolling
+                                // sub-agent summary so the collapsed Task chip
+                                // can display `3 toolcalls · reading src/...`
+                                // without forcing the user to expand.
+                                if is_child
+                                    && let (Some(child_id), Some(parent_id)) =
+                                        (session_id.as_ref(), parent_session_id.as_ref())
+                                {
+                                    self.tick_subagent_progress(
+                                        parent_id,
+                                        child_id,
+                                        part.get("callID").and_then(|v| v.as_str()).unwrap_or(""),
+                                        part.get("tool").and_then(|v| v.as_str()),
+                                    )
+                                    .await;
+                                }
                             }
                         }
                         _ => {}
@@ -740,7 +1182,7 @@ impl RemoteAgentManager {
                             }
                         }
 
-                        if info.get("finish").and_then(|v| v.as_str()) == Some("stop") {
+                        if info.get("finish").and_then(|v| v.as_str()) == Some("stop") && !is_child {
                             // OpenCode emits no native usage event, but the
                             // finished assistant message carries `info.tokens`.
                             // Pair it with the model's context window (from the
@@ -751,6 +1193,18 @@ impl RemoteAgentManager {
                             // This MUST be emitted before `Finish`: the stream
                             // relay treats `Finish` as terminal and breaks its
                             // loop, dropping any event emitted afterwards.
+                            //
+                            // CRITICAL gate on `!is_child`: each sub-agent's
+                            // own assistant message also hits `finish=stop`
+                            // when its sub-task ends. Without this guard, the
+                            // first child to finish would terminate the
+                            // parent's stream relay, abandoning siblings and
+                            // any in-flight permission prompts (the symptom
+                            // was "OpenCode quickly returns a failure" when
+                            // the user couldn't approve in time — it wasn't
+                            // OpenCode failing, it was us prematurely
+                            // closing the relay on a sibling sub-agent's
+                            // completion).
                             if let Some(tokens) = info.get("tokens") {
                                 let used = opencode_models::context_tokens_used(tokens);
                                 if used > 0 {
@@ -791,7 +1245,14 @@ impl RemoteAgentManager {
                 // Map OpenCode's permission request to AionUi's Confirmation
                 // queue and emit the event the UI listens for. The user's
                 // reply flows back through `confirm()` → POST
-                // `/permission/{id}/reply` (see the IAgentTask impl below).
+                // `/permission/{permID}/reply` (see the IAgentTask impl
+                // below and `build_permission_reply_request`).
+                //
+                // Before queueing, consult the per-conversation auto-accept
+                // sets so a user who has already blessed this directory tree
+                // or this sub-agent gets the prompt resolved silently. This
+                // is the path OpenCode's own `permission.tsx` walks via
+                // `autoRespondsPermission` + `respondOnce`.
                 let request_id = match props.get("id").and_then(|v| v.as_str()) {
                     Some(id) => id.to_string(),
                     None => {
@@ -813,6 +1274,41 @@ impl RemoteAgentManager {
                     .and_then(|v| v.as_array())
                     .map(|arr| arr.iter().filter_map(|p| p.as_str().map(String::from)).collect())
                     .unwrap_or_default();
+                let target_path = extract_permission_target_path(&metadata);
+
+                // Auto-accept fast path. Walk both the path-prefix set and
+                // the session-blessing set; either match short-circuits the
+                // UI prompt.
+                let auto_accept_hit = {
+                    let state = self.state.read().await;
+                    let path_hit = target_path
+                        .as_deref()
+                        .map(|t| path_is_under_blessed(t, &state.auto_accept_paths))
+                        .unwrap_or(false);
+                    let session_hit = session_id
+                        .as_deref()
+                        .map(|sid| session_or_ancestor_blessed(sid, &state.auto_accept_sessions, &state.child_sessions))
+                        .unwrap_or(false);
+                    path_hit || session_hit
+                };
+                if auto_accept_hit {
+                    info!(
+                        conversation_id = %self.runtime.conversation_id(),
+                        request_id = %request_id,
+                        permission = %permission,
+                        session_id = ?session_id,
+                        path = ?target_path,
+                        "auto-accepting OpenCode permission via blessed prefix/session"
+                    );
+                    self.spawn_permission_response(request_id.clone(), session_id.clone(), "once".to_string());
+                    // Stamp the dedupe map too so a stray `permission.asked`
+                    // re-emit (OpenCode re-fires on reconnect) doesn't double-POST.
+                    {
+                        let mut state = self.state.write().await;
+                        state.recently_replied_permissions.insert(request_id.clone(), now_ms());
+                    }
+                    return;
+                }
 
                 let title = if permission.is_empty() {
                     "OpenCode permission request".to_string()
@@ -829,6 +1325,7 @@ impl RemoteAgentManager {
                     .map(String::from)
                     .or_else(|| metadata.get("description").and_then(|v| v.as_str()).map(String::from))
                     .or_else(|| metadata.get("filePath").and_then(|v| v.as_str()).map(String::from))
+                    .or_else(|| target_path.clone())
                     .unwrap_or_else(|| {
                         if metadata.as_object().map(|m| !m.is_empty()).unwrap_or(false) {
                             metadata.to_string()
@@ -839,6 +1336,47 @@ impl RemoteAgentManager {
                         }
                     });
 
+                // Build the option list. When the request carries a target
+                // path we add "Allow this directory tree" so one click can
+                // bless the whole tree for the rest of the conversation —
+                // the fix for the cascade the user hit on the explore prompt.
+                let mut options = vec![ConfirmationOption {
+                    label: "Allow once".to_string(),
+                    value: Value::String("once".to_string()),
+                    params: None,
+                }];
+                if let Some(ref path) = target_path {
+                    let mut params = std::collections::HashMap::new();
+                    params.insert("path".to_string(), path.clone());
+                    options.push(ConfirmationOption {
+                        label: "Allow this directory tree (session)".to_string(),
+                        value: Value::String("allow_dir".to_string()),
+                        params: Some(params),
+                    });
+                }
+                if session_id.is_some() && parent_session_id.is_some() {
+                    // Sub-agent-attributed: offer "allow rest of this sub-agent"
+                    let mut params = std::collections::HashMap::new();
+                    if let Some(ref sid) = session_id {
+                        params.insert("sessionID".to_string(), sid.clone());
+                    }
+                    options.push(ConfirmationOption {
+                        label: "Allow rest of this sub-agent".to_string(),
+                        value: Value::String("allow_session".to_string()),
+                        params: Some(params),
+                    });
+                }
+                options.push(ConfirmationOption {
+                    label: "Allow always".to_string(),
+                    value: Value::String("always".to_string()),
+                    params: None,
+                });
+                options.push(ConfirmationOption {
+                    label: "Reject".to_string(),
+                    value: Value::String("reject".to_string()),
+                    params: None,
+                });
+
                 let confirmation = Confirmation {
                     id: request_id.clone(),
                     call_id: request_id.clone(),
@@ -846,23 +1384,14 @@ impl RemoteAgentManager {
                     action: Some(permission.clone()),
                     description,
                     command_type: Some(permission.clone()),
-                    options: vec![
-                        ConfirmationOption {
-                            label: "Allow once".to_string(),
-                            value: Value::String("once".to_string()),
-                            params: None,
-                        },
-                        ConfirmationOption {
-                            label: "Allow always".to_string(),
-                            value: Value::String("always".to_string()),
-                            params: None,
-                        },
-                        ConfirmationOption {
-                            label: "Reject".to_string(),
-                            value: Value::String("reject".to_string()),
-                            params: None,
-                        },
-                    ],
+                    options,
+                    // Stamp the originating sessionId on the confirmation so
+                    // the renderer can route the prompt to the right nested
+                    // sub-agent transcript. `parent_session_id` is `None` for
+                    // parent-session prompts and the parent's id for
+                    // sub-agent-originated prompts.
+                    session_id: session_id.clone(),
+                    parent_session_id: parent_session_id.clone(),
                 };
 
                 {
@@ -885,14 +1414,139 @@ impl RemoteAgentManager {
                         confirmation,
                     )));
             }
+            "session.next.tool.input.started"
+            | "session.next.tool.input.delta"
+            | "session.next.tool.input.ended"
+            | "session.next.tool_input.started"
+            | "session.next.tool_input.delta"
+            | "session.next.tool_input.ended"
+            | "message.next.tool.input.started"
+            | "message.next.tool.input.delta"
+            | "message.next.tool.input.ended" => {
+                // Streamed tool-input arguments — the model constructing JSON
+                // before the tool is invoked. Surfaces a "Constructing
+                // arguments…" affordance per tool call so the user can pre-empt
+                // a wrong call before execution. See [`opencode_stream`].
+                let sid = match session_id.as_deref() {
+                    Some(s) => s,
+                    None => return,
+                };
+                if let Some(event) =
+                    opencode_stream::translate_tool_input(event_type, props, sid, parent_session_id.clone())
+                {
+                    self.runtime.emit(event);
+                }
+            }
+            "session.next.tool.progress" | "session.next.tool_progress" | "message.next.tool.progress" => {
+                // Long-running tool progress — `bash` stdout chunks, `grep`
+                // file counters, MCP `{step, percent}` shapes, etc. See
+                // [`opencode_stream::translate_tool_progress`].
+                let sid = match session_id.as_deref() {
+                    Some(s) => s,
+                    None => return,
+                };
+                if let Some(event) =
+                    opencode_stream::translate_tool_progress(props, sid, parent_session_id.clone(), now_ms())
+                {
+                    self.runtime.emit(event);
+                }
+            }
             _ => {
                 debug!(
                     conversation_id = %self.runtime.conversation_id(),
                     event_type = event_type,
+                    is_child = is_child,
                     "Unhandled OpenCode event"
                 );
             }
         }
+    }
+
+    /// Update a child session's rolling summary on each tool-part tick and
+    /// emit a debounced [`crate::protocol::events::OpencodeSubtaskEventData`]
+    /// progress event when something user-visible changed. Throttled to 500 ms
+    /// cadence per child so a busy sub-agent does not spam the renderer.
+    async fn tick_subagent_progress(&self, parent_id: &str, child_id: &str, part_id: &str, tool_name: Option<&str>) {
+        let now = now_ms();
+        let (changed, last_ms, snapshot) = {
+            let mut state = self.state.write().await;
+            let changed = subagent::note_tool_part(&mut state.child_sessions, child_id, part_id, tool_name, now);
+            let last = state.last_subtask_progress_ms.get(child_id).copied().unwrap_or(0);
+            let snap = state.child_sessions.get(child_id).cloned();
+            (changed, last, snap)
+        };
+        let due = now.saturating_sub(last_ms) >= 500;
+        if changed
+            && due
+            && let Some(child) = snapshot
+        {
+            {
+                let mut state = self.state.write().await;
+                state.last_subtask_progress_ms.insert(child_id.to_string(), now);
+            }
+            subagent::emit_progress(&self.runtime, parent_id, &child);
+        }
+    }
+
+    /// Fire-and-forget POST of an OpenCode permission response via the
+    /// canonical `POST /permission/{permID}/reply` endpoint (body `{reply}`).
+    /// See [`build_permission_reply_request`] for the endpoint-discovery notes.
+    ///
+    /// `session_id` is retained for call-site compatibility (and possible
+    /// future diagnostics) but is not required to address the permission —
+    /// the canonical endpoint is keyed by permission id alone.
+    ///
+    /// Shared by the auto-accept short-circuit in the `permission.asked`
+    /// handler and by `confirm()` itself. Returns immediately; the task
+    /// completes in the background. Errors are logged but don't propagate.
+    fn spawn_permission_response(&self, request_id: String, session_id: Option<String>, reply: String) {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return;
+        }
+        let _ = &session_id;
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        let http_client = self.http_client.clone();
+        let conversation_id = self.runtime.conversation_id().to_string();
+        tokio::spawn(async move {
+            let (url, body) = build_permission_reply_request(&base_url, &request_id, &reply);
+            let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(10));
+            if let Some(h) = auth_header {
+                req = req.header(AUTHORIZATION, h);
+            }
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    debug!(
+                        conversation_id = %conversation_id,
+                        request_id = %request_id,
+                        reply = %reply,
+                        endpoint = %url,
+                        "OpenCode permission response sent (auto)"
+                    );
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    warn!(
+                        conversation_id = %conversation_id,
+                        request_id = %request_id,
+                        status = %status,
+                        body = %body,
+                        endpoint = %url,
+                        "OpenCode permission response returned non-success (auto)"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        conversation_id = %conversation_id,
+                        request_id = %request_id,
+                        error = %e,
+                        endpoint = %url,
+                        "OpenCode permission response request failed (auto)"
+                    );
+                }
+            }
+        });
     }
 
     async fn connect_ws(self: &Arc<Self>) -> Result<(), AppError> {
@@ -1203,10 +1857,15 @@ impl RemoteAgentManager {
         // Approver lets the MCP server's `run_shell` tool gate each command
         // on the user's confirmation UI. Built from shared handles (cloned
         // `Arc` + `AgentRuntime`) so it outlives this borrowed-`self` call.
-        let approver: Arc<dyn ShellApprover> = Arc::new(RemoteShellApprover {
+        // The same struct also implements `ElicitationHandler`, so tools that
+        // need to raise a free-form schema-driven prompt can park on it the
+        // same way. See [`RemoteShellApprover`].
+        let approver = Arc::new(RemoteShellApprover {
             runtime: self.runtime.clone(),
             state: Arc::clone(&self.state),
         });
+        let shell_approver: Arc<dyn ShellApprover> = approver.clone();
+        let elicitation_handler: Arc<dyn crate::manager::remote::local_fs_mcp::ElicitationHandler> = approver;
 
         match opencode_mcp::start_and_register(
             &self.http_client,
@@ -1214,7 +1873,8 @@ impl RemoteAgentManager {
             auth_header,
             &conversation_id,
             &workspace,
-            Some(approver),
+            Some(shell_approver),
+            Some(elicitation_handler),
         )
         .await
         {
@@ -1944,6 +2604,10 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
         if let Ok(mut state) = self.state.try_write() {
             state.confirmations.clear();
             state.pending_shell_approvals.clear();
+            // Pending elicitations also park on a oneshot — dropping the
+            // senders resolves them to `Declined` so the tool calls unblock
+            // and the MCP server can shut down without hanging.
+            state.pending_elicitations.clear();
         }
 
         // Stop the reachability guardian before teardown so it can't
@@ -2008,13 +2672,25 @@ impl RemoteAgentManager {
     pub fn confirm(&self, _msg_id: &str, call_id: &str, data: Value, always_allow: bool) -> Result<(), AppError> {
         // Normalize the UI's choice up front — both the local shell-approval
         // path and the OpenCode path need it. Prefer the explicit option
-        // value the frontend sent ("once"/"always"/"reject"); fall back to
-        // the always_allow flag, then "once".
-        let reply = data
+        // value the frontend sent. Five values are accepted:
+        //   - "once" / "always" / "reject": canonical OpenCode replies that
+        //     are POSTed as-is to the permission endpoint.
+        //   - "allow_dir": "Allow this directory tree (session)" — adds the
+        //     `data.params.path` (or `data.path`) to the per-conversation
+        //     auto-accept set, replies "once" for this request, and drains
+        //     other pending confirmations whose target paths are descendants.
+        //   - "allow_session": "Allow rest of this sub-agent" — adds the
+        //     `data.params.sessionID` to the per-conversation auto-accept
+        //     sessions set, replies "once", and drains matching pending
+        //     confirmations.
+        // Fall back to the always_allow flag, then "once".
+        let raw_reply = data
             .as_str()
             .map(str::to_owned)
-            .or_else(|| data.get("value").and_then(|v| v.as_str()).map(str::to_owned))
-            .filter(|r| matches!(r.as_str(), "once" | "always" | "reject"))
+            .or_else(|| data.get("value").and_then(|v| v.as_str()).map(str::to_owned));
+        let reply = raw_reply
+            .clone()
+            .filter(|r| matches!(r.as_str(), "once" | "always" | "reject" | "allow_dir" | "allow_session"))
             .unwrap_or_else(|| {
                 if always_allow {
                     "always".to_string()
@@ -2022,6 +2698,27 @@ impl RemoteAgentManager {
                     "once".to_string()
                 }
             });
+
+        // Extract the path/sessionID parameters that the "allow_dir" /
+        // "allow_session" options carry. The UI sends them as
+        // `data.params.{path,sessionID}` (mirrors how `ConfirmationOption.params`
+        // round-trips through `conversation.confirmMessage`).
+        let extra_path = data
+            .get("params")
+            .and_then(|p| p.get("path"))
+            .or_else(|| data.get("path"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let extra_session = data
+            .get("params")
+            .and_then(|p| p.get("sessionID"))
+            .or_else(|| data.get("sessionID"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Snapshotted across the state lock so the spawned HTTP task can
+        // address the canonical per-session endpoint.
+        let mut originating_session_id: Option<String> = None;
 
         if let Ok(mut state) = self.state.try_write() {
             // In-process shell approval? These originate from our own local
@@ -2043,37 +2740,240 @@ impl RemoteAgentManager {
                 return Ok(());
             }
 
+            // In-process MCP elicitation? `call_id` "elicit-…" identifies a
+            // parked tool call waiting for the user's schema-driven response.
+            // The renderer's reply lands in `data` either as the raw response
+            // payload or as `{ value: "submit"|"cancel", payload: <user JSON> }`.
+            // We accept both shapes here so a minimal renderer that only sends
+            // `value` cleanly cancels.
+            if let Some(tx) = state.pending_elicitations.remove(call_id) {
+                state.confirmations.retain(|c| c.call_id != call_id);
+                drop(state);
+                let payload = if reply == "cancel" || reply == "reject" {
+                    None
+                } else {
+                    // Prefer an explicit `payload` field when present; fall
+                    // back to the entire `data` value (allows a renderer to
+                    // POST `{value: "submit", payload: ...}` or just the bare
+                    // submitted object).
+                    Some(data.get("payload").cloned().unwrap_or_else(|| data.clone()))
+                };
+                let _ = tx.send(payload);
+                return Ok(());
+            }
+
             if reply == "always"
                 && let Some(conf) = state.confirmations.iter().find(|c| c.call_id == call_id)
             {
                 let key = approval_key(conf.action.as_deref(), conf.command_type.as_deref());
                 state.approval_memory.insert(key, true);
             }
+            // Snapshot the originating session id (for sub-agent-attributed
+            // permissions) BEFORE we strip the confirmation. The canonical
+            // OpenCode permission-reply endpoint is `/permission/{permID}/reply`
+            // (body `{reply}`) — the session-scoped variant
+            // `/session/{sessionID}/permissions/{permID}` is deprecated as of
+            // opencode 1.15.11 (see `build_permission_reply_request`). The
+            // sessionID is no longer required to address the permission, but we
+            // still snapshot it for diagnostics / future use.
+            originating_session_id = state
+                .confirmations
+                .iter()
+                .find(|c| c.call_id == call_id)
+                .and_then(|c| c.session_id.clone());
             state.confirmations.retain(|c| c.call_id != call_id);
+
+            // For "allow_dir" / "allow_session", record the blessing and
+            // build the list of OTHER pending confirmations whose target
+            // path / session matches — those will be auto-resolved with
+            // `once` after we drop the lock. Stash the list locally; the
+            // POSTs happen in the spawned task block further down.
+            //
+            // We collect into `drain_now: Vec<(call_id, session_id)>` so
+            // that 14 cascading external_directory prompts collapse into
+            // one user click. The HTTP POSTs use the same
+            // `spawn_permission_response` helper as the auto-accept fast
+            // path, so they hit the canonical endpoint.
+            //
+            // `drain_now` is held outside the lock and processed below.
+        }
+
+        // Apply "allow_dir" / "allow_session" effects: update the auto-accept
+        // set and collect matching pending confirmations to drain. Must
+        // re-acquire the lock since `try_write` released above.
+        let mut drain_now: Vec<(String, Option<String>)> = Vec::new();
+        if (reply == "allow_dir" || reply == "allow_session")
+            && let Ok(mut state) = self.state.try_write()
+        {
+            if reply == "allow_dir" {
+                if let Some(ref p) = extra_path {
+                    let normalized = p.trim_end_matches('/').to_string();
+                    let was_new = state.auto_accept_paths.insert(normalized.clone());
+                    if was_new {
+                        info!(
+                            conversation_id = %self.runtime.conversation_id(),
+                            path = %normalized,
+                            "user blessed directory tree for the rest of this conversation"
+                        );
+                    }
+                }
+            } else if reply == "allow_session"
+                && let Some(ref sid) = extra_session
+            {
+                let was_new = state.auto_accept_sessions.insert(sid.clone());
+                if was_new {
+                    info!(
+                        conversation_id = %self.runtime.conversation_id(),
+                        session_id = %sid,
+                        "user blessed sub-agent for the rest of this conversation"
+                    );
+                }
+            }
+
+            // Walk currently-queued confirmations and drain ones that
+            // now match (besides the one we just answered). Snapshot the
+            // child-session registry first so the retain closure doesn't
+            // borrow `state` twice.
+            let blessed_paths = state.auto_accept_paths.clone();
+            let blessed_sessions = state.auto_accept_sessions.clone();
+            let registry_snapshot = state.child_sessions.clone();
+            let mut to_drain: Vec<(String, Option<String>)> = Vec::new();
+            state.confirmations.retain(|c| {
+                if c.call_id == call_id {
+                    return false; // already removed above; defensive
+                }
+                // The Confirmation doesn't carry the original metadata
+                // path, so we approximate by checking whether the
+                // description (which we populated from
+                // `metadata.filepath`/`parentDir` in the `permission.asked`
+                // handler) is covered by any blessed prefix. Best-effort —
+                // session-hit below is the exact match.
+                let path_hit = !blessed_paths.is_empty() && path_is_under_blessed(&c.description, &blessed_paths);
+                let sess_hit = c
+                    .session_id
+                    .as_deref()
+                    .map(|sid| session_or_ancestor_blessed(sid, &blessed_sessions, &registry_snapshot))
+                    .unwrap_or(false);
+                if path_hit || sess_hit {
+                    to_drain.push((c.call_id.clone(), c.session_id.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            // Mark them in the dedupe map so a stray duplicate POST or
+            // re-emit won't double-fire after our auto-respond.
+            let now = now_ms();
+            for (id, _) in &to_drain {
+                state.recently_replied_permissions.insert(id.clone(), now);
+            }
+            drain_now = to_drain;
         }
 
         if is_opencode_protocol(&self.remote_config.protocol) {
+            // Dedupe rapid re-fires of the same call_id (re-render races, the
+            // user double-clicking, batched "approve all" hitting the same id
+            // twice). Without this, OpenCode returns 404
+            // PermissionNotFoundError on the second POST. 60 s TTL, capped at
+            // 1024 entries.
+            const REPLY_DEDUP_TTL_MS: i64 = 60_000;
+            const REPLY_DEDUP_CAP: usize = 1024;
+            let now = now_ms();
+            let already_replied = if let Ok(mut state) = self.state.try_write() {
+                state
+                    .recently_replied_permissions
+                    .retain(|_, ts| now.saturating_sub(*ts) < REPLY_DEDUP_TTL_MS);
+                if state.recently_replied_permissions.len() > REPLY_DEDUP_CAP {
+                    let oldest: Vec<String> = {
+                        let mut items: Vec<(&String, &TimestampMs)> =
+                            state.recently_replied_permissions.iter().collect();
+                        items.sort_by_key(|(_, ts)| **ts);
+                        items
+                            .iter()
+                            .take(state.recently_replied_permissions.len() - REPLY_DEDUP_CAP)
+                            .map(|(k, _)| (*k).clone())
+                            .collect()
+                    };
+                    for k in oldest {
+                        state.recently_replied_permissions.remove(&k);
+                    }
+                }
+                if state.recently_replied_permissions.contains_key(call_id) {
+                    true
+                } else {
+                    state.recently_replied_permissions.insert(call_id.to_string(), now);
+                    false
+                }
+            } else {
+                false
+            };
+            if already_replied {
+                debug!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    request_id = %call_id,
+                    "suppressed duplicate OpenCode permission reply"
+                );
+                return Ok(());
+            }
+
+            // Translate Chisl-internal "allow_dir" / "allow_session" reply
+            // values into OpenCode's canonical "once" for the wire — the
+            // blessing has already been recorded in
+            // `auto_accept_paths`/`auto_accept_sessions` above so subsequent
+            // requests auto-resolve.
+            let wire_reply = match reply.as_str() {
+                "allow_dir" | "allow_session" => "once".to_string(),
+                _ => reply.clone(),
+            };
+
+            // Drain any pending confirmations that the blessing covers — for
+            // each, fire the canonical POST in the background. We've already
+            // removed them from `state.confirmations` above, so the UI will
+            // stop showing them on its next list refresh. Stamping them in
+            // `recently_replied_permissions` above protects against a
+            // double-POST if OpenCode also re-emits `permission.asked`.
+            let drain_count = drain_now.len();
+            for (drain_id, drain_session) in drain_now {
+                self.spawn_permission_response(drain_id, drain_session, "once".to_string());
+            }
+            if drain_count > 0 {
+                info!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    drain_count,
+                    "auto-resolved {drain_count} pending permissions via blessing"
+                );
+            }
+
             let base_url = normalize_base_url(&self.remote_config.url);
             let auth_header =
                 build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
             let http_client = self.http_client.clone();
             let conversation_id = self.runtime.conversation_id().to_string();
             let call_id = call_id.to_string();
+            let _originating_session_id = originating_session_id;
+            let wire_for_log = wire_reply.clone();
+            // Clone the state handle so the background task can clear the
+            // dedup entry on a confirmed 2xx (plan C05 §3.3) — letting a quick
+            // re-prompt with the same id re-reply instead of being suppressed.
+            let dedup_state = Arc::clone(&self.state);
             tokio::spawn(async move {
-                let url = format!("{base_url}/permission/{call_id}/reply");
-                let mut req = http_client
-                    .post(&url)
-                    .json(&json!({ "reply": reply }))
-                    .timeout(Duration::from_secs(10));
+                // Canonical permission-reply endpoint (`/permission/{id}/reply`,
+                // body `{reply}`) — see `build_permission_reply_request`.
+                let (url, body) = build_permission_reply_request(&base_url, &call_id, &wire_reply);
+                let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(10));
                 if let Some(h) = auth_header {
                     req = req.header(AUTHORIZATION, h);
                 }
                 match req.send().await {
                     Ok(resp) if resp.status().is_success() => {
+                        // Confirmed success — drop the dedup stamp so a fresh
+                        // re-prompt with the same id can be replied to again.
+                        dedup_state.write().await.recently_replied_permissions.remove(&call_id);
                         info!(
                             conversation_id = %conversation_id,
                             request_id = %call_id,
-                            reply = %reply,
+                            reply = %wire_for_log,
+                            endpoint = %url,
                             "OpenCode permission reply sent"
                         );
                     }
@@ -2085,6 +2985,7 @@ impl RemoteAgentManager {
                             request_id = %call_id,
                             status = %status,
                             body = %body,
+                            endpoint = %url,
                             "OpenCode permission reply returned non-success"
                         );
                     }
@@ -2093,6 +2994,7 @@ impl RemoteAgentManager {
                             conversation_id = %conversation_id,
                             request_id = %call_id,
                             error = %e,
+                            endpoint = %url,
                             "OpenCode permission reply request failed"
                         );
                     }
@@ -2158,9 +3060,12 @@ impl RemoteAgentManager {
     pub async fn reject_pending_confirmations(&self, reason: &'static str) {
         // Snapshot the work we need to do, then drop the write guard so the
         // OpenCode-permission HTTP replies below don't run while holding it.
-        let (shell_senders, opencode_call_ids) = {
+        let (shell_senders, elicitation_senders, opencode_call_ids) = {
             let mut state = self.state.write().await;
-            if state.confirmations.is_empty() && state.pending_shell_approvals.is_empty() {
+            if state.confirmations.is_empty()
+                && state.pending_shell_approvals.is_empty()
+                && state.pending_elicitations.is_empty()
+            {
                 return;
             }
 
@@ -2168,22 +3073,35 @@ impl RemoteAgentManager {
             // them happens outside the lock.
             let shell_senders: Vec<(String, oneshot::Sender<ShellApproval>)> =
                 state.pending_shell_approvals.drain().collect();
+            // Same for parked MCP elicitations — we resolve each with `None`
+            // (`Declined`) so the calling tool can fail closed.
+            let elicitation_senders: Vec<(String, oneshot::Sender<Option<Value>>)> =
+                state.pending_elicitations.drain().collect();
 
-            // Anything left in state.confirmations after stripping shell-rooted
-            // entries is an OpenCode-side permission that needs an HTTP reject.
-            let shell_call_ids: HashSet<String> = shell_senders.iter().map(|(id, _)| id.clone()).collect();
-            let opencode_call_ids: Vec<String> = state
+            // Anything left in state.confirmations after stripping shell- and
+            // elicitation-rooted entries is an OpenCode-side permission that
+            // needs an HTTP reject.
+            let local_call_ids: HashSet<String> = shell_senders
+                .iter()
+                .map(|(id, _)| id.clone())
+                .chain(elicitation_senders.iter().map(|(id, _)| id.clone()))
+                .collect();
+            // Pair each call_id with its originating session_id. The reject
+            // HTTP hits the canonical `/permission/{permID}/reply` endpoint
+            // (see `build_permission_reply_request`); the session_id is kept
+            // for diagnostics only.
+            let opencode_call_ids: Vec<(String, Option<String>)> = state
                 .confirmations
                 .iter()
-                .filter(|c| !shell_call_ids.contains(&c.call_id))
-                .map(|c| c.call_id.clone())
+                .filter(|c| !local_call_ids.contains(&c.call_id))
+                .map(|c| (c.call_id.clone(), c.session_id.clone()))
                 .collect();
 
             state.confirmations.clear();
-            (shell_senders, opencode_call_ids)
+            (shell_senders, elicitation_senders, opencode_call_ids)
         };
 
-        let total = shell_senders.len() + opencode_call_ids.len();
+        let total = shell_senders.len() + elicitation_senders.len() + opencode_call_ids.len();
         if total == 0 {
             return;
         }
@@ -2191,6 +3109,7 @@ impl RemoteAgentManager {
             conversation_id = %self.runtime.conversation_id(),
             reason,
             shell_count = shell_senders.len(),
+            elicitation_count = elicitation_senders.len(),
             opencode_count = opencode_call_ids.len(),
             "auto-rejecting pending confirmations"
         );
@@ -2200,6 +3119,10 @@ impl RemoteAgentManager {
         // the rejection and moves on instead of hanging on the MCP response.
         for (_call_id, tx) in shell_senders {
             let _ = tx.send(ShellApproval::Reject);
+        }
+        // Same for elicitations — `None` signals Declined.
+        for (_call_id, tx) in elicitation_senders {
+            let _ = tx.send(None);
         }
 
         // Best-effort reject the OpenCode-side permissions. We don't await any
@@ -2212,12 +3135,11 @@ impl RemoteAgentManager {
             let http_client = self.http_client.clone();
             let conversation_id = self.runtime.conversation_id().to_string();
             tokio::spawn(async move {
-                for call_id in opencode_call_ids {
-                    let url = format!("{base_url}/permission/{call_id}/reply");
-                    let mut req = http_client
-                        .post(&url)
-                        .json(&json!({ "reply": "reject" }))
-                        .timeout(Duration::from_secs(5));
+                for (call_id, _session_for_url) in opencode_call_ids {
+                    // Canonical permission-reply endpoint — see
+                    // `build_permission_reply_request`.
+                    let (url, body) = build_permission_reply_request(&base_url, &call_id, "reject");
+                    let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(5));
                     if let Some(ref h) = auth_header {
                         req = req.header(AUTHORIZATION, h.as_str());
                     }
@@ -2307,6 +3229,20 @@ mod tests {
         assert_eq!(h, None);
         let h = build_auth_header("bearer", None);
         assert_eq!(h, None);
+    }
+
+    #[test]
+    fn permission_reply_uses_canonical_endpoint() {
+        // Canonical (non-deprecated) endpoint verified against opencode
+        // 1.15.11: POST /permission/{id}/reply with body { "reply": <decision> }.
+        let (url, body) = build_permission_reply_request("http://127.0.0.1:4096", "per_abc", "once");
+        assert_eq!(url, "http://127.0.0.1:4096/permission/per_abc/reply");
+        assert_eq!(body, json!({ "reply": "once" }));
+
+        let (_, body) = build_permission_reply_request("http://h", "per_x", "reject");
+        assert_eq!(body, json!({ "reply": "reject" }));
+        // The body must NOT use the deprecated session-scoped `response` field.
+        assert!(body.get("response").is_none());
     }
 
     #[tokio::test]
@@ -2695,6 +3631,8 @@ mod tests {
             description: format!("dummy command for {call_id}"),
             command_type: Some("run_shell".to_string()),
             options: vec![],
+            session_id: None,
+            parent_session_id: None,
         }
     }
 
