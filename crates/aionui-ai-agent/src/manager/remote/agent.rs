@@ -24,6 +24,7 @@ use crate::manager::remote::local_fs_mcp::{
     ShellApprover,
 };
 use crate::manager::remote::opencode_commands::{self, OpenCodeCommand};
+use crate::manager::remote::opencode_delta_batcher::DeltaBatcherHandle;
 use crate::manager::remote::opencode_mcp;
 use crate::manager::remote::opencode_models;
 use crate::manager::remote::opencode_question;
@@ -32,7 +33,7 @@ use crate::manager::remote::opencode_tool_call;
 use crate::manager::remote::subagent::{self, ChildSessionRegistry};
 use crate::protocol::events::{
     AcpPermissionEventData, AcpToolCallSessionUpdateKind, AgentStreamEvent, FinishEventData, OpencodeSubtaskStatus,
-    PlanEventData, StartEventData, TextEventData, ThinkingEventData,
+    PlanEventData, StartEventData,
 };
 use crate::types::SendMessageData;
 use aionui_common::ConfirmationOption;
@@ -1045,6 +1046,15 @@ pub struct RemoteAgentManager {
     /// `None` for unit-test constructors that don't exercise the
     /// stale-session path.
     conversation_repo: Option<Arc<dyn aionui_db::IConversationRepository>>,
+    /// Per-part SSE delta accumulator (E03). Token deltas for the same
+    /// `(messageID, partID, field)` are coalesced on a ~16 ms frame and
+    /// emitted as a single `Text`/`Thinking` event, rather than firing one
+    /// IPC event per token. See
+    /// [`opencode_delta_batcher`](super::opencode_delta_batcher) for the
+    /// flush rules. The handle is cheap to clone, and is also flushed
+    /// forcibly on `message.part.updated` (per-part) and `emit_root_turn_finish`
+    /// (per-turn) so no streamed text lingers past terminal events.
+    delta_batcher: DeltaBatcherHandle,
 }
 
 impl RemoteAgentManager {
@@ -1093,6 +1103,8 @@ impl RemoteAgentManager {
             initial_auto_accept_paths.insert(normalized_workspace);
         }
 
+        let delta_batcher = DeltaBatcherHandle::new(runtime.clone());
+
         Ok(Self {
             runtime,
             remote_config,
@@ -1135,6 +1147,7 @@ impl RemoteAgentManager {
             local_fs_mcp: Mutex::new(None),
             reachability_guardian: Mutex::new(None),
             conversation_repo,
+            delta_batcher,
         })
     }
 
@@ -1691,23 +1704,26 @@ impl RemoteAgentManager {
                 if field != "text" {
                     return;
                 }
+                let message_id = props.get("messageID").and_then(|v| v.as_str()).unwrap_or("");
                 let part_id = props.get("partID").and_then(|v| v.as_str()).unwrap_or("");
                 let is_reasoning = self.state.read().await.reasoning_parts.contains(part_id);
-                if is_reasoning {
-                    self.runtime.emit(AgentStreamEvent::Thinking(ThinkingEventData {
-                        content: delta.to_string(),
-                        subject: None,
-                        duration: None,
-                        status: None,
-                    }));
-                } else {
-                    self.runtime.emit(AgentStreamEvent::Text(TextEventData {
-                        content: delta.to_string(),
-                    }));
-                }
+                // E03: queue the delta into the per-part accumulator instead of
+                // emitting directly. Coalesced at ~60 Hz; force-flushed on
+                // `message.part.updated` for this part and on root-turn finish.
+                self.delta_batcher
+                    .push(message_id, part_id, field, delta, is_reasoning)
+                    .await;
             }
             "message.part.updated" => {
                 if let Some(part) = props.get("part") {
+                    // E03: drain any deltas accumulated for this part before
+                    // forwarding the update. The server has finalized this
+                    // part — we want what we've buffered to land on screen now,
+                    // not 16 ms later. Safe no-op for tool/other types that
+                    // never accumulate deltas.
+                    if let Some(part_id) = part.get("id").and_then(|v| v.as_str()) {
+                        self.delta_batcher.flush_part(part_id).await;
+                    }
                     match part.get("type").and_then(|v| v.as_str()) {
                         Some("reasoning") => {
                             // Track reasoning part IDs so `message.part.delta`
@@ -2779,6 +2795,10 @@ impl RemoteAgentManager {
             // Cleared in `send_message` when the user submits the next prompt.
             state.finished_current_user_turn = true;
         }
+        // E03: drain any accumulated SSE deltas before the terminal `Finish`.
+        // The stream relay treats `Finish` as a hard terminator, so a delta
+        // emitted afterwards would never reach the renderer.
+        self.delta_batcher.flush_all().await;
         self.runtime.emit(AgentStreamEvent::Finish(FinishEventData { session_id }));
         self.runtime.transition_to(ConversationStatus::Finished);
         self.release_turn_slot().await;
@@ -5298,6 +5318,9 @@ mod tests {
         })
         .to_string();
         agent.handle_opencode_sse_event(&own).await;
+        // E03: text deltas are coalesced on a ~16 ms frame; sleep past the
+        // flush window so the accumulator drains before we assert.
+        tokio::time::sleep(Duration::from_millis(30)).await;
         let events = drain_events(&mut rx);
         assert!(
             events
@@ -5530,5 +5553,195 @@ mod tests {
         let state = agent.state.read().await;
         assert!(state.confirmations.is_empty());
         assert!(state.pending_shell_approvals.is_empty());
+    }
+
+    /// E03: a burst of `message.part.delta` events for the same part is
+    /// coalesced into a single `Text` event after the 16 ms flush window.
+    #[tokio::test]
+    async fn delta_batcher_coalesces_burst_into_single_text_event() {
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        for chunk in ["Hel", "lo, ", "wor", "ld"] {
+            let ev = json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": "sess_1",
+                    "messageID": "msg_batch_1",
+                    "partID": "prt_batch_1",
+                    "field": "text",
+                    "delta": chunk,
+                }
+            })
+            .to_string();
+            agent.handle_opencode_sse_event(&ev).await;
+        }
+
+        // Before the flush window elapses, no Text event should have been
+        // emitted yet.
+        assert!(
+            drain_events(&mut rx)
+                .iter()
+                .all(|e| !matches!(e, AgentStreamEvent::Text(_))),
+            "deltas must not emit individually inside the flush window"
+        );
+
+        // After the window elapses, exactly one Text event with the
+        // concatenated content.
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let texts: Vec<String> = drain_events(&mut rx)
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentStreamEvent::Text(d) => Some(d.content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 1, "expected one coalesced Text, got {:?}", texts);
+        assert_eq!(texts[0], "Hello, world");
+    }
+
+    /// E03: when `message.part.updated` arrives for a part with deltas still
+    /// pending, the accumulator is flushed synchronously — the user sees the
+    /// already-streamed text rather than losing it past the part boundary.
+    #[tokio::test]
+    async fn delta_batcher_flushes_on_part_updated() {
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        for chunk in ["foo", "bar"] {
+            let ev = json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": "sess_1",
+                    "messageID": "msg_flush_1",
+                    "partID": "prt_flush_1",
+                    "field": "text",
+                    "delta": chunk,
+                }
+            })
+            .to_string();
+            agent.handle_opencode_sse_event(&ev).await;
+        }
+
+        let updated = json!({
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": "sess_1",
+                "time": 0,
+                "part": { "id": "prt_flush_1", "type": "text" }
+            }
+        })
+        .to_string();
+        agent.handle_opencode_sse_event(&updated).await;
+
+        // No sleep — the flush should have happened synchronously on the
+        // `message.part.updated` boundary.
+        let texts: Vec<String> = drain_events(&mut rx)
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentStreamEvent::Text(d) => Some(d.content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["foobar".to_string()],
+            "deltas must be flushed when their part finalizes"
+        );
+    }
+
+    /// E03: pending deltas drain before the terminal `Finish` so streamed
+    /// text never lingers past the end of the turn.
+    #[tokio::test]
+    async fn delta_batcher_flushes_on_root_turn_finish() {
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        // Arm the root turn.
+        let busy = json!({
+            "type": "session.status",
+            "properties": { "sessionID": "sess_1", "status": { "type": "busy" } }
+        })
+        .to_string();
+        agent.handle_opencode_sse_event(&busy).await;
+
+        let delta = json!({
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "sess_1",
+                "messageID": "msg_finish_1",
+                "partID": "prt_finish_1",
+                "field": "text",
+                "delta": "tail-end ",
+            }
+        })
+        .to_string();
+        agent.handle_opencode_sse_event(&delta).await;
+
+        // Send a `finish=stop` immediately — without flush_all, the
+        // accumulator's pending "tail-end " would be lost behind Finish.
+        let stop = json!({
+            "type": "message.updated",
+            "properties": {
+                "sessionID": "sess_1",
+                "info": { "id": "msg_finish_1", "role": "assistant", "finish": "stop" }
+            }
+        })
+        .to_string();
+        agent.handle_opencode_sse_event(&stop).await;
+
+        let events = drain_events(&mut rx);
+        let text_idx = events
+            .iter()
+            .position(|e| matches!(e, AgentStreamEvent::Text(d) if d.content == "tail-end "))
+            .expect("pending delta must be flushed before Finish");
+        let finish_idx = events
+            .iter()
+            .position(|e| matches!(e, AgentStreamEvent::Finish(_)))
+            .expect("Finish must still be emitted");
+        assert!(text_idx < finish_idx, "Text must be emitted before Finish");
+    }
+
+    /// E03: deltas for parts flagged as `reasoning` flush as `Thinking`
+    /// events, not user-visible `Text` — matching the pre-batching behavior.
+    #[tokio::test]
+    async fn delta_batcher_routes_reasoning_parts_to_thinking() {
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        // Register the part as reasoning before any deltas — this mirrors
+        // OpenCode's actual ordering (`part.updated type=reasoning` lands
+        // before its deltas).
+        agent
+            .state
+            .write()
+            .await
+            .reasoning_parts
+            .insert("prt_reasoning_1".to_string());
+
+        for chunk in ["thinking ", "out loud"] {
+            let ev = json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": "sess_1",
+                    "messageID": "msg_reasoning_1",
+                    "partID": "prt_reasoning_1",
+                    "field": "text",
+                    "delta": chunk,
+                }
+            })
+            .to_string();
+            agent.handle_opencode_sse_event(&ev).await;
+        }
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let thinking: Vec<String> = drain_events(&mut rx)
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentStreamEvent::Thinking(d) => Some(d.content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking, vec!["thinking out loud".to_string()]);
     }
 }

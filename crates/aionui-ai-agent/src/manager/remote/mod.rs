@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod local_fs_mcp;
 pub mod opencode_commands;
+pub mod opencode_delta_batcher;
 pub mod opencode_mcp;
 pub mod opencode_models;
 pub mod opencode_question;
