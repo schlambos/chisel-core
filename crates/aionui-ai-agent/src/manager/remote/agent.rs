@@ -25,6 +25,7 @@ use crate::manager::remote::local_fs_mcp::{
 };
 use crate::manager::remote::opencode_commands::{self, OpenCodeCommand};
 use crate::manager::remote::opencode_delta_batcher::DeltaBatcherHandle;
+use crate::manager::remote::opencode_log_forwarder;
 use crate::manager::remote::opencode_mcp;
 use crate::manager::remote::opencode_models;
 use crate::manager::remote::opencode_question;
@@ -1254,6 +1255,17 @@ impl RemoteAgentManager {
         // M10: prime the skill catalog so the picker is populated before
         // the user types. Same failure mode as commands: empty list cached.
         let _ = self.ensure_opencode_skills().await;
+
+        // M14: register the per-conversation log forwarder so any tracing
+        // event downstream that carries this `conversation_id` is shipped
+        // to the OpenCode server's `POST /log`. Idempotent — re-registering
+        // on reconnect replaces the previous channel.
+        opencode_log_forwarder::register_forwarder(
+            self.runtime.conversation_id().to_string(),
+            self.http_client.clone(),
+            base_url.clone(),
+            auth_header.clone(),
+        );
 
         let this = Arc::clone(self);
         // Prefer the canonical `/global/event` stream (events wrapped under
@@ -3265,6 +3277,67 @@ impl RemoteAgentManager {
     /// server-global endpoint (no session id in the path). Empty 2xx bodies map
     /// to `Value::Null`; non-2xx responses carry the server body so callers can
     /// surface the server's own validation error.
+    /// M15 — read the OpenCode server's LSP server statuses (`GET /lsp`).
+    /// Returns `Vec<LSPStatus>` (`[{id, name, root, status:"connected"|"error"}]`)
+    /// as raw JSON; the renderer can render the small badge directly off
+    /// `length` and the count of `status == "connected"` entries.
+    pub async fn opencode_get_lsp_status(&self) -> Result<Value, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "LSP status is only available for OpenCode remote connections".into(),
+            ));
+        }
+        self.opencode_config_request("/lsp", reqwest::Method::GET, None).await
+    }
+
+    /// M16 — read the OpenCode server's VCS info (`GET /vcs`). Returns
+    /// `VcsInfo { branch?, default_branch? }`. An empty object is returned when
+    /// the server's working tree isn't a git repo, so the renderer can hide
+    /// the source pill cleanly.
+    pub async fn opencode_get_vcs_info(&self) -> Result<Value, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "VCS is only available for OpenCode remote connections".into(),
+            ));
+        }
+        self.opencode_config_request("/vcs", reqwest::Method::GET, None).await
+    }
+
+    /// M16 — read the porcelain-equivalent working-tree status
+    /// (`GET /vcs/status`). Returns `Vec<VcsFileStatus>` with
+    /// `{file, additions, deletions, status:"added"|"deleted"|"modified"}` per
+    /// changed file. The renderer counts the array length for the "N changes"
+    /// pill and renders the file list inside the modal.
+    pub async fn opencode_get_vcs_status(&self) -> Result<Value, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "VCS is only available for OpenCode remote connections".into(),
+            ));
+        }
+        self.opencode_config_request("/vcs/status", reqwest::Method::GET, None)
+            .await
+    }
+
+    /// M16 — read the structured working-tree diff (`GET /vcs/diff?mode=git`).
+    /// `mode` is required by the server: `"git"` (default) shows the working
+    /// tree against HEAD; `"branch"` shows the current branch against the
+    /// default branch. Returns `Vec<VcsFileDiff>` with the per-file `patch`
+    /// (unified diff) string so the modal can render it without a second
+    /// round-trip to `/vcs/diff/raw`.
+    pub async fn opencode_get_vcs_diff(&self, mode: &str) -> Result<Value, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "VCS is only available for OpenCode remote connections".into(),
+            ));
+        }
+        let normalized = match mode {
+            "git" | "branch" => mode,
+            _ => "git",
+        };
+        let path = format!("/vcs/diff?mode={normalized}");
+        self.opencode_config_request(&path, reqwest::Method::GET, None).await
+    }
+
     async fn opencode_config_request(
         &self,
         path: &str,
@@ -4128,6 +4201,11 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
         if let Ok(mut guard) = self.ws_sink.try_lock() {
             *guard = None;
         }
+
+        // M14: drop the log-forwarder registration before further teardown so
+        // any tracing emitted during this kill path doesn't queue against a
+        // server we're about to lose contact with.
+        opencode_log_forwarder::unregister_forwarder(self.runtime.conversation_id());
 
         // Drop any parked shell approvals first. Each one is holding a
         // `run_shell` MCP request open while it awaits the user; dropping the

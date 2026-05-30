@@ -82,10 +82,20 @@ pub fn init_tracing(log_dir: &Path, log_level: Option<&str>) -> LogGuards {
     let (aionrs_layer, aionrs_guard) =
         aion_config::logging::create_file_layer(&aionrs_resolved).expect("failed to create aionrs log layer");
 
+    // M14 — forward INFO/WARN/ERROR tracing events carrying a `conversation_id`
+    // field to the matching remote OpenCode server's `POST /log` endpoint.
+    // The layer is registered unconditionally; it no-ops for any event whose
+    // `conversation_id` has not been registered via
+    // `opencode_log_forwarder::register_forwarder` (called from
+    // `connect_opencode`).
+    let opencode_log_layer = aionui_ai_agent::manager::remote::opencode_log_forwarder::OpenCodeLogLayer
+        .with_filter(build_env_filter(log_level));
+
     tracing_subscriber::registry()
         .with(console_layer)
         .with(backend_file_layer)
         .with(aionrs_layer)
+        .with(opencode_log_layer)
         .init();
 
     LogGuards {

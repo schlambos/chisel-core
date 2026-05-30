@@ -196,6 +196,29 @@ impl ConversationService {
         self.task(conversation_id)?.get_effective_config().await
     }
 
+    /// M15: read the remote OpenCode server's LSP server statuses
+    /// (`GET /lsp`) — `[{id, name, root, status:"connected"|"error"}]`.
+    pub async fn get_lsp_status(&self, conversation_id: &str) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.get_lsp_status().await
+    }
+
+    /// M16: read the remote OpenCode server's VCS info (`GET /vcs`).
+    pub async fn get_vcs_info(&self, conversation_id: &str) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.get_vcs_info().await
+    }
+
+    /// M16: read the remote OpenCode server's working-tree status
+    /// (`GET /vcs/status`).
+    pub async fn get_vcs_status(&self, conversation_id: &str) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.get_vcs_status().await
+    }
+
+    /// M16: read the structured working-tree diff (`GET /vcs/diff?mode=…`).
+    /// `mode` is `"git"` (working tree vs HEAD) or `"branch"` (current vs default).
+    pub async fn get_vcs_diff(&self, conversation_id: &str, mode: &str) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.get_vcs_diff(mode).await
+    }
+
     // ── Model ───────────────────────────────────────────────────────
 
     pub async fn get_model(&self, conversation_id: &str) -> Result<GetModelInfoResponse, AppError> {

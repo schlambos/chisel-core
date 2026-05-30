@@ -499,6 +499,47 @@ impl AgentInstance {
         }
     }
 
+    /// M15 — read the remote OpenCode server's LSP status array (`GET /lsp`).
+    pub async fn get_lsp_status(&self) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_get_lsp_status().await,
+            _ => Err(AppError::BadRequest(
+                "LSP status is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M16 — read the remote OpenCode server's VCS info (`GET /vcs`).
+    pub async fn get_vcs_info(&self) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_get_vcs_info().await,
+            _ => Err(AppError::BadRequest(
+                "VCS is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M16 — read the remote OpenCode server's working-tree status
+    /// (`GET /vcs/status`).
+    pub async fn get_vcs_status(&self) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_get_vcs_status().await,
+            _ => Err(AppError::BadRequest(
+                "VCS is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M16 — read the structured working-tree diff (`GET /vcs/diff?mode=…`).
+    pub async fn get_vcs_diff(&self, mode: &str) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_get_vcs_diff(mode).await,
+            _ => Err(AppError::BadRequest(
+                "VCS is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
     /// Get the current session model info. Only ACP exposes a model
     /// catalog; other variants report `model_info = None` so the UI can
     /// hide the model picker without an error.

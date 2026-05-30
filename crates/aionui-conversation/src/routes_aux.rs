@@ -43,6 +43,10 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
             "/api/conversations/{id}/opencode/config/effective",
             get(get_effective_config),
         )
+        .route("/api/conversations/{id}/opencode/lsp", get(get_lsp_status))
+        .route("/api/conversations/{id}/opencode/vcs", get(get_vcs_info))
+        .route("/api/conversations/{id}/opencode/vcs/status", get(get_vcs_status))
+        .route("/api/conversations/{id}/opencode/vcs/diff", get(get_vcs_diff))
         .with_state(state)
 }
 
@@ -179,6 +183,52 @@ async fn get_effective_config(
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     Ok(Json(ApiResponse::ok(state.service.get_effective_config(&id).await?)))
+}
+
+/// M15: read the remote OpenCode server's LSP server statuses
+/// (`GET /lsp`). The renderer derives the header badge from this list.
+async fn get_lsp_status(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.get_lsp_status(&id).await?)))
+}
+
+/// M16: read the remote OpenCode server's VCS info (`GET /vcs`).
+async fn get_vcs_info(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.get_vcs_info(&id).await?)))
+}
+
+/// M16: read the remote OpenCode server's working-tree status (`GET /vcs/status`).
+async fn get_vcs_status(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.get_vcs_status(&id).await?)))
+}
+
+#[derive(serde::Deserialize)]
+struct VcsDiffQuery {
+    /// `"git"` (default) or `"branch"`. Anything else falls back to `"git"`.
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+/// M16: read the structured working-tree diff (`GET /vcs/diff?mode=…`).
+async fn get_vcs_diff(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    Query(query): Query<VcsDiffQuery>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    let mode = query.mode.as_deref().unwrap_or("git");
+    Ok(Json(ApiResponse::ok(state.service.get_vcs_diff(&id, mode).await?)))
 }
 
 /// M07: delete a remote OpenCode message (and its local row). `messageId` is
