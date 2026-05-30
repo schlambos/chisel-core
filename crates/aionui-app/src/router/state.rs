@@ -244,7 +244,10 @@ pub fn build_conversation_state(
         let encryption_key = derive_encryption_key(&services.jwt_secret_raw);
         let remote_repo = Arc::new(SqliteRemoteAgentRepository::new(services.database.pool().clone()));
         let remote_service = Arc::new(RemoteAgentService::new(remote_repo, encryption_key));
-        let hook = Arc::new(RemoteSessionSyncHook::new(remote_service, services.conversation_repo.clone()));
+        let hook = Arc::new(RemoteSessionSyncHook::new(
+            remote_service,
+            services.conversation_repo.clone(),
+        ));
         conversation_service.with_update_hook(hook);
     }
     ConversationRouterState {

@@ -179,6 +179,15 @@ impl ConversationService {
         user_id: &str,
         req: CreateConversationRequest,
     ) -> Result<ConversationResponse, AppError> {
+        self.create_inner(user_id, req, false).await
+    }
+
+    async fn create_inner(
+        &self,
+        user_id: &str,
+        req: CreateConversationRequest,
+        preserve_session_key: bool,
+    ) -> Result<ConversationResponse, AppError> {
         let id = generate_short_id();
         let now = now_ms();
         let source = req.source.unwrap_or(ConversationSource::Aionui);
@@ -265,14 +274,11 @@ impl ConversationService {
                 // Strip the stale cache field if a clone copied it in.
                 obj.remove("loaded_skills");
                 // A freshly created conversation must never inherit a prior
-                // session. `sessionKey` (OpenClaw / Remote-OpenCode resume id)
-                // is only ever written back to an *existing* row after a send;
-                // resume happens by rebuilding that same row, never via create.
-                // So if a clone copied `extra.sessionKey` in, drop it here so
-                // the new conversation starts a fresh server-side session.
-                // Authoritative backend guard covering all `create`/`clone_create`
-                // callers, independent of frontend clearing.
-                obj.remove("sessionKey");
+                // session unless the caller is binding a newly forked OpenCode
+                // session to a new local conversation.
+                if !preserve_session_key {
+                    obj.remove("sessionKey");
+                }
                 (preset, exclude)
             }
             None => (Vec::new(), Vec::new()),
@@ -719,7 +725,8 @@ impl ConversationService {
         user_id: &str,
         req: CloneConversationRequest,
     ) -> Result<ConversationResponse, AppError> {
-        self.create(user_id, req.conversation).await
+        self.create_inner(user_id, req.conversation, req.preserve_session_key)
+            .await
     }
 
     /// Reset a conversation: clear messages and set status back to pending.

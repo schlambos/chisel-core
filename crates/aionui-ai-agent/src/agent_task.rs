@@ -25,7 +25,8 @@ use crate::protocol::events::AgentStreamEvent;
 use crate::types::SendMessageData;
 
 use aionui_api_types::{
-    GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, SideQuestionRequest, SideQuestionResponse, SlashCommandItem,
+    GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, RemoteSkillInfo, SideQuestionRequest, SideQuestionResponse,
+    SlashCommandItem,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -128,6 +129,9 @@ pub trait IMockAgent: IAgentTask {
         Ok(None)
     }
     async fn get_slash_commands(&self) -> Result<Vec<SlashCommandItem>, AppError> {
+        Ok(Vec::new())
+    }
+    async fn get_skills(&self) -> Result<Vec<RemoteSkillInfo>, AppError> {
         Ok(Vec::new())
     }
     async fn handle_side_question(&self, _req: SideQuestionRequest) -> Result<SideQuestionResponse, AppError> {
@@ -391,6 +395,77 @@ impl AgentInstance {
         }
     }
 
+    /// M01: fork the remote OpenCode session (optionally from a message id).
+    /// Returns the new server-side session id.
+    pub async fn fork_remote_session(&self, message_id: Option<&str>) -> Result<String, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_fork(message_id).await,
+            _ => Err(AppError::BadRequest(
+                "Fork is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M02: revert the remote OpenCode session to a message/part.
+    pub async fn revert_remote_session(&self, message_id: &str, part_id: Option<&str>) -> Result<(), AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_revert(message_id, part_id).await,
+            _ => Err(AppError::BadRequest(
+                "Revert is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M02: restore all reverted messages on the remote OpenCode session.
+    pub async fn unrevert_remote_session(&self) -> Result<(), AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_unrevert().await,
+            _ => Err(AppError::BadRequest(
+                "Unrevert is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M04: summarize/compact the remote OpenCode session.
+    pub async fn summarize_remote_session(&self) -> Result<(), AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_summarize().await,
+            _ => Err(AppError::BadRequest(
+                "Summarize is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M03: share the remote OpenCode session. Returns the share URL.
+    pub async fn share_remote_session(&self) -> Result<String, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_share().await,
+            _ => Err(AppError::BadRequest(
+                "Share is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M03: unshare the remote OpenCode session.
+    pub async fn unshare_remote_session(&self) -> Result<(), AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_unshare().await,
+            _ => Err(AppError::BadRequest(
+                "Unshare is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M05: fetch the remote OpenCode session file diff (optionally per message).
+    pub async fn remote_session_diff(&self, message_id: Option<&str>) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_session_diff(message_id).await,
+            _ => Err(AppError::BadRequest(
+                "Diff is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
     /// Get the current session model info. Only ACP exposes a model
     /// catalog; other variants report `model_info = None` so the UI can
     /// hide the model picker without an error.
@@ -468,6 +543,18 @@ impl AgentInstance {
             Self::OpenClaw(_) | Self::Nanobot(_) => Ok(Vec::new()),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_slash_commands().await,
+        }
+    }
+
+    /// M10: server-side skill catalog (OpenCode `GET /skill`). Only the Remote
+    /// OpenCode variant exposes skills; other variants report an empty list so
+    /// the picker renders "no skills" rather than erroring.
+    pub async fn get_skills(&self) -> Result<Vec<RemoteSkillInfo>, AppError> {
+        match self {
+            Self::Remote(m) => m.get_skills_impl().await,
+            Self::Acp(_) | Self::Aionrs(_) | Self::OpenClaw(_) | Self::Nanobot(_) => Ok(Vec::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mock(m) => m.get_skills().await,
         }
     }
 

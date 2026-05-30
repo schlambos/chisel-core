@@ -47,9 +47,7 @@ pub fn lsp_ws_routes(state: LspRouterState) -> Router {
         .with_state(state)
 }
 
-async fn list_servers(
-    State(state): State<LspRouterState>,
-) -> Json<ApiResponse<Vec<LspServerInfoResponse>>> {
+async fn list_servers(State(state): State<LspRouterState>) -> Json<ApiResponse<Vec<LspServerInfoResponse>>> {
     let items: Vec<LspServerInfoResponse> = state
         .service
         .list_servers()

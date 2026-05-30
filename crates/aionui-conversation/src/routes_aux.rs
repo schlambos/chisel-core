@@ -1,7 +1,7 @@
 use crate::state::ConversationRouterState;
 use aionui_api_types::{
-    AgentModeResponse, ApiResponse, GetModelInfoResponse, SetModeRequest, SetModelRequest, SideQuestionRequest,
-    SideQuestionResponse, SlashCommandItem, WorkspaceBrowseQuery, WorkspaceEntry,
+    AgentModeResponse, ApiResponse, GetModelInfoResponse, RemoteSkillInfo, SetModeRequest, SetModelRequest,
+    SideQuestionRequest, SideQuestionResponse, SlashCommandItem, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 use aionui_auth::CurrentUser;
 use aionui_common::AppError;
@@ -16,6 +16,7 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
     Router::new()
         .route("/api/conversations/{id}/side-question", post(side_question))
         .route("/api/conversations/{id}/slash-commands", get(get_slash_commands))
+        .route("/api/conversations/{id}/skills", get(get_skills))
         .route("/api/conversations/{id}/usage", get(get_usage))
         .route("/api/conversations/{id}/mode", get(get_mode).put(set_mode))
         .route("/api/conversations/{id}/model", get(get_model).put(set_model))
@@ -25,7 +26,117 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
             "/api/conversations/{id}/opencode-message/{messageId}",
             delete(delete_opencode_message).put(edit_opencode_message),
         )
+        .route("/api/conversations/{id}/opencode/fork", post(fork_session))
+        .route("/api/conversations/{id}/opencode/revert", post(revert_session))
+        .route("/api/conversations/{id}/opencode/unrevert", post(unrevert_session))
+        .route("/api/conversations/{id}/opencode/summarize", post(summarize_session))
+        .route(
+            "/api/conversations/{id}/opencode/share",
+            post(share_session).delete(unshare_session),
+        )
+        .route("/api/conversations/{id}/opencode/diff", get(session_diff))
         .with_state(state)
+}
+
+#[derive(serde::Deserialize)]
+struct ForkRequest {
+    /// Local message row id to fork from. `None` forks from the latest message.
+    #[serde(default)]
+    message_id: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ForkResponse {
+    session_id: String,
+}
+
+async fn fork_session(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<ForkRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<ForkResponse>>, AppError> {
+    let from = body.ok().and_then(|Json(b)| b.message_id);
+    let session_id = state.service.fork_remote_session(&id, from.as_deref()).await?;
+    Ok(Json(ApiResponse::ok(ForkResponse { session_id })))
+}
+
+#[derive(serde::Deserialize)]
+struct RevertRequest {
+    /// Local message row id to revert to.
+    message_id: String,
+}
+
+async fn revert_session(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<RevertRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    state.service.revert_remote_session(&id, &req.message_id).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+async fn unrevert_session(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state.service.unrevert_remote_session(&id).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+async fn summarize_session(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state.service.summarize_remote_session(&id).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+#[derive(serde::Serialize)]
+struct ShareResponse {
+    url: String,
+}
+
+async fn share_session(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<ShareResponse>>, AppError> {
+    let url = state.service.share_remote_session(&id).await?;
+    Ok(Json(ApiResponse::ok(ShareResponse { url })))
+}
+
+async fn unshare_session(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state.service.unshare_remote_session(&id).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+#[derive(serde::Deserialize)]
+struct DiffQuery {
+    /// Local message row id to scope the diff to. `None` = whole session.
+    #[serde(default)]
+    message_id: Option<String>,
+}
+
+async fn session_diff(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    Query(query): Query<DiffQuery>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    let diff = state
+        .service
+        .remote_session_diff(&id, query.message_id.as_deref())
+        .await?;
+    Ok(Json(ApiResponse::ok(diff)))
 }
 
 /// M07: delete a remote OpenCode message (and its local row). `messageId` is
@@ -121,6 +232,15 @@ async fn get_slash_commands(
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<SlashCommandItem>>>, AppError> {
     Ok(Json(ApiResponse::ok(state.service.get_slash_commands(&id).await?)))
+}
+
+/// M10: server-side skill catalog (OpenCode `GET /skill`).
+async fn get_skills(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Vec<RemoteSkillInfo>>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.get_skills(&id).await?)))
 }
 
 async fn get_openclaw_runtime(

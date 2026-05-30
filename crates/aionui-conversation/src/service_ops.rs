@@ -11,7 +11,7 @@
 use std::path::Component;
 
 use aionui_api_types::{
-    AgentModeResponse, GetModelInfoResponse, SetModeRequest, SetModelRequest, SideQuestionRequest,
+    AgentModeResponse, GetModelInfoResponse, RemoteSkillInfo, SetModeRequest, SetModelRequest, SideQuestionRequest,
     SideQuestionResponse, SlashCommandItem, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 use aionui_common::AppError;
@@ -113,6 +113,67 @@ impl ConversationService {
         Ok(())
     }
 
+    // ── M01–M05: session lifecycle (fork / revert / share / summarize / diff) ──
+
+    /// M01: fork the remote session, optionally from a local message row id
+    /// (resolved to its OpenCode messageID). Returns the new OpenCode session id.
+    pub async fn fork_remote_session(
+        &self,
+        conversation_id: &str,
+        from_row_id: Option<&str>,
+    ) -> Result<String, AppError> {
+        let message_id = match from_row_id {
+            Some(row_id) => Some(self.resolve_opencode_message_id(conversation_id, row_id).await?),
+            None => None,
+        };
+        self.task(conversation_id)?
+            .fork_remote_session(message_id.as_deref())
+            .await
+    }
+
+    /// M02: revert the remote session to a local message row id.
+    pub async fn revert_remote_session(&self, conversation_id: &str, row_id: &str) -> Result<(), AppError> {
+        let message_id = self.resolve_opencode_message_id(conversation_id, row_id).await?;
+        self.task(conversation_id)?
+            .revert_remote_session(&message_id, None)
+            .await
+    }
+
+    /// M02: restore all reverted messages on the remote session.
+    pub async fn unrevert_remote_session(&self, conversation_id: &str) -> Result<(), AppError> {
+        self.task(conversation_id)?.unrevert_remote_session().await
+    }
+
+    /// M04: summarize/compact the remote session.
+    pub async fn summarize_remote_session(&self, conversation_id: &str) -> Result<(), AppError> {
+        self.task(conversation_id)?.summarize_remote_session().await
+    }
+
+    /// M03: share the remote session. Returns the share URL.
+    pub async fn share_remote_session(&self, conversation_id: &str) -> Result<String, AppError> {
+        self.task(conversation_id)?.share_remote_session().await
+    }
+
+    /// M03: unshare the remote session.
+    pub async fn unshare_remote_session(&self, conversation_id: &str) -> Result<(), AppError> {
+        self.task(conversation_id)?.unshare_remote_session().await
+    }
+
+    /// M05: fetch the remote session file diff (optionally for a message row id).
+    pub async fn remote_session_diff(
+        &self,
+        conversation_id: &str,
+        from_row_id: Option<&str>,
+    ) -> Result<serde_json::Value, AppError> {
+        let message_id = match from_row_id {
+            Some(row_id) => Some(self.resolve_opencode_message_id(conversation_id, row_id).await?),
+            None => None,
+        };
+        self.task(conversation_id)?
+            .remote_session_diff(message_id.as_deref())
+            .await
+    }
+
     // ── Model ───────────────────────────────────────────────────────
 
     pub async fn get_model(&self, conversation_id: &str) -> Result<GetModelInfoResponse, AppError> {
@@ -140,6 +201,12 @@ impl ConversationService {
             .await?
             .get_slash_commands()
             .await
+    }
+
+    /// M10: server-side skill catalog (OpenCode `GET /skill`). Returns an
+    /// empty list for non-OpenCode backends so the picker renders nothing.
+    pub async fn get_skills(&self, conversation_id: &str) -> Result<Vec<RemoteSkillInfo>, AppError> {
+        self.get_or_build_agent(conversation_id).await?.get_skills().await
     }
 
     // ── Side question ───────────────────────────────────────────────

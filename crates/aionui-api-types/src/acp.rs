@@ -59,6 +59,18 @@ pub struct AgentModeOption {
     pub description: Option<String>,
 }
 
+/// One available server-side skill (M10 — `GET /skill`).
+///
+/// Mirrors the OpenCode remote skill catalog entry: `{ name, description?, location, content }`.
+/// Only `name` and `description` are forwarded to the renderer — `location` and `content` are
+/// server-internal paths/markdown that have no meaning on the client machine.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteSkillInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// Request body for setting session mode.
 #[derive(Debug, Deserialize)]
 pub struct SetModeRequest {

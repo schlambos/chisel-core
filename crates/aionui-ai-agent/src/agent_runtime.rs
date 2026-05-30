@@ -249,6 +249,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_subscriber_does_not_receive_presubscribe_events() {
+        // Validates the core assumption behind the multi-turn relay: a relay
+        // that subscribes for turn N must NOT inherit a buffered terminal
+        // event emitted during turn N-1.
+        let rt = runtime();
+        rt.emit(AgentStreamEvent::Finish(FinishEventData { session_id: Some("stale".into()) }));
+        // Subscribe AFTER the stale Finish was already broadcast.
+        let mut rx = rt.subscribe();
+        assert!(
+            matches!(rx.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)),
+            "new subscriber must not see a Finish emitted before it subscribed"
+        );
+    }
+
+    #[tokio::test]
     async fn reset_for_new_turn_then_emit_finish_sends_event() {
         let rt = runtime();
         rt.emit_finish(None);

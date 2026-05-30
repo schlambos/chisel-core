@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use aionui_api_types::{AgentModeOption, SlashCommandItem};
+use aionui_api_types::{AgentModeOption, RemoteSkillInfo, SlashCommandItem};
 use aionui_common::{
     AgentKillReason, AgentType, AppError, Confirmation, ConversationStatus, ErrorChain, RemoteAgentStatus, TimestampMs,
     now_ms,
@@ -42,6 +42,25 @@ struct RemoteState {
     session_key: Option<String>,
     confirmations: Vec<Confirmation>,
     has_messages: bool,
+    /// Whether a root-session turn is currently in flight — armed when the
+    /// root session goes `busy` (turn start) and disarmed when we emit the
+    /// turn's terminal `Finish`. OpenCode emits a terminal trio per turn
+    /// (`message.updated finish=stop`, `session.status idle`, `session.idle`),
+    /// and a trailing `idle` from the previous turn can be delivered just as
+    /// the next turn's relay subscribes. Gating `Finish` on this flag (a) makes
+    /// the redundant idle/finish events no-ops within one turn, and (b) ignores
+    /// a stray pre-`busy` idle so it can't instantly terminate the new turn's
+    /// stream relay (the "2nd message returns nothing" bug). OpenCode always
+    /// sends `busy` before any real `idle`, so this never drops a real Finish.
+    root_turn_active: bool,
+    /// Locks out root `busy` events from re-arming `root_turn_active` after
+    /// `emit_root_turn_finish` has already fired for this user turn. OpenCode
+    /// emits a `busy → idle` finalization burst after `message.updated finish=stop`
+    /// — without this lockout that burst re-arms the gate and the trailing
+    /// `idle` emits a phantom Finish that lands on the NEXT user turn's relay
+    /// (the "2nd message returns nothing" bug). Cleared in `send_message` when
+    /// the user submits a new prompt.
+    finished_current_user_turn: bool,
     approval_memory: HashMap<String, bool>,
     connection_status: RemoteAgentStatus,
     opencode_session_id: Option<String>,
@@ -75,6 +94,11 @@ struct RemoteState {
     /// `None` before first fetch; `Some(vec)` afterwards. Defaults are merged in
     /// so older/failing servers still expose build/plan.
     opencode_agents: Option<Vec<AgentModeOption>>,
+    /// Cached OpenCode skill catalog from `GET /skill` (M10). `None` before
+    /// first fetch; `Some(vec)` afterwards (empty vec on fetch failure so we
+    /// don't retry every keystroke). Invalidated by `skill.updated` SSE events
+    /// so server-side edits surface without a full reconnect.
+    opencode_skills: Option<Vec<RemoteSkillInfo>>,
     /// Cached `model_id -> context_window` map (`GET /config/providers`).
     /// `None` before the first fetch; `Some(map)` afterwards (empty map on
     /// fetch failure is allowed so we don't retry every turn). Used to fill
@@ -563,6 +587,25 @@ fn normalize_base_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
 }
 
+/// Given an OpenCode `GET /session/{id}/message` response (an array of
+/// `{info:{id,...}, parts:[...]}`), return the id of the message that
+/// immediately follows `message_id`. Returns `None` when `message_id` is the
+/// last message or cannot be found — callers treat `None` as "fork from the
+/// tip" so no history is lost. Used to make "fork from here" inclusive of the
+/// selected message despite OpenCode's fork being exclusive (see
+/// `opencode_fork`).
+fn next_opencode_message_id(messages: &Value, message_id: &str) -> Option<String> {
+    let array = messages.as_array()?;
+    let ids: Vec<&str> = array
+        .iter()
+        .filter_map(|m| m.get("info").and_then(|i| i.get("id")).and_then(|v| v.as_str()))
+        .collect();
+    ids.iter()
+        .position(|id| *id == message_id)
+        .and_then(|idx| ids.get(idx + 1))
+        .map(|s| s.to_string())
+}
+
 fn build_auth_header(auth_type: &str, auth_token: Option<&str>) -> Option<String> {
     let token = auth_token.filter(|t| !t.is_empty())?;
     let value = match auth_type {
@@ -622,6 +665,31 @@ pub(crate) fn parse_opencode_agent_modes(body: &Value) -> Vec<AgentModeOption> {
     }
 
     modes
+}
+
+/// Parse the `GET /skill` response into a compact client-facing list.
+/// OpenCode returns `[{ name, description?, location, content }]`; we keep
+/// only `name` and `description` since the server-local paths and markdown
+/// content are not meaningful on the client machine.
+pub(crate) fn parse_opencode_skills(body: &Value) -> Vec<RemoteSkillInfo> {
+    let Some(items) = body.as_array() else {
+        return Vec::new();
+    };
+    let mut skills = Vec::with_capacity(items.len());
+    let mut seen: HashSet<String> = HashSet::new();
+    for item in items {
+        let Some(name) = item.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        skills.push(RemoteSkillInfo {
+            name: name.to_string(),
+            description: item.get("description").and_then(|v| v.as_str()).map(String::from),
+        });
+    }
+    skills
 }
 
 /// Build the canonical OpenCode permission-reply request `(url, body)` for a
@@ -1032,6 +1100,8 @@ impl RemoteAgentManager {
                 session_key: None,
                 confirmations: Vec::new(),
                 has_messages: false,
+                root_turn_active: false,
+                finished_current_user_turn: false,
                 approval_memory: HashMap::new(),
                 connection_status: RemoteAgentStatus::Unknown,
                 // Seed from the persisted `conversation.extra.sessionKey` so
@@ -1046,6 +1116,7 @@ impl RemoteAgentManager {
                 desired_agent: None,
                 opencode_commands: None,
                 opencode_agents: None,
+                opencode_skills: None,
                 model_context_limits: None,
                 pending_shell_approvals: HashMap::new(),
                 pending_elicitations: HashMap::new(),
@@ -1167,6 +1238,9 @@ impl RemoteAgentManager {
         // an empty list rather than retry — see `ensure_opencode_commands`.
         let _ = self.ensure_opencode_commands().await;
         let _ = self.ensure_opencode_agents().await;
+        // M10: prime the skill catalog so the picker is populated before
+        // the user types. Same failure mode as commands: empty list cached.
+        let _ = self.ensure_opencode_skills().await;
 
         let this = Arc::clone(self);
         // Prefer the canonical `/global/event` stream (events wrapped under
@@ -1418,6 +1492,19 @@ impl RemoteAgentManager {
                                 state.session_key = Some(sid.clone());
                             }
                             state.connection_status = RemoteAgentStatus::Connected;
+                            // Arm the turn: the root session is now producing.
+                            // Only a Finish that follows a root `busy` is real
+                            // (see `root_turn_active`). Child `busy` must not arm
+                            // the parent turn. Also: a stray root `busy` arriving
+                            // AFTER this turn's Finish has already been emitted
+                            // must not re-arm — OpenCode can fire a second
+                            // `busy → idle` burst as part of its post-completion
+                            // finalization, and re-arming would let that stray
+                            // `idle` emit a second Finish that lands on the next
+                            // user turn's relay (see `finished_current_user_turn`).
+                            if !is_child && !state.finished_current_user_turn {
+                                state.root_turn_active = true;
+                            }
                         }
                     }
                     Some("idle") => {
@@ -1447,11 +1534,7 @@ impl RemoteAgentManager {
                                 }
                             }
                         } else {
-                            self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
-                                session_id: session_id.clone(),
-                            }));
-                            self.runtime.transition_to(ConversationStatus::Finished);
-                            self.release_turn_slot().await;
+                            self.emit_root_turn_finish(session_id.clone()).await;
                         }
                     }
                     _ => {}
@@ -1480,11 +1563,7 @@ impl RemoteAgentManager {
                         }
                     }
                 } else {
-                    self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
-                        session_id: session_id.clone(),
-                    }));
-                    self.runtime.transition_to(ConversationStatus::Finished);
-                    self.release_turn_slot().await;
+                    self.emit_root_turn_finish(session_id.clone()).await;
                 }
             }
             "session.error" => {
@@ -1747,10 +1826,7 @@ impl RemoteAgentManager {
                                 }
                             }
 
-                            self.runtime.emit(AgentStreamEvent::Finish(FinishEventData {
-                                session_id: session_id.clone(),
-                            }));
-                            self.release_turn_slot().await;
+                            self.emit_root_turn_finish(session_id.clone()).await;
                         }
                     }
                 }
@@ -2125,6 +2201,15 @@ impl RemoteAgentManager {
                     "OpenCode server reported an installation update"
                 );
             }
+            "skill.updated" => {
+                // M10: server-side skill catalog changed (created/edited/deleted).
+                // Invalidate the local cache so the next picker query re-fetches.
+                self.state.write().await.opencode_skills = None;
+                debug!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    "M10: OpenCode skill catalog invalidated by skill.updated"
+                );
+            }
             other => {
                 // Full event coverage (E02 §3.4): a known-but-intentionally-
                 // unhandled event is acknowledged at `trace` so the noisy global
@@ -2409,6 +2494,55 @@ impl RemoteAgentManager {
         fetched
     }
 
+    /// Populate the cached OpenCode skill catalog from `GET /skill` (M10).
+    /// Returns an empty vec on fetch failure so we don't retry every query.
+    /// Cache is invalidated by `skill.updated` SSE events.
+    async fn ensure_opencode_skills(&self) -> Vec<RemoteSkillInfo> {
+        {
+            let guard = self.state.read().await;
+            if let Some(ref cached) = guard.opencode_skills {
+                return cached.clone();
+            }
+        }
+
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        let mut req = self
+            .http_client
+            .get(format!("{base_url}/skill"))
+            .timeout(Duration::from_secs(10));
+        if let Some(ref h) = auth_header {
+            req = req.header(AUTHORIZATION, h.as_str());
+        }
+
+        let fetched = match req.send().await {
+            Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
+                Ok(body) => parse_opencode_skills(&body),
+                Err(e) => {
+                    warn!(error = %e, "M10: failed to parse OpenCode skill catalog");
+                    Vec::new()
+                }
+            },
+            Ok(resp) => {
+                warn!(status = %resp.status(), "M10: OpenCode skill catalog request failed");
+                Vec::new()
+            }
+            Err(e) => {
+                warn!(error = %e, "M10: failed to fetch OpenCode skill catalog");
+                Vec::new()
+            }
+        };
+
+        debug!(
+            conversation_id = %self.runtime.conversation_id(),
+            skill_count = fetched.len(),
+            "M10: populated OpenCode skill cache"
+        );
+        let mut guard = self.state.write().await;
+        guard.opencode_skills = Some(fetched.clone());
+        fetched
+    }
+
     /// Resolve a model's context window (in tokens) from OpenCode's provider
     /// catalog, fetching and caching it on first use. Returns `0` when the
     /// model is unknown or the catalog can't be reached — the renderer then
@@ -2442,6 +2576,15 @@ impl RemoteAgentManager {
         }
         let cmds = self.ensure_opencode_commands().await;
         Ok(cmds.iter().map(OpenCodeCommand::to_slash_item).collect())
+    }
+
+    /// M10: server-side skill catalog exposed via `IAgentTask::get_skills`
+    /// for the Remote variant. Empty for non-opencode protocols.
+    pub async fn get_skills_impl(&self) -> Result<Vec<RemoteSkillInfo>, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Ok(Vec::new());
+        }
+        Ok(self.ensure_opencode_skills().await)
     }
 
     /// Fetch available models from OpenCode and emit them to the frontend.
@@ -2592,6 +2735,32 @@ impl RemoteAgentManager {
     async fn release_turn_slot(&self) {
         let base_url = normalize_base_url(&self.remote_config.url);
         opencode_mcp::release_turn(&base_url, self.runtime.conversation_id()).await;
+    }
+
+    /// Emit the root turn's terminal `Finish` exactly once. No-op unless the
+    /// turn was armed by a root `session.status busy` (see `root_turn_active`).
+    /// This collapses OpenCode's redundant per-turn terminal trio
+    /// (`message.updated finish=stop` + `session.status idle` + `session.idle`)
+    /// into a single `Finish`, and — critically — ignores a stray trailing
+    /// `idle` from the previous turn that can arrive just after the next turn's
+    /// stream relay subscribes, which otherwise terminated the new turn
+    /// instantly (the "2nd message never gets a reply" bug).
+    async fn emit_root_turn_finish(&self, session_id: Option<String>) {
+        {
+            let mut state = self.state.write().await;
+            if !state.root_turn_active {
+                return;
+            }
+            state.root_turn_active = false;
+            // Lock out subsequent root `busy` events for this user turn so
+            // OpenCode's post-completion `busy → idle` finalization burst
+            // can't re-arm the gate and emit a phantom second Finish.
+            // Cleared in `send_message` when the user submits the next prompt.
+            state.finished_current_user_turn = true;
+        }
+        self.runtime.emit(AgentStreamEvent::Finish(FinishEventData { session_id }));
+        self.runtime.transition_to(ConversationStatus::Finished);
+        self.release_turn_slot().await;
     }
 
     /// Ensure this conversation owns the OpenCode `aionui-local-fs` slot
@@ -2842,6 +3011,162 @@ impl RemoteAgentManager {
         Ok(())
     }
 
+    /// Shared request helper for OpenCode session-scoped actions (M01–M05).
+    /// Issues `<method> /session/{id}{subpath}` with optional JSON body and
+    /// returns the parsed JSON response (or `Null` when the body is empty).
+    async fn opencode_session_request(
+        &self,
+        method: reqwest::Method,
+        subpath: &str,
+        body: Option<Value>,
+        timeout_secs: u64,
+    ) -> Result<Value, AppError> {
+        let session_id = self.require_opencode_session().await?;
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let url = format!("{base_url}/session/{session_id}{subpath}");
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+
+        let mut req = self
+            .http_client
+            .request(method, &url)
+            .timeout(Duration::from_secs(timeout_secs));
+        if let Some(ref b) = body {
+            req = req.json(b);
+        }
+        if let Some(ref h) = auth_header {
+            req = req.header(AUTHORIZATION, h.as_str());
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::BadGateway(format!("OpenCode session request failed: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(AppError::BadGateway(format!(
+                "OpenCode session request returned {status}: {body_text}"
+            )));
+        }
+        let text = resp.text().await.unwrap_or_default();
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text)
+            .map_err(|e| AppError::BadGateway(format!("OpenCode session response was not JSON: {e}")))
+    }
+
+    /// M01: fork the session (optionally from a specific message). Returns the
+    /// new server-side session id.
+    ///
+    /// OpenCode's `POST /session/{id}/fork` with `messageID` is **exclusive** —
+    /// it keeps only the messages *strictly before* that message (verified
+    /// against the live server: forking at the first message yields an empty
+    /// session). "Fork from here" must be **inclusive** of the message the user
+    /// clicked, so we fork at the message that *follows* it. When the selected
+    /// message is the last one (or none is given, i.e. a header/session-level
+    /// fork), we omit `messageID` entirely and OpenCode copies the whole
+    /// transcript.
+    pub async fn opencode_fork(&self, message_id: Option<&str>) -> Result<String, AppError> {
+        let fork_at = match message_id.filter(|m| m.starts_with("msg")) {
+            Some(m) => self.opencode_message_after(m).await?,
+            None => None,
+        };
+        let body = fork_at
+            .as_deref()
+            .map(|m| json!({ "messageID": m }))
+            .unwrap_or_else(|| json!({}));
+        let resp = self
+            .opencode_session_request(reqwest::Method::POST, "/fork", Some(body), 30)
+            .await?;
+        resp.get("id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| AppError::BadGateway(format!("OpenCode fork response missing id: {resp}")))
+    }
+
+    /// Return the id of the OpenCode message immediately following `message_id`
+    /// in the current session's transcript, or `None` when `message_id` is the
+    /// last message (so the caller forks from the tip and includes everything).
+    /// Also returns `None` if the message can't be located — forking from the
+    /// tip is the safe, non-lossy fallback.
+    async fn opencode_message_after(&self, message_id: &str) -> Result<Option<String>, AppError> {
+        let resp = self
+            .opencode_session_request(reqwest::Method::GET, "/message", None, 30)
+            .await?;
+        Ok(next_opencode_message_id(&resp, message_id))
+    }
+
+    /// M02: revert the session to a message (and optionally a specific part).
+    pub async fn opencode_revert(&self, message_id: &str, part_id: Option<&str>) -> Result<(), AppError> {
+        let mut body = json!({ "messageID": message_id });
+        if let Some(pid) = part_id.filter(|p| p.starts_with("prt")) {
+            body["partID"] = json!(pid);
+        }
+        self.opencode_session_request(reqwest::Method::POST, "/revert", Some(body), 30)
+            .await
+            .map(|_| ())
+    }
+
+    /// M02: restore all reverted messages.
+    pub async fn opencode_unrevert(&self) -> Result<(), AppError> {
+        self.opencode_session_request(reqwest::Method::POST, "/unrevert", None, 30)
+            .await
+            .map(|_| ())
+    }
+
+    /// M04: summarize/compact the session. Uses the session's current desired
+    /// model; errors if none is selected yet.
+    pub async fn opencode_summarize(&self) -> Result<(), AppError> {
+        let (provider_id, model_id) = {
+            let state = self.state.read().await;
+            let m = state
+                .desired_model
+                .as_ref()
+                .ok_or_else(|| AppError::BadRequest("Select a model before summarizing".into()))?;
+            let provider = m.get("providerID").and_then(|v| v.as_str()).unwrap_or("opencode-go");
+            let model = m
+                .get("modelID")
+                .or_else(|| m.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AppError::BadRequest("Current model id is unavailable".into()))?;
+            (provider.to_string(), model.to_string())
+        };
+        let body = json!({ "providerID": provider_id, "modelID": model_id });
+        self.opencode_session_request(reqwest::Method::POST, "/summarize", Some(body), 60)
+            .await
+            .map(|_| ())
+    }
+
+    /// M03: create a shareable link for the session. Returns the share URL.
+    pub async fn opencode_share(&self) -> Result<String, AppError> {
+        let resp = self
+            .opencode_session_request(reqwest::Method::POST, "/share", None, 15)
+            .await?;
+        resp.get("share")
+            .and_then(|s| s.get("url"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| AppError::BadGateway(format!("OpenCode share response missing share.url: {resp}")))
+    }
+
+    /// M03: revoke the session's shareable link.
+    pub async fn opencode_unshare(&self) -> Result<(), AppError> {
+        self.opencode_session_request(reqwest::Method::DELETE, "/share", None, 15)
+            .await
+            .map(|_| ())
+    }
+
+    /// M05: fetch the session's file diff snapshot (optionally for a specific
+    /// message). Returns the `SnapshotFileDiff[]` array as JSON.
+    pub async fn opencode_session_diff(&self, message_id: Option<&str>) -> Result<Value, AppError> {
+        let subpath = match message_id.filter(|m| m.starts_with("msg")) {
+            Some(mid) => format!("/diff?messageID={mid}"),
+            None => "/diff".to_string(),
+        };
+        self.opencode_session_request(reqwest::Method::GET, &subpath, None, 30)
+            .await
+    }
+
     async fn opencode_create_session(&self, base_url: &str) -> Result<String, AppError> {
         let url = format!("{base_url}/session");
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
@@ -2925,7 +3250,12 @@ impl RemoteAgentManager {
     /// step the raw `/cmd` string would be forwarded to the LLM as-is.
     /// Unknown `/cmd` strings fall through unchanged — the user may
     /// have typed something the server doesn't advertise.
-    async fn opencode_send(&self, content: &str, opencode_message_id: Option<&str>) -> Result<(), AppError> {
+    async fn opencode_send(
+        &self,
+        content: &str,
+        opencode_message_id: Option<&str>,
+        inject_skills: &[String],
+    ) -> Result<(), AppError> {
         let base_url = normalize_base_url(&self.remote_config.url);
         let conversation_id = self.runtime.conversation_id().to_string();
 
@@ -2942,7 +3272,7 @@ impl RemoteAgentManager {
         opencode_mcp::acquire_turn(&base_url, &conversation_id).await;
 
         let result = self
-            .opencode_send_after_acquire(content, &base_url, opencode_message_id)
+            .opencode_send_after_acquire(content, &base_url, opencode_message_id, inject_skills)
             .await;
         if result.is_err() {
             // No prompt was dispatched (or it was rejected outright) — no
@@ -2963,6 +3293,7 @@ impl RemoteAgentManager {
         content: &str,
         base_url: &str,
         opencode_message_id: Option<&str>,
+        inject_skills: &[String],
     ) -> Result<(), AppError> {
         let base_url = base_url.to_string();
         // Re-confirm ownership of the OpenCode `aionui-local-fs` slot
@@ -3121,10 +3452,15 @@ impl RemoteAgentManager {
             "parts": [{"type": "text", "text": prompt_text}],
         });
         // M07: when the caller owns the OpenCode message id (`^msg…`), send it
-        // so the user message is addressable for later edit/delete. Only valid
-        // on a freshly created session — on a context-prefixed rebroker the
-        // prompt text differs, but the id still uniquely identifies the row.
-        if let Some(mid) = opencode_message_id.filter(|m| m.starts_with("msg")) {
+        // so the user message is addressable for later edit/delete. ONLY valid
+        // on a freshly created session — sending `body.messageID` on a session
+        // that already has prior turns makes OpenCode silently skip the model
+        // invocation (the user message is created but no assistant response is
+        // generated, emitting only `session.status busy → idle`). This was the
+        // root of the "2nd message returns nothing" bug.
+        if session_just_created
+            && let Some(mid) = opencode_message_id.filter(|m| m.starts_with("msg"))
+        {
             body["messageID"] = json!(mid);
         }
         if let Some(hint) = system_hint {
@@ -3143,6 +3479,13 @@ impl RemoteAgentManager {
         }
         if let Some(ref a) = agent {
             body["agent"] = json!(a);
+        }
+        // M10: pass selected server-side skills into the prompt body so the
+        // model can load the matching SKILL.md content. OpenCode's
+        // `prompt_async` accepts `skills: string[]` (skill names matching the
+        // `GET /skill` catalog). Empty array omitted to avoid wire noise.
+        if !inject_skills.is_empty() {
+            body["skills"] = json!(inject_skills);
         }
 
         // Surface the silent failure mode where the system hint instructs the
@@ -3530,6 +3873,9 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             let mut state = self.state.write().await;
             let first = !state.has_messages;
             state.has_messages = true;
+            // Clear the post-Finish lockout so the new user turn's root `busy`
+            // can arm `root_turn_active` again. See `finished_current_user_turn`.
+            state.finished_current_user_turn = false;
             first
         };
         self.runtime.transition_to(ConversationStatus::Running);
@@ -3538,7 +3884,7 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             if is_first {
                 self.emit_model_info().await;
             }
-            self.opencode_send(&data.content, data.opencode_message_id.as_deref())
+            self.opencode_send(&data.content, data.opencode_message_id.as_deref(), &data.inject_skills)
                 .await
         } else if is_first {
             let payload = json!({
@@ -4294,6 +4640,41 @@ mod tests {
     use super::*;
     use crate::agent_task::IAgentTask;
 
+    // ---- M01: inclusive fork message resolution ----------------------------
+
+    fn sample_transcript() -> Value {
+        serde_json::json!([
+            { "info": { "id": "msg_u1", "role": "user" }, "parts": [] },
+            { "info": { "id": "msg_a1", "role": "assistant" }, "parts": [] },
+            { "info": { "id": "msg_a2", "role": "assistant" }, "parts": [] },
+            { "info": { "id": "msg_u2", "role": "user" }, "parts": [] },
+        ])
+    }
+
+    #[test]
+    fn next_opencode_message_id_returns_following_message() {
+        let t = sample_transcript();
+        // Forking "from here" at msg_u1 must include msg_u1, so we fork at the
+        // next message (msg_a1) since OpenCode's fork is exclusive.
+        assert_eq!(next_opencode_message_id(&t, "msg_u1"), Some("msg_a1".to_string()));
+        assert_eq!(next_opencode_message_id(&t, "msg_a2"), Some("msg_u2".to_string()));
+    }
+
+    #[test]
+    fn next_opencode_message_id_last_message_is_none() {
+        let t = sample_transcript();
+        // Last message → None → caller forks from the tip (copies everything).
+        assert_eq!(next_opencode_message_id(&t, "msg_u2"), None);
+    }
+
+    #[test]
+    fn next_opencode_message_id_unknown_or_malformed_is_none() {
+        let t = sample_transcript();
+        assert_eq!(next_opencode_message_id(&t, "msg_missing"), None);
+        // Non-array payloads must not panic.
+        assert_eq!(next_opencode_message_id(&serde_json::json!({}), "msg_u1"), None);
+    }
+
     // ---- E02: event-coverage classifier -----------------------------------
 
     #[test]
@@ -4531,6 +4912,16 @@ mod tests {
         let agent = opencode_test_agent().await;
         let mut rx = agent.runtime.subscribe();
 
+        // Arm the turn: OpenCode always sends `session.status busy` before any
+        // assistant output. `Finish` is only emitted for a turn that was armed
+        // by a root `busy` (see `root_turn_active` / `emit_root_turn_finish`).
+        let busy_event = json!({
+            "type": "session.status",
+            "properties": { "sessionID": "sess_1", "status": { "type": "busy" } }
+        })
+        .to_string();
+        agent.handle_opencode_sse_event(&busy_event).await;
+
         // Two `message.updated` payloads for the same assistant message.
         // OpenCode fires this event multiple times per message (creation,
         // every part update, finish); we should only emit `AssistantModelInfo`
@@ -4591,6 +4982,94 @@ mod tests {
             events.iter().any(|e| matches!(e, AgentStreamEvent::Finish(_))),
             "Finish event not emitted on stop"
         );
+    }
+
+    #[tokio::test]
+    async fn stray_idle_before_busy_does_not_emit_finish() {
+        // Regression: a trailing `session.idle`/`finish=stop` from the previous
+        // turn can be delivered just as the next turn's stream relay subscribes.
+        // Without a preceding root `busy` it must NOT emit `Finish`, otherwise
+        // the new turn is terminated instantly and the user never gets a reply.
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        let idle_status = json!({
+            "type": "session.status",
+            "properties": { "sessionID": "sess_1", "status": { "type": "idle" } }
+        })
+        .to_string();
+        let session_idle = json!({
+            "type": "session.idle",
+            "properties": { "sessionID": "sess_1" }
+        })
+        .to_string();
+        let finish_stop = json!({
+            "type": "message.updated",
+            "properties": { "sessionID": "sess_1", "info": { "id": "msg_stale", "role": "assistant", "finish": "stop" } }
+        })
+        .to_string();
+        agent.handle_opencode_sse_event(&idle_status).await;
+        agent.handle_opencode_sse_event(&session_idle).await;
+        agent.handle_opencode_sse_event(&finish_stop).await;
+
+        let events = drain_events(&mut rx);
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentStreamEvent::Finish(_))),
+            "stray terminal events before a root `busy` must not emit Finish"
+        );
+    }
+
+    #[tokio::test]
+    async fn stray_busy_after_finish_does_not_rearm_for_phantom_second_finish() {
+        // Regression for the "2nd message returns nothing" bug. OpenCode emits
+        // a `busy → idle` finalization burst AFTER `message.updated finish=stop`
+        // — without the `finished_current_user_turn` lockout, the trailing
+        // `busy` re-armed `root_turn_active` and the next `idle` fired a
+        // phantom Finish that landed on the NEXT user turn's stream relay,
+        // terminating it instantly with text_len=0.
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        // Turn 1: real flow + finalization burst that used to re-arm the gate.
+        for ev in [
+            json!({"type":"session.status","properties":{"sessionID":"sess_1","status":{"type":"busy"}}}),
+            json!({"type":"message.updated","properties":{"sessionID":"sess_1","info":{"id":"msg_1","role":"assistant","finish":"stop"}}}),
+            // Post-completion finalization burst — these used to emit a 2nd Finish.
+            json!({"type":"session.status","properties":{"sessionID":"sess_1","status":{"type":"busy"}}}),
+            json!({"type":"session.status","properties":{"sessionID":"sess_1","status":{"type":"idle"}}}),
+            json!({"type":"session.idle","properties":{"sessionID":"sess_1"}}),
+        ] {
+            agent.handle_opencode_sse_event(&ev.to_string()).await;
+        }
+
+        let events = drain_events(&mut rx);
+        let finishes = events.iter().filter(|e| matches!(e, AgentStreamEvent::Finish(_))).count();
+        assert_eq!(
+            finishes, 1,
+            "stray `busy` after the turn's Finish must not re-arm the gate and emit a second Finish; got {finishes}"
+        );
+    }
+
+    #[tokio::test]
+    async fn armed_turn_emits_exactly_one_finish_for_terminal_trio() {
+        // A single real turn fires OpenCode's terminal trio (finish=stop +
+        // session.status idle + session.idle). After arming with `busy`, the
+        // gate must collapse them into exactly one `Finish`.
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+
+        for ev in [
+            json!({"type":"session.status","properties":{"sessionID":"sess_1","status":{"type":"busy"}}}),
+            json!({"type":"message.updated","properties":{"sessionID":"sess_1","info":{"id":"msg_1","role":"assistant","finish":"stop"}}}),
+            json!({"type":"session.status","properties":{"sessionID":"sess_1","status":{"type":"idle"}}}),
+            json!({"type":"session.idle","properties":{"sessionID":"sess_1"}}),
+        ] {
+            agent.handle_opencode_sse_event(&ev.to_string()).await;
+        }
+
+        let events = drain_events(&mut rx);
+        let finishes = events.iter().filter(|e| matches!(e, AgentStreamEvent::Finish(_))).count();
+        assert_eq!(finishes, 1, "expected exactly one Finish for the terminal trio, got {finishes}");
     }
 
     #[tokio::test]

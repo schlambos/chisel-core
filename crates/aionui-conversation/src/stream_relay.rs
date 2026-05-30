@@ -118,7 +118,7 @@ impl StreamRelay {
                 Ok(event) => match &event {
                     AgentStreamEvent::Thinking(data) => {
                         if data.status.as_deref() == Some("done") {
-                            self.complete_active_thinking(&mut active_thinking).await;
+                            self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
                             continue;
                         }
 
@@ -139,7 +139,7 @@ impl StreamRelay {
                         self.forward_to_websocket_with_msg_id(&segment.id, &event);
                     }
                     AgentStreamEvent::Text(data) => {
-                        self.complete_active_thinking(&mut active_thinking).await;
+                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
 
                         let is_new_segment = active_text.is_none();
                         let segment = active_text.get_or_insert_with(|| TextSegmentState {
@@ -190,7 +190,7 @@ impl StreamRelay {
                             "StreamRelay received terminal event"
                         );
 
-                        self.complete_active_thinking(&mut active_thinking).await;
+                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
                         self.close_active_text_segment(
                             &mut active_text,
                             &mut text_segments,
@@ -212,7 +212,7 @@ impl StreamRelay {
                         break outcome;
                     }
                     AgentStreamEvent::ToolCall(data) => {
-                        self.complete_active_thinking(&mut active_thinking).await;
+                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
                         self.close_active_text_segment(
                             &mut active_text,
                             &mut text_segments,
@@ -224,7 +224,7 @@ impl StreamRelay {
                         self.persist_tool_call(data).await;
                     }
                     AgentStreamEvent::AcpToolCall(data) => {
-                        self.complete_active_thinking(&mut active_thinking).await;
+                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
                         self.close_active_text_segment(
                             &mut active_text,
                             &mut text_segments,
@@ -244,7 +244,7 @@ impl StreamRelay {
                         self.forward_to_websocket(&event);
                     }
                     AgentStreamEvent::ToolGroup(entries) => {
-                        self.complete_active_thinking(&mut active_thinking).await;
+                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
                         self.close_active_text_segment(
                             &mut active_text,
                             &mut text_segments,
@@ -267,7 +267,7 @@ impl StreamRelay {
                         "StreamRelay channel closed without terminal event"
                     );
 
-                    self.complete_active_thinking(&mut active_thinking).await;
+                    self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
                     self.close_active_text_segment(
                         &mut active_text,
                         &mut text_segments,
@@ -349,6 +349,9 @@ impl StreamRelay {
                 "model": {
                     "provider_id": m.provider_id,
                     "model_id": m.model_id,
+                },
+                "_opencode": {
+                    "message_id": m.message_id,
                 }
             })
             .to_string(),
@@ -530,7 +533,7 @@ impl StreamRelay {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn complete_active_thinking(&self, active_thinking: &mut Option<ThinkingSegmentState>) {
+    async fn complete_active_thinking(&self, active_thinking: &mut Option<ThinkingSegmentState>, model: Option<&AssistantModelInfoEventData>) {
         let Some(segment) = active_thinking.take() else {
             return;
         };
@@ -539,12 +542,15 @@ impl StreamRelay {
         if segment.buffer.is_empty() {
             return;
         }
-        let content = json!({
+        let mut content_value = json!({
             "content": segment.buffer,
             "status": "done",
             "duration_ms": duration_ms,
-        })
-        .to_string();
+        });
+        if let Some(m) = model {
+            content_value["_opencode"] = json!({ "message_id": m.message_id });
+        }
+        let content = content_value.to_string();
         let row = MessageRow {
             id: segment.id.clone(),
             conversation_id: self.conversation_id.clone(),
@@ -953,6 +959,27 @@ mod tests {
 
         let content: serde_json::Value = serde_json::from_str(&msg.content).unwrap();
         assert_eq!(content["content"], "Hello World");
+    }
+
+    #[test]
+    fn build_text_content_json_stamps_opencode_message_id() {
+        // With model info (OpenCode assistant turn) the row must carry the
+        // server message id so M01/M02 (fork/revert) can resolve it.
+        let model = AssistantModelInfoEventData {
+            message_id: "msg_live_1".into(),
+            provider_id: "google".into(),
+            model_id: "antigravity".into(),
+        };
+        let json = StreamRelay::build_text_content_json("hi", Some(&model));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["content"], "hi");
+        assert_eq!(parsed["model"]["provider_id"], "google");
+        assert_eq!(parsed["_opencode"]["message_id"], "msg_live_1");
+
+        // Without model info (e.g. local agents) there is no `_opencode` block.
+        let json_none = StreamRelay::build_text_content_json("hi", None);
+        let parsed_none: serde_json::Value = serde_json::from_str(&json_none).unwrap();
+        assert!(parsed_none.get("_opencode").is_none());
     }
 
     #[tokio::test]

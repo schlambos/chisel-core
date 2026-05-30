@@ -68,10 +68,7 @@ impl LspService {
     }
 
     pub fn list_servers(&self) -> Vec<ServerStatus> {
-        languages::LANGUAGES
-            .iter()
-            .map(Self::status_for)
-            .collect()
+        languages::LANGUAGES.iter().map(Self::status_for).collect()
     }
 
     fn status_for(cfg: &'static LanguageConfig) -> ServerStatus {
@@ -88,8 +85,7 @@ impl LspService {
     /// spawned lazily by `attach_transport` so that a renderer that calls
     /// `/start` then never opens the WebSocket does not leave a zombie.
     pub fn start_session(&self, language: &str, workspace: Option<String>) -> Result<String, LspError> {
-        let cfg = languages::find(language)
-            .ok_or_else(|| LspError::UnsupportedLanguage(language.to_owned()))?;
+        let cfg = languages::find(language).ok_or_else(|| LspError::UnsupportedLanguage(language.to_owned()))?;
         if languages::locate(cfg.command).is_none() {
             return Err(LspError::NotInstalled {
                 command: cfg.command,
@@ -131,8 +127,8 @@ impl LspService {
             .ok_or_else(|| LspError::SessionNotFound(session_id.to_owned()))?
             .clone();
 
-        let cfg = languages::find(sess.language)
-            .ok_or_else(|| LspError::UnsupportedLanguage(sess.language.to_owned()))?;
+        let cfg =
+            languages::find(sess.language).ok_or_else(|| LspError::UnsupportedLanguage(sess.language.to_owned()))?;
 
         if sess.attached.swap(true, Ordering::SeqCst) {
             return Err(LspError::SessionAlreadyAttached(session_id.to_owned()));
@@ -150,9 +146,7 @@ impl LspService {
             builder.current_dir(ws);
         }
 
-        let mut child = builder
-            .spawn()
-            .map_err(|e| LspError::SpawnFailed(e.to_string()))?;
+        let mut child = builder.spawn().map_err(|e| LspError::SpawnFailed(e.to_string()))?;
         let stdin = child
             .stdin
             .take()

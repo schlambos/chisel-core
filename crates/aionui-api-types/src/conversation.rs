@@ -37,6 +37,8 @@ pub struct UpdateConversationRequest {
 #[derive(Debug, Deserialize)]
 pub struct CloneConversationRequest {
     pub conversation: CreateConversationRequest,
+    #[serde(default)]
+    pub preserve_session_key: bool,
 }
 
 /// Body for `POST /api/conversations/:id/messages`.
@@ -336,6 +338,7 @@ mod tests {
         });
         let req: CloneConversationRequest = serde_json::from_value(raw).unwrap();
         assert_eq!(req.conversation.r#type, AgentType::Acp);
+        assert!(!req.preserve_session_key);
     }
 
     // ── ListConversationsQuery ──────────────────────────────────────

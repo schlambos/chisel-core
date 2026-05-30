@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use aionui_api_types::{
     CreateRemoteAgentRequest, HandshakeResponse, ModelInfoEntry, ModelInfoPayload, RemoteAgentListItem,
-    RemoteAgentResponse, RemoteSessionInfo, TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
+    RemoteAgentResponse, RemoteSessionInfo, RemoteSkillInfo, TestRemoteAgentConnectionRequest,
+    UpdateRemoteAgentRequest,
 };
 use aionui_common::{
     AppError, RemoteAgentAuthType, RemoteAgentProtocol, RemoteAgentStatus, decrypt_string, encrypt_string,
@@ -280,6 +281,33 @@ impl RemoteAgentService {
         let auth_type = parse_auth_type(&row.auth_type);
         let auth_token = decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
         fetch_opencode_agents(&row.url, auth_type, auth_token.as_deref(), row.allow_insecure).await
+    }
+
+    /// M10: fetch the OpenCode skill catalog (`GET /skill`) and map it to the
+    /// selectable list the renderer's skill picker on the Guid (New Chat) page
+    /// consumes. Used before any conversation is created — so we cannot go
+    /// through the per-conversation `/skills` endpoint. Mirrors
+    /// [`fetch_agents`]: reads the row, decrypts the auth token (the
+    /// plaintext never leaves the Rust process), and returns a normalised
+    /// skill list. OpenCode-only.
+    pub async fn fetch_skills(&self, id: &str) -> Result<Vec<RemoteSkillInfo>, AppError> {
+        let row = self
+            .repo
+            .find_by_id(id)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::NotFound(format!("Remote agent '{id}' not found")))?;
+
+        let protocol = parse_protocol(&row.protocol);
+        if protocol != RemoteAgentProtocol::OpenCode {
+            return Err(AppError::BadRequest(
+                "Skill list is only supported for OpenCode remote agents".into(),
+            ));
+        }
+
+        let auth_type = parse_auth_type(&row.auth_type);
+        let auth_token = decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
+        fetch_opencode_skills(&row.url, auth_type, auth_token.as_deref(), row.allow_insecure).await
     }
 
     /// List active sessions on a remote OpenCode agent.  Proxies the
@@ -603,6 +631,44 @@ async fn fetch_opencode_agents(
         .await
         .map_err(|e| AppError::BadGateway(format!("OpenCode agent response was not JSON: {e}")))?;
     Ok(parse_opencode_agent_modes(&body))
+}
+
+/// Fetch the OpenCode `/skill` catalog and map it to the selectable skill
+/// list the renderer's Guid-page skill picker consumes. Mirrors
+/// [`fetch_opencode_agents`]: returns an empty list (not an error) on
+/// transient failure so the New Chat page degrades gracefully when the skill
+/// catalog is unreachable or the server is an older build without `/skill`.
+async fn fetch_opencode_skills(
+    url: &str,
+    auth_type: RemoteAgentAuthType,
+    auth_token: Option<&str>,
+    allow_insecure: bool,
+) -> Result<Vec<RemoteSkillInfo>, AppError> {
+    use crate::manager::remote::agent::parse_opencode_skills;
+
+    let base_url = normalize_opencode_base_url(url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .danger_accept_invalid_certs(allow_insecure)
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))?;
+    let response = client
+        .get(format!("{base_url}/skill"))
+        .headers(build_opencode_auth_headers(auth_type, auth_token)?)
+        .send()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode skill fetch failed: {e}")))?;
+
+    if !response.status().is_success() {
+        warn!("OpenCode skill fetch returned {}", response.status());
+        return Ok(Vec::new());
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode skill response was not JSON: {e}")))?;
+    Ok(parse_opencode_skills(&body))
 }
 
 /// Fetch the OpenCode `/provider` listing and convert it into the renderer's
@@ -932,6 +998,7 @@ pub(crate) fn convert_opencode_messages(
         if !is_user && !is_assistant {
             continue;
         }
+        let opencode_message_id = info.get("id").and_then(|v| v.as_str()).map(String::from);
         let base_created = info
             .get("time")
             .and_then(|t| t.get("created"))
@@ -955,6 +1022,7 @@ pub(crate) fn convert_opencode_messages(
             // distinct timestamp.
             let created_at = base_created + i as i64;
             let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let part_id = part.get("id").and_then(|v| v.as_str()).map(String::from);
             match part_type {
                 "text" => {
                     let Some(text) = part.get("text").and_then(|v| v.as_str()) else {
@@ -970,6 +1038,10 @@ pub(crate) fn convert_opencode_messages(
                         is_user,
                         model.as_ref(),
                         created_at,
+                        OpencodeIds {
+                            message_id: opencode_message_id.as_deref(),
+                            part_id: part_id.as_deref(),
+                        },
                     ));
                 }
                 "reasoning" if is_assistant => {
@@ -979,10 +1051,27 @@ pub(crate) fn convert_opencode_messages(
                     if text.is_empty() {
                         continue;
                     }
-                    rows.push(build_thinking_row(conversation_id, part, text, created_at));
+                    rows.push(build_thinking_row(
+                        conversation_id,
+                        part,
+                        text,
+                        created_at,
+                        OpencodeIds {
+                            message_id: opencode_message_id.as_deref(),
+                            part_id: part_id.as_deref(),
+                        },
+                    ));
                 }
                 "tool" if is_assistant => {
-                    rows.push(build_tool_call_row(conversation_id, part, created_at));
+                    rows.push(build_tool_call_row(
+                        conversation_id,
+                        part,
+                        created_at,
+                        OpencodeIds {
+                            message_id: opencode_message_id.as_deref(),
+                            part_id: part_id.as_deref(),
+                        },
+                    ));
                 }
                 // step-start / step-finish carry no user-visible payload.
                 _ => continue,
@@ -1008,6 +1097,36 @@ fn extract_assistant_model(info: &serde_json::Value) -> Option<(String, String)>
     Some((provider.to_string(), model.to_string()))
 }
 
+/// Bundle of OpenCode identifiers stamped into a backfilled row's
+/// `content._opencode`. Lets M01/M02 (fork/revert) and M07 (edit/delete)
+/// resolve a local row back to its server-side message and part ids the same
+/// way live-streamed rows carry them (see `stream_relay::build_text_content_json`).
+#[derive(Clone, Copy, Default)]
+struct OpencodeIds<'a> {
+    message_id: Option<&'a str>,
+    part_id: Option<&'a str>,
+}
+
+impl OpencodeIds<'_> {
+    /// Insert `_opencode: { message_id?, part_id? }` into a content object when
+    /// at least one id is present. No-op for non-object content.
+    fn stamp(&self, content: &mut serde_json::Value) {
+        let Some(obj) = content.as_object_mut() else {
+            return;
+        };
+        let mut opencode = serde_json::Map::new();
+        if let Some(mid) = self.message_id {
+            opencode.insert("message_id".to_string(), serde_json::Value::String(mid.to_string()));
+        }
+        if let Some(pid) = self.part_id {
+            opencode.insert("part_id".to_string(), serde_json::Value::String(pid.to_string()));
+        }
+        if !opencode.is_empty() {
+            obj.insert("_opencode".to_string(), serde_json::Value::Object(opencode));
+        }
+    }
+}
+
 fn build_text_row(
     conversation_id: &str,
     part: &serde_json::Value,
@@ -1015,15 +1134,17 @@ fn build_text_row(
     is_user: bool,
     model: Option<&(String, String)>,
     created_at: i64,
+    opencode: OpencodeIds<'_>,
 ) -> aionui_db::models::MessageRow {
     let id = part_id(part);
-    let content = match model {
+    let mut content = match model {
         Some((provider, model_id)) if !is_user => serde_json::json!({
             "content": text,
             "model": { "provider_id": provider, "model_id": model_id },
         }),
         _ => serde_json::json!({ "content": text }),
     };
+    opencode.stamp(&mut content);
     aionui_db::models::MessageRow {
         id: id.clone(),
         conversation_id: conversation_id.to_string(),
@@ -1042,6 +1163,7 @@ fn build_thinking_row(
     part: &serde_json::Value,
     text: &str,
     created_at: i64,
+    opencode: OpencodeIds<'_>,
 ) -> aionui_db::models::MessageRow {
     let id = part_id(part);
     // OpenCode reasoning parts carry `time: { start, end }` (ms) for the
@@ -1054,11 +1176,12 @@ fn build_thinking_row(
             Some(((end - start) as i64).max(0))
         })
         .unwrap_or(0);
-    let content = serde_json::json!({
+    let mut content = serde_json::json!({
         "content": text,
         "status": "done",
         "duration_ms": duration_ms,
     });
+    opencode.stamp(&mut content);
     aionui_db::models::MessageRow {
         id: id.clone(),
         conversation_id: conversation_id.to_string(),
@@ -1076,6 +1199,7 @@ fn build_tool_call_row(
     conversation_id: &str,
     part: &serde_json::Value,
     created_at: i64,
+    opencode: OpencodeIds<'_>,
 ) -> aionui_db::models::MessageRow {
     // Mirror `stream_relay::persist_tool_call`: the row's content is the
     // serialized `ToolCallEventData`. We construct one from the OpenCode
@@ -1103,7 +1227,7 @@ fn build_tool_call_row(
         .map(String::from)
         .or_else(|| state.get("output").map(|v| v.to_string()));
     let description = state.get("title").and_then(|v| v.as_str()).map(String::from);
-    let content = serde_json::json!({
+    let mut content = serde_json::json!({
         "call_id": call_id,
         "name": name,
         "args": input.clone().unwrap_or(serde_json::Value::Null),
@@ -1112,6 +1236,7 @@ fn build_tool_call_row(
         "output": output,
         "description": description,
     });
+    opencode.stamp(&mut content);
     aionui_db::models::MessageRow {
         id: call_id.clone(),
         conversation_id: conversation_id.to_string(),
@@ -1506,6 +1631,7 @@ mod tests {
     fn convert_opencode_messages_assistant_text_carries_model_info() {
         let array = vec![serde_json::json!({
             "info": {
+                "id": "msg_a",
                 "role": "assistant",
                 "time": { "created": 1_700_000_000_000_i64 },
                 "model": { "providerID": "google", "modelID": "antigravity" },
@@ -1519,6 +1645,10 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&row.content).unwrap();
         assert_eq!(parsed["model"]["provider_id"], "google");
         assert_eq!(parsed["model"]["model_id"], "antigravity");
+        // Backfilled rows must carry the OpenCode message/part ids so M01/M02
+        // (fork/revert) can resolve this local row back to the server message.
+        assert_eq!(parsed["_opencode"]["message_id"], "msg_a");
+        assert_eq!(parsed["_opencode"]["part_id"], "prt_b");
     }
 
     #[test]
@@ -1527,7 +1657,7 @@ mod tests {
         // step-start, reasoning, tool, step-finish. Reasoning becomes a
         // `thinking` row; step-* are dropped.
         let array = vec![serde_json::json!({
-            "info": { "role": "assistant", "time": { "created": 1_700_000_000_000_i64 } },
+            "info": { "id": "msg_a", "role": "assistant", "time": { "created": 1_700_000_000_000_i64 } },
             "parts": [
                 { "type": "step-start" },
                 { "id": "prt_r", "type": "reasoning", "text": "thinking aloud",
@@ -1542,12 +1672,17 @@ mod tests {
         assert_eq!(rows[0].r#type, "thinking");
         let thinking_content: serde_json::Value = serde_json::from_str(&rows[0].content).unwrap();
         assert_eq!(thinking_content["duration_ms"], 1500);
+        // Thinking rows also carry the OpenCode ids for revert-to-here.
+        assert_eq!(thinking_content["_opencode"]["message_id"], "msg_a");
+        assert_eq!(thinking_content["_opencode"]["part_id"], "prt_r");
         assert_eq!(rows[1].r#type, "tool_call");
         assert_eq!(rows[1].id, "call_1", "row id must come from callID");
         let tool_content: serde_json::Value = serde_json::from_str(&rows[1].content).unwrap();
         assert_eq!(tool_content["name"], "run_shell");
         assert_eq!(tool_content["status"], "completed");
         assert_eq!(tool_content["output"], "a b c");
+        assert_eq!(tool_content["_opencode"]["message_id"], "msg_a");
+        assert_eq!(tool_content["_opencode"]["part_id"], "prt_t");
     }
 
     #[test]

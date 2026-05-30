@@ -158,6 +158,37 @@ async fn t6_2_clone_without_source() {
     assert!(resp.extra.get("contextFileName").is_none());
 }
 
+#[tokio::test]
+async fn clone_preserves_session_key_only_when_requested() {
+    let (svc, _repo, _b) = setup().await;
+
+    let default_req: CloneConversationRequest = serde_json::from_value(json!({
+        "conversation": {
+            "type": "remote",
+            "name": "Normal clone",
+            "extra": { "sessionKey": "ses_old", "remote_agent_id": "ra_1" }
+        }
+    }))
+    .unwrap();
+    let default_resp = svc.clone_create(USER_ID, default_req).await.unwrap();
+    assert!(default_resp.extra.get("sessionKey").is_none());
+
+    let fork_req: CloneConversationRequest = serde_json::from_value(json!({
+        "preserve_session_key": true,
+        "conversation": {
+            "type": "remote",
+            "name": "Fork clone",
+            "extra": { "sessionKey": "ses_fork", "remote_agent_id": "ra_1" }
+        }
+    }))
+    .unwrap();
+    let fork_resp = svc.clone_create(USER_ID, fork_req).await.unwrap();
+    assert_eq!(
+        fork_resp.extra.get("sessionKey").and_then(|v| v.as_str()),
+        Some("ses_fork")
+    );
+}
+
 // ── T7: Reset conversation ─────────────────────────────────────────
 
 #[tokio::test]
