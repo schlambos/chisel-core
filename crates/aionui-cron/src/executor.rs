@@ -733,6 +733,7 @@ impl JobExecutor {
                     msg_id: ConversationService::mint_msg_id(),
                     files: vec![],
                     inject_skills: skill_names,
+                    opencode_message_id: None,
                 };
 
                 if let Err(err) = agent.send_message(follow_up).await {

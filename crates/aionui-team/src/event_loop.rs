@@ -247,6 +247,7 @@ async fn execute_turn(ctx: &AgentLoopContext, input: &crate::session::WakeInput)
         msg_id,
         files,
         inject_skills: Vec::new(),
+        opencode_message_id: None,
     };
 
     let turn_ok = match handle.send_message(data).await {

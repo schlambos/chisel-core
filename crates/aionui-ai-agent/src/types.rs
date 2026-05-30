@@ -18,6 +18,13 @@ pub struct SendMessageData {
     /// Skills to inject into this message turn.
     #[serde(default)]
     pub inject_skills: Vec<String>,
+    /// Client-owned OpenCode `messageID` (`^msg…`) for this user message, sent
+    /// as `prompt_async.messageID` so the remote OpenCode session uses a
+    /// deterministic id we already persisted. Enables M07 message edit/delete
+    /// without round-tripping the server-assigned id back. `None` for
+    /// non-OpenCode backends, which ignore it.
+    #[serde(default)]
+    pub opencode_message_id: Option<String>,
 }
 
 /// Options for building (creating or resuming) an Agent task.
@@ -126,6 +133,7 @@ mod tests {
             msg_id: "msg-001".into(),
             files: vec!["/tmp/a.txt".into()],
             inject_skills: vec!["review".into()],
+            opencode_message_id: None,
         };
         let json = serde_json::to_value(&data).unwrap();
         assert_eq!(json["content"], "Hello");

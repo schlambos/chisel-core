@@ -81,6 +81,18 @@ pub trait IConversationRepository: Send + Sync {
         msg_type: &str,
     ) -> Result<Option<MessageRow>, DbError>;
 
+    /// Finds a single message by its primary-key `id` scoped to a conversation.
+    /// Default returns `None` so in-memory test mocks need not implement it.
+    async fn get_message_by_id(&self, _conv_id: &str, _id: &str) -> Result<Option<MessageRow>, DbError> {
+        Ok(None)
+    }
+
+    /// Deletes a single message by its primary-key `id`. Returns
+    /// `DbError::NotFound` if no row matched. Default is a no-op for mocks.
+    async fn delete_message(&self, _id: &str) -> Result<(), DbError> {
+        Ok(())
+    }
+
     /// Full-text search across messages, joining conversation name.
     async fn search_messages(
         &self,

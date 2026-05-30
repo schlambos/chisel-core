@@ -8,7 +8,7 @@ use aionui_common::AppError;
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, Query, State};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 
 /// Build the conversation-ops router (no auth layer applied — the caller is
 /// responsible for wrapping this with the auth middleware).
@@ -21,7 +21,39 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
         .route("/api/conversations/{id}/model", get(get_model).put(set_model))
         .route("/api/conversations/{id}/openclaw/runtime", get(get_openclaw_runtime))
         .route("/api/conversations/{id}/workspace", get(browse_workspace))
+        .route(
+            "/api/conversations/{id}/opencode-message/{messageId}",
+            delete(delete_opencode_message).put(edit_opencode_message),
+        )
         .with_state(state)
+}
+
+/// M07: delete a remote OpenCode message (and its local row). `messageId` is
+/// the local message row id; the service resolves the OpenCode id from it.
+async fn delete_opencode_message(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path((id, message_id)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state.service.delete_remote_message(&id, &message_id).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+/// M07: edit the text of a remote OpenCode message. Body: `{ "text": "…" }`.
+async fn edit_opencode_message(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path((id, message_id)): Path<(String, String)>,
+    body: Result<Json<EditMessageRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    state.service.edit_remote_message(&id, &message_id, &req.text).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+#[derive(serde::Deserialize)]
+struct EditMessageRequest {
+    text: String,
 }
 
 // ── Route handlers ─────────────────────────────────────────────────

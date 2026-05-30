@@ -13,9 +13,8 @@ use aionui_api_types::{
     WebSocketMessage,
 };
 use aionui_common::{
-    AgentType, AppError, ConversationSource, ConversationStatus, ErrorChain, OnConversationDelete, OnConversationUpdate,
-    PaginatedResult,
-    generate_short_id, now_ms,
+    AgentType, AppError, ConversationSource, ConversationStatus, ErrorChain, OnConversationDelete,
+    OnConversationUpdate, PaginatedResult, generate_short_id, now_ms,
 };
 use aionui_db::models::MessageRow;
 use aionui_db::{
@@ -133,6 +132,10 @@ impl ConversationService {
 
     pub fn conversation_repo(&self) -> &Arc<dyn IConversationRepository> {
         &self.conversation_repo
+    }
+
+    pub(crate) fn broadcaster(&self) -> &Arc<dyn aionui_realtime::EventBroadcaster> {
+        &self.broadcaster
     }
 
     pub(crate) fn task(&self, conversation_id: &str) -> Result<AgentInstance, AppError> {
@@ -1064,12 +1067,25 @@ impl ConversationService {
         // key. We reuse the same value for `id` (primary key) and `msg_id`
         // to preserve legacy callers that still rely on `id == msg_id`.
         let user_msg_id = Self::mint_msg_id();
+        // M07: for remote (OpenCode) conversations, mint a client-owned OpenCode
+        // `messageID` (`^msg…`) up front, persist it on the user row, and pass it
+        // into the prompt so the user message is addressable for later
+        // edit/delete. Non-remote backends leave this `None`.
+        let opencode_message_id: Option<String> = if row.r#type == "remote" {
+            Some(aionui_common::generate_prefixed_id("msg"))
+        } else {
+            None
+        };
+        let user_content = match opencode_message_id.as_deref() {
+            Some(mid) => serde_json::json!({ "content": req.content, "_opencode": { "message_id": mid } }),
+            None => serde_json::json!({ "content": req.content }),
+        };
         let user_msg = aionui_db::models::MessageRow {
             id: user_msg_id.clone(),
             conversation_id: conversation_id.to_owned(),
             msg_id: Some(user_msg_id.clone()),
             r#type: "text".into(),
-            content: serde_json::json!({ "content": req.content }).to_string(),
+            content: user_content.to_string(),
             position: Some("right".into()),
             status: Some("finish".into()),
             hidden: req.hidden,
@@ -1132,6 +1148,7 @@ impl ConversationService {
         // correlation id so DB row, WebSocket stream events, and
         // agent-internal tracing all share one identifier per turn.
         let user_msg_id_ret = user_msg_id.clone();
+        let first_opencode_message_id = opencode_message_id.clone();
         tokio::spawn(async move {
             let first_turn_msg_id = Self::mint_msg_id();
             let mut pending_send = Some((
@@ -1140,6 +1157,7 @@ impl ConversationService {
                     msg_id: first_turn_msg_id.clone(),
                     files: req.files,
                     inject_skills: req.inject_skills,
+                    opencode_message_id: first_opencode_message_id,
                 },
                 first_turn_msg_id,
             ));
@@ -1192,6 +1210,7 @@ impl ConversationService {
                         msg_id: next_turn_msg_id.clone(),
                         files: vec![],
                         inject_skills: vec![],
+                        opencode_message_id: None,
                     },
                     next_turn_msg_id,
                 ));

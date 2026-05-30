@@ -409,6 +409,26 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(row)
     }
 
+    async fn get_message_by_id(&self, conv_id: &str, id: &str) -> Result<Option<MessageRow>, DbError> {
+        let row = sqlx::query_as::<_, MessageRow>("SELECT * FROM messages WHERE conversation_id = ? AND id = ?")
+            .bind(conv_id)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
+    async fn delete_message(&self, id: &str) -> Result<(), DbError> {
+        let result = sqlx::query("DELETE FROM messages WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("message '{id}' not found")));
+        }
+        Ok(())
+    }
+
     async fn search_messages(
         &self,
         user_id: &str,

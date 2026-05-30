@@ -355,6 +355,42 @@ impl AgentInstance {
         }
     }
 
+    /// M07: delete a message on the remote OpenCode session. Only the Remote
+    /// (OpenCode) variant supports this; others return `BadRequest`.
+    pub async fn delete_remote_message(&self, message_id: &str) -> Result<(), AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_delete_message(message_id).await,
+            _ => Err(AppError::BadRequest(
+                "Message delete is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M07: delete a single message part on the remote OpenCode session.
+    pub async fn delete_remote_message_part(&self, message_id: &str, part_id: &str) -> Result<(), AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_delete_message_part(message_id, part_id).await,
+            _ => Err(AppError::BadRequest(
+                "Part delete is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M07: edit a text part on the remote OpenCode session.
+    pub async fn edit_remote_message_part(
+        &self,
+        message_id: &str,
+        part_id: &str,
+        new_text: &str,
+    ) -> Result<(), AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_edit_message_part(message_id, part_id, new_text).await,
+            _ => Err(AppError::BadRequest(
+                "Part edit is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
     /// Get the current session model info. Only ACP exposes a model
     /// catalog; other variants report `model_info = None` so the UI can
     /// hide the model picker without an error.

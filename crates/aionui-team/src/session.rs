@@ -467,6 +467,7 @@ impl TeamSession {
             msg_id,
             files: files.unwrap_or_default(),
             inject_skills: Vec::new(),
+            opencode_message_id: None,
         };
 
         if let Err(err) = handle.send_message(data).await {

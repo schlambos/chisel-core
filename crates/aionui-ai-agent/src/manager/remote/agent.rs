@@ -2714,6 +2714,134 @@ impl RemoteAgentManager {
         }
     }
 
+    /// Resolve the active OpenCode session id, erroring if none exists yet.
+    /// Shared by the M07 edit/delete operations.
+    async fn require_opencode_session(&self) -> Result<String, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "Message edit/delete is only supported for OpenCode remote conversations".into(),
+            ));
+        }
+        self.state
+            .read()
+            .await
+            .opencode_session_id
+            .clone()
+            .ok_or_else(|| AppError::BadRequest("No active OpenCode session for this conversation".into()))
+    }
+
+    /// M07: delete an entire message (`DELETE /session/{id}/message/{messageID}`).
+    /// The server emits `message.removed`, which our SSE handler reconciles into
+    /// the local store.
+    pub async fn opencode_delete_message(&self, message_id: &str) -> Result<(), AppError> {
+        let session_id = self.require_opencode_session().await?;
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let url = format!("{base_url}/session/{session_id}/message/{message_id}");
+        self.opencode_delete(&url, "message").await
+    }
+
+    /// M07: delete a single part (`DELETE /session/{id}/message/{messageID}/part/{partID}`).
+    pub async fn opencode_delete_message_part(&self, message_id: &str, part_id: &str) -> Result<(), AppError> {
+        let session_id = self.require_opencode_session().await?;
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let url = format!("{base_url}/session/{session_id}/message/{message_id}/part/{part_id}");
+        self.opencode_delete(&url, "part").await
+    }
+
+    /// Shared DELETE helper for [`Self::opencode_delete_message`] /
+    /// [`Self::opencode_delete_message_part`].
+    async fn opencode_delete(&self, url: &str, what: &str) -> Result<(), AppError> {
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        let mut req = self.http_client.delete(url).timeout(Duration::from_secs(15));
+        if let Some(ref h) = auth_header {
+            req = req.header(AUTHORIZATION, h.as_str());
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::BadGateway(format!("OpenCode delete {what} failed: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(AppError::BadGateway(format!(
+                "OpenCode delete {what} returned {status}: {body_text}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// M07: edit the text of a single text part. OpenCode's `PATCH .../part/{partID}`
+    /// requires the full `Part` object, so we GET the message, mutate the target
+    /// part's `text`, and PATCH it back. The server emits `message.part.updated`,
+    /// reconciled by the existing SSE handler.
+    pub async fn opencode_edit_message_part(
+        &self,
+        message_id: &str,
+        part_id: &str,
+        new_text: &str,
+    ) -> Result<(), AppError> {
+        let session_id = self.require_opencode_session().await?;
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+
+        // 1. Fetch the message to obtain the full part object.
+        let get_url = format!("{base_url}/session/{session_id}/message/{message_id}");
+        let mut get_req = self.http_client.get(&get_url).timeout(Duration::from_secs(15));
+        if let Some(ref h) = auth_header {
+            get_req = get_req.header(AUTHORIZATION, h.as_str());
+        }
+        let get_resp = get_req
+            .send()
+            .await
+            .map_err(|e| AppError::BadGateway(format!("OpenCode get message failed: {e}")))?;
+        if !get_resp.status().is_success() {
+            let status = get_resp.status();
+            return Err(AppError::BadGateway(format!("OpenCode get message returned {status}")));
+        }
+        let message: Value = get_resp
+            .json()
+            .await
+            .map_err(|e| AppError::BadGateway(format!("OpenCode message response was not JSON: {e}")))?;
+
+        // 2. Locate the target part and replace its text.
+        let parts = message
+            .get("parts")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut target = parts
+            .into_iter()
+            .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(part_id))
+            .ok_or_else(|| AppError::NotFound(format!("part '{part_id}' not found on message '{message_id}'")))?;
+        if target.get("type").and_then(|v| v.as_str()) != Some("text") {
+            return Err(AppError::BadRequest("Only text parts can be edited".into()));
+        }
+        target["text"] = json!(new_text);
+
+        // 3. PATCH the full part back.
+        let patch_url = format!("{base_url}/session/{session_id}/message/{message_id}/part/{part_id}");
+        let mut patch_req = self
+            .http_client
+            .patch(&patch_url)
+            .json(&target)
+            .timeout(Duration::from_secs(15));
+        if let Some(ref h) = auth_header {
+            patch_req = patch_req.header(AUTHORIZATION, h.as_str());
+        }
+        let patch_resp = patch_req
+            .send()
+            .await
+            .map_err(|e| AppError::BadGateway(format!("OpenCode patch part failed: {e}")))?;
+        if !patch_resp.status().is_success() {
+            let status = patch_resp.status();
+            let body_text = patch_resp.text().await.unwrap_or_default();
+            return Err(AppError::BadGateway(format!(
+                "OpenCode patch part returned {status}: {body_text}"
+            )));
+        }
+        Ok(())
+    }
+
     async fn opencode_create_session(&self, base_url: &str) -> Result<String, AppError> {
         let url = format!("{base_url}/session");
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
@@ -2797,7 +2925,7 @@ impl RemoteAgentManager {
     /// step the raw `/cmd` string would be forwarded to the LLM as-is.
     /// Unknown `/cmd` strings fall through unchanged — the user may
     /// have typed something the server doesn't advertise.
-    async fn opencode_send(&self, content: &str) -> Result<(), AppError> {
+    async fn opencode_send(&self, content: &str, opencode_message_id: Option<&str>) -> Result<(), AppError> {
         let base_url = normalize_base_url(&self.remote_config.url);
         let conversation_id = self.runtime.conversation_id().to_string();
 
@@ -2813,7 +2941,9 @@ impl RemoteAgentManager {
         // got to `POST /prompt_async`.
         opencode_mcp::acquire_turn(&base_url, &conversation_id).await;
 
-        let result = self.opencode_send_after_acquire(content, &base_url).await;
+        let result = self
+            .opencode_send_after_acquire(content, &base_url, opencode_message_id)
+            .await;
         if result.is_err() {
             // No prompt was dispatched (or it was rejected outright) — no
             // SSE Finish event will ever fire, so we must drop the slot
@@ -2828,7 +2958,12 @@ impl RemoteAgentManager {
     /// been acquired. Split out so the caller can centralize the
     /// release-on-error logic without sprinkling `release_turn` calls at
     /// every `?` site.
-    async fn opencode_send_after_acquire(&self, content: &str, base_url: &str) -> Result<(), AppError> {
+    async fn opencode_send_after_acquire(
+        &self,
+        content: &str,
+        base_url: &str,
+        opencode_message_id: Option<&str>,
+    ) -> Result<(), AppError> {
         let base_url = base_url.to_string();
         // Re-confirm ownership of the OpenCode `aionui-local-fs` slot
         // before every prompt. If another conversation prompted last on
@@ -2985,6 +3120,13 @@ impl RemoteAgentManager {
         let mut body = json!({
             "parts": [{"type": "text", "text": prompt_text}],
         });
+        // M07: when the caller owns the OpenCode message id (`^msg…`), send it
+        // so the user message is addressable for later edit/delete. Only valid
+        // on a freshly created session — on a context-prefixed rebroker the
+        // prompt text differs, but the id still uniquely identifies the row.
+        if let Some(mid) = opencode_message_id.filter(|m| m.starts_with("msg")) {
+            body["messageID"] = json!(mid);
+        }
         if let Some(hint) = system_hint {
             body["system"] = json!(hint);
         }
@@ -3396,7 +3538,8 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             if is_first {
                 self.emit_model_info().await;
             }
-            self.opencode_send(&data.content).await
+            self.opencode_send(&data.content, data.opencode_message_id.as_deref())
+                .await
         } else if is_first {
             let payload = json!({
                 "type": "sessionsReset",

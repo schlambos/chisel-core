@@ -43,6 +43,76 @@ impl ConversationService {
         self.task(conversation_id)?.set_mode(&req.mode).await
     }
 
+    // ── M07: remote message/part edit & delete ─────────────────────
+
+    /// Resolve the OpenCode `messageID` persisted on a local message row's
+    /// `content._opencode.message_id`. Returns `BadRequest` when the row is not
+    /// addressable (e.g. a non-remote message or one created before M07).
+    async fn resolve_opencode_message_id(&self, conversation_id: &str, row_id: &str) -> Result<String, AppError> {
+        let row = self
+            .conversation_repo()
+            .get_message_by_id(conversation_id, row_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Message '{row_id}' not found")))?;
+        let content: serde_json::Value = serde_json::from_str(&row.content).unwrap_or_default();
+        content
+            .get("_opencode")
+            .and_then(|o| o.get("message_id"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| AppError::BadRequest("This message is not editable/deletable on the remote server".into()))
+    }
+
+    /// M07: delete a message both on the remote OpenCode session and locally,
+    /// then broadcast a removal event so connected clients drop it.
+    pub async fn delete_remote_message(&self, conversation_id: &str, row_id: &str) -> Result<(), AppError> {
+        let opencode_message_id = self.resolve_opencode_message_id(conversation_id, row_id).await?;
+        self.task(conversation_id)?
+            .delete_remote_message(&opencode_message_id)
+            .await?;
+        // Best-effort local cleanup — the server delete already succeeded.
+        if let Err(e) = self.conversation_repo().delete_message(row_id).await {
+            tracing::warn!(conversation_id, row_id, error = %e, "M07: server delete ok but local row delete failed");
+        }
+        self.broadcaster().broadcast(aionui_api_types::WebSocketMessage::new(
+            "message.removed",
+            serde_json::json!({ "conversation_id": conversation_id, "msg_id": row_id }),
+        ));
+        Ok(())
+    }
+
+    /// M07: edit a text message both on the remote server and locally. The
+    /// renderer passes the new text; the OpenCode part id is taken from the
+    /// row's `content._opencode.part_id` when present, otherwise the message's
+    /// own id (user text messages are a single text part).
+    pub async fn edit_remote_message(
+        &self,
+        conversation_id: &str,
+        row_id: &str,
+        new_text: &str,
+    ) -> Result<(), AppError> {
+        if new_text.trim().is_empty() {
+            return Err(AppError::BadRequest("Edited text must not be empty".into()));
+        }
+        let opencode_message_id = self.resolve_opencode_message_id(conversation_id, row_id).await?;
+        let row = self
+            .conversation_repo()
+            .get_message_by_id(conversation_id, row_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Message '{row_id}' not found")))?;
+        let content: serde_json::Value = serde_json::from_str(&row.content).unwrap_or_default();
+        let part_id = content
+            .get("_opencode")
+            .and_then(|o| o.get("part_id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::BadRequest("This message has no editable text part".into()))?
+            .to_string();
+        self.task(conversation_id)?
+            .edit_remote_message_part(&opencode_message_id, &part_id, new_text)
+            .await?;
+        Ok(())
+    }
+
     // ── Model ───────────────────────────────────────────────────────
 
     pub async fn get_model(&self, conversation_id: &str) -> Result<GetModelInfoResponse, AppError> {
