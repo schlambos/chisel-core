@@ -174,6 +174,28 @@ impl ConversationService {
             .await
     }
 
+    // ── Global config (M19) ─────────────────────────────────────────
+
+    /// M19: read the remote OpenCode server's global configuration tree.
+    pub async fn get_global_config(&self, conversation_id: &str) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.get_global_config().await
+    }
+
+    /// M19: shallow-merge a partial config into the remote OpenCode server's
+    /// global configuration. Returns the new effective config.
+    pub async fn patch_global_config(
+        &self,
+        conversation_id: &str,
+        partial: serde_json::Value,
+    ) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.patch_global_config(partial).await
+    }
+
+    /// M19 (Option A): read the remote OpenCode server's effective config tree.
+    pub async fn get_effective_config(&self, conversation_id: &str) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.get_effective_config().await
+    }
+
     // ── Model ───────────────────────────────────────────────────────
 
     pub async fn get_model(&self, conversation_id: &str) -> Result<GetModelInfoResponse, AppError> {

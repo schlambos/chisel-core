@@ -35,6 +35,14 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
             post(share_session).delete(unshare_session),
         )
         .route("/api/conversations/{id}/opencode/diff", get(session_diff))
+        .route(
+            "/api/conversations/{id}/opencode/config",
+            get(get_global_config).patch(patch_global_config),
+        )
+        .route(
+            "/api/conversations/{id}/opencode/config/effective",
+            get(get_effective_config),
+        )
         .with_state(state)
 }
 
@@ -137,6 +145,40 @@ async fn session_diff(
         .remote_session_diff(&id, query.message_id.as_deref())
         .await?;
     Ok(Json(ApiResponse::ok(diff)))
+}
+
+/// M19: read the remote OpenCode server's global configuration tree.
+async fn get_global_config(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.get_global_config(&id).await?)))
+}
+
+/// M19: shallow-merge a partial config into the remote OpenCode server's
+/// global configuration. Body is the partial config object; the response is
+/// the new effective config returned by the server.
+async fn patch_global_config(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<serde_json::Value>, JsonRejection>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    let Json(partial) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    Ok(Json(ApiResponse::ok(
+        state.service.patch_global_config(&id, partial).await?,
+    )))
+}
+
+/// M19 (Option A): read the remote OpenCode server's effective (merged) config,
+/// used by the renderer to flag edits shadowed by a higher-precedence layer.
+async fn get_effective_config(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.get_effective_config(&id).await?)))
 }
 
 /// M07: delete a remote OpenCode message (and its local row). `messageId` is

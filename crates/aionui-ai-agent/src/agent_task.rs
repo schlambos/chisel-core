@@ -466,6 +466,39 @@ impl AgentInstance {
         }
     }
 
+    /// M19: read the OpenCode server's global configuration (`GET /global/config`).
+    pub async fn get_global_config(&self) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_get_global_config().await,
+            _ => Err(AppError::BadRequest(
+                "Global config is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M19: shallow-merge a partial config into the OpenCode server's global
+    /// configuration (`PATCH /global/config`). Returns the new effective config.
+    pub async fn patch_global_config(&self, partial: serde_json::Value) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_patch_global_config(partial).await,
+            _ => Err(AppError::BadRequest(
+                "Global config is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M19 (Option A): read the OpenCode server's **effective** config
+    /// (`GET /config`) — the merged view the engine runs, used to detect edits
+    /// shadowed by a higher-precedence layer.
+    pub async fn get_effective_config(&self) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_get_effective_config().await,
+            _ => Err(AppError::BadRequest(
+                "Global config is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
     /// Get the current session model info. Only ACP exposes a model
     /// catalog; other variants report `model_info = None` so the UI can
     /// hide the model picker without an error.

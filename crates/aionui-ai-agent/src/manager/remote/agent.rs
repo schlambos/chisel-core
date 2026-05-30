@@ -1289,17 +1289,38 @@ impl RemoteAgentManager {
                 }
                 match exit {
                     ReaderExit::ServerDisposed => {
-                        // Server-side teardown — do NOT auto-reconnect.
-                        warn!(
-                            conversation_id = %conversation_id,
-                            "OpenCode server instance disposed; stopping reconnect loop"
-                        );
-                        let mut state = this.state.write().await;
-                        state.connection_status = RemoteAgentStatus::Error;
-                        if this.runtime.status() == Some(ConversationStatus::Running) {
-                            this.runtime.transition_to(ConversationStatus::Finished);
+                        // `server.instance.disposed` is emitted both on a real
+                        // shutdown AND on a server-side hot-reload (e.g. a
+                        // `PATCH /global/config` makes OpenCode dispose the old
+                        // app instance and immediately spin up a new one).
+                        // Treating it as terminal stranded every live
+                        // conversation's stream after a config edit (no
+                        // streaming until app restart), so we reconnect with
+                        // backoff just like a transport drop: if the instance
+                        // came back (reload) the next pass resubscribes and a
+                        // fresh `server.connected` resets the backoff; if the
+                        // server is truly gone the pass returns `ConnectFailed`
+                        // and we keep backing off harmlessly until it returns.
+                        //
+                        // Release any MCP turn slot we hold first: the disposed
+                        // instance will never emit this turn's terminal
+                        // `Finish`, so without this an in-flight turn would pin
+                        // the per-base-url slot until `TURN_WAIT_TIMEOUT`,
+                        // blocking every other conversation on this server.
+                        this.release_turn_slot().await;
+                        {
+                            let mut state = this.state.write().await;
+                            if state.connection_status != RemoteAgentStatus::Error {
+                                state.connection_status = RemoteAgentStatus::Reconnecting;
+                            }
                         }
-                        break;
+                        info!(
+                            conversation_id = %conversation_id,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "OpenCode server instance disposed (shutdown or config hot-reload); reconnecting"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(RECONNECT_DELAY_MAX);
                     }
                     ReaderExit::ConnectFailed
                     | ReaderExit::Eof
@@ -3167,6 +3188,102 @@ impl RemoteAgentManager {
             .await
     }
 
+    /// M19: read the server's global configuration tree (`GET /global/config`).
+    /// Returns the full effective config as JSON. This endpoint is **not**
+    /// session-scoped — the config is shared by every conversation pointed at
+    /// the same server, so this lives on the manager's transport rather than
+    /// the session path.
+    pub async fn opencode_get_global_config(&self) -> Result<Value, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "Global config is only available for OpenCode remote connections".into(),
+            ));
+        }
+        self.opencode_config_request("/global/config", reqwest::Method::GET, None)
+            .await
+    }
+
+    /// M19 (Option A): read the server's **effective** configuration tree
+    /// (`GET /config`). Unlike `/global/config`, this is the merged, resolved
+    /// view the engine actually runs — including project-level and agent-file
+    /// definitions that override the global layer. The renderer diffs a save
+    /// against this to flag edits that were persisted to the global layer but
+    /// are shadowed by a higher-precedence layer (so they never take effect).
+    pub async fn opencode_get_effective_config(&self) -> Result<Value, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "Global config is only available for OpenCode remote connections".into(),
+            ));
+        }
+        self.opencode_config_request("/config", reqwest::Method::GET, None)
+            .await
+    }
+
+    /// M19: shallow-merge a partial config object into the server's global
+    /// configuration (`PATCH /global/config`) and return the new effective
+    /// config. Read-only keys (e.g. `version`) rejected by the server surface
+    /// as a `BadGateway` carrying the server's error body, so the renderer can
+    /// show a friendly message and the caller's stashed "last good" config
+    /// stays intact.
+    pub async fn opencode_patch_global_config(&self, partial: Value) -> Result<Value, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "Global config is only available for OpenCode remote connections".into(),
+            ));
+        }
+        if !partial.is_object() {
+            return Err(AppError::BadRequest(
+                "Global config patch must be a JSON object".into(),
+            ));
+        }
+        self.opencode_config_request("/global/config", reqwest::Method::PATCH, Some(partial))
+            .await
+    }
+
+    /// Shared transport for the M19 config calls (`/global/config` and
+    /// `/config`). Mirrors [`Self::opencode_session_request`] but targets a
+    /// server-global endpoint (no session id in the path). Empty 2xx bodies map
+    /// to `Value::Null`; non-2xx responses carry the server body so callers can
+    /// surface the server's own validation error.
+    async fn opencode_config_request(
+        &self,
+        path: &str,
+        method: reqwest::Method,
+        body: Option<Value>,
+    ) -> Result<Value, AppError> {
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let url = format!("{base_url}{path}");
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+
+        let mut req = self
+            .http_client
+            .request(method, &url)
+            .timeout(Duration::from_secs(15));
+        if let Some(ref b) = body {
+            req = req.json(b);
+        }
+        if let Some(ref h) = auth_header {
+            req = req.header(AUTHORIZATION, h.as_str());
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::BadGateway(format!("OpenCode global-config request failed: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(AppError::BadGateway(format!(
+                "OpenCode global-config request returned {status}: {body_text}"
+            )));
+        }
+        let text = resp.text().await.unwrap_or_default();
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text)
+            .map_err(|e| AppError::BadGateway(format!("OpenCode global-config response was not JSON: {e}")))
+    }
+
     async fn opencode_create_session(&self, base_url: &str) -> Result<String, AppError> {
         let url = format!("{base_url}/session");
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
@@ -3959,6 +4076,17 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             // (which still produces Reject via the channel-closed handler)
             // but never told the server-side permissions they were cancelled.
             self.reject_pending_confirmations("cancel").await;
+
+            // Release the per-base-url MCP turn slot now. The turn is over, but
+            // its terminal `Finish` (which normally releases the slot via
+            // `emit_root_turn_finish`) may never arrive — e.g. the SSE stream
+            // is mid-reconnect after a server hot-reload, or the abort races
+            // ahead of the idle event. Without an explicit release here, a
+            // cancelled turn pins the slot until `TURN_WAIT_TIMEOUT` (600s),
+            // leaving every other conversation on this server stuck in
+            // "Processing…". `release_turn` is owner-checked and idempotent, so
+            // a later `Finish` that also releases is a harmless no-op.
+            self.release_turn_slot().await;
             return Ok(());
         }
         if self.ws_sink.lock().await.is_none() {
