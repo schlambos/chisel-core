@@ -329,7 +329,6 @@ const KNOWN_IGNORED_EVENTS: &[&str] = &[
     "session.updated",
     "session.deleted",
     "session.diff",
-    "session.compacted",
     "message.removed",
     "message.part.removed",
 ];
@@ -2251,13 +2250,38 @@ impl RemoteAgentManager {
                 );
             }
             "skill.updated" => {
-                // M10: server-side skill catalog changed (created/edited/deleted).
-                // Invalidate the local cache so the next picker query re-fetches.
                 self.state.write().await.opencode_skills = None;
                 debug!(
                     conversation_id = %self.runtime.conversation_id(),
                     "M10: OpenCode skill catalog invalidated by skill.updated"
                 );
+            }
+            "session.compacted" => {
+                let summary = props.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+                let tokens_reclaimed = props.get("tokensReclaimed").and_then(|v| v.as_u64()).unwrap_or(0);
+                let original_start = props
+                    .get("originalRange")
+                    .and_then(|r| r.get("startMessageId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let original_end = props
+                    .get("originalRange")
+                    .and_then(|r| r.get("endMessageId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                info!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    tokens_reclaimed,
+                    "OpenCode session compacted (M22)"
+                );
+                self.runtime.emit(AgentStreamEvent::OpencodeSessionCompacted(
+                    crate::protocol::events::OpencodeSessionCompactedData {
+                        summary: summary.to_string(),
+                        tokens_reclaimed,
+                        original_start_message_id: original_start.to_string(),
+                        original_end_message_id: original_end.to_string(),
+                    },
+                ));
             }
             other => {
                 // Full event coverage (E02 §3.4): a known-but-intentionally-
@@ -3190,6 +3214,149 @@ impl RemoteAgentManager {
             .map(|_| ())
     }
 
+    /// M22 Phase 3: V2 compact the session. Tries V2 `/api/session/{id}/compact`
+    /// first; on 404 falls back to V1 `opencode_summarize`. The V2 endpoint does
+    /// not require `providerID`/`modelID` — the server uses the session's model.
+    pub async fn opencode_compact(&self, instructions: Option<&str>) -> Result<(), AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "Compact is only available for OpenCode remote connections".into(),
+            ));
+        }
+        let session_id = self.require_opencode_session().await?;
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        match super::opencode_v2::v2_compact(
+            &self.http_client,
+            &base_url,
+            auth_header.as_deref(),
+            &session_id,
+            instructions,
+        )
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(AppError::BadGateway(msg)) if msg.contains("404") => {
+                debug!("V2 compact not available, falling back to V1 summarize");
+                self.opencode_summarize().await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// M22 Phase 3: get the session's active context window (all messages
+    /// after the last compaction). Returns raw JSON array of `SessionMessage`.
+    pub async fn opencode_get_context(&self) -> Result<Value, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "Context is only available for OpenCode remote connections".into(),
+            ));
+        }
+        let session_id = self.require_opencode_session().await?;
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        super::opencode_v2::v2_get_context(
+            &self.http_client,
+            &base_url,
+            auth_header.as_deref(),
+            &session_id,
+        )
+        .await
+    }
+
+    /// M22 Phase 2: V2 prompt path. Sends via `POST /api/session/{id}/prompt`
+    /// instead of V1 `/session/{id}/prompt_async`. The V2 endpoint returns a
+    /// `SessionMessage` synchronously, and streaming still arrives via SSE.
+    pub async fn opencode_send_v2(
+        &self,
+        content: &str,
+        model: Option<&Value>,
+        agent: Option<&str>,
+        inject_skills: &[String],
+    ) -> Result<(), AppError> {
+        let session_id = self.require_opencode_session().await?;
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        super::opencode_v2::v2_prompt(
+            &self.http_client,
+            &base_url,
+            auth_header.as_deref(),
+            &session_id,
+            content,
+            model,
+            agent,
+            inject_skills,
+            Some("immediate"),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// M22: get V2 session messages with cursor-based pagination.
+    pub async fn opencode_v2_messages(
+        &self,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<Value, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "V2 messages is only available for OpenCode remote connections".into(),
+            ));
+        }
+        let session_id = self.require_opencode_session().await?;
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        super::opencode_v2::v2_get_messages(
+            &self.http_client,
+            &base_url,
+            auth_header.as_deref(),
+            &session_id,
+            limit,
+            cursor,
+        )
+        .await
+    }
+
+    /// M20 Phase 1: fetch sync history since the given aggregate sequences.
+    /// Used after SSE reconnect to replay events missed during the gap.
+    pub async fn fetch_sync_history(
+        &self,
+        since: &HashMap<String, u64>,
+    ) -> Result<Vec<super::opencode_sync::SyncEvent>, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "Sync is only available for OpenCode remote connections".into(),
+            ));
+        }
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        super::opencode_sync::fetch_sync_history(&self.http_client, &base_url, auth_header.as_deref(), since).await
+    }
+
+    /// M22 Phase 1: fetch V2 model list from the server. Returns raw JSON.
+    pub async fn fetch_v2_model_list(&self) -> Result<Value, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "V2 models is only available for OpenCode remote connections".into(),
+            ));
+        }
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        super::opencode_v2::fetch_v2_models(&self.http_client, &base_url, auth_header.as_deref()).await
+    }
+
+    /// M22 Phase 1: fetch V2 provider list from the server. Returns raw JSON.
+    pub async fn fetch_v2_provider_list(&self) -> Result<Value, AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Err(AppError::BadRequest(
+                "V2 providers is only available for OpenCode remote connections".into(),
+            ));
+        }
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        super::opencode_v2::fetch_v2_providers(&self.http_client, &base_url, auth_header.as_deref()).await
+    }
+
     /// M03: create a shareable link for the session. Returns the share URL.
     pub async fn opencode_share(&self) -> Result<String, AppError> {
         let resp = self
@@ -3988,6 +4155,16 @@ impl RemoteAgentManager {
         let base_url = normalize_base_url(&self.remote_config.url);
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
 
+        // NOTE: this in-conversation picker must show exactly the same models as
+        // the Guid (New Chat) page, which uses V1 `/provider` via
+        // `services/remote.rs::fetch_opencode_model_info`. The V2 `/api/model`
+        // endpoint carries a per-model `enabled` flag that is stricter than V1's
+        // "all models of connected providers" semantics (it drops deprecated /
+        // alpha / non-allowlisted models), so migrating this path to V2 made
+        // models silently disappear from the thread picker while the Guid page
+        // still showed them. We keep this on V1 for parity; the richer V2 data
+        // (status / cost / capabilities) is exposed separately via the
+        // `/opencode/v2-models` route for a future V2-aware model-card UI.
         let mut req = self
             .http_client
             .get(format!("{base_url}/provider"))

@@ -7,7 +7,9 @@ pub mod opencode_mcp;
 pub mod opencode_models;
 pub mod opencode_question;
 pub mod opencode_stream;
+pub mod opencode_sync;
 pub mod opencode_tool_call;
+pub mod opencode_v2;
 pub mod reachability;
 pub mod subagent;
 

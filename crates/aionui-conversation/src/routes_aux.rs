@@ -47,6 +47,11 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
         .route("/api/conversations/{id}/opencode/vcs", get(get_vcs_info))
         .route("/api/conversations/{id}/opencode/vcs/status", get(get_vcs_status))
         .route("/api/conversations/{id}/opencode/vcs/diff", get(get_vcs_diff))
+        .route("/api/conversations/{id}/opencode/compact", post(compact_session))
+        .route("/api/conversations/{id}/opencode/context", get(get_session_context))
+        .route("/api/conversations/{id}/opencode/v2-messages", get(get_v2_messages))
+        .route("/api/conversations/{id}/opencode/v2-models", get(get_v2_model_list))
+        .route("/api/conversations/{id}/opencode/v2-providers", get(get_v2_provider_list))
         .with_state(state)
 }
 
@@ -350,4 +355,67 @@ async fn browse_workspace(
     Query(query): Query<WorkspaceBrowseQuery>,
 ) -> Result<Json<ApiResponse<Vec<WorkspaceEntry>>>, AppError> {
     Ok(Json(ApiResponse::ok(state.service.browse_workspace(&id, query).await?)))
+}
+
+#[derive(serde::Deserialize)]
+struct CompactRequest {
+    #[serde(default)]
+    instructions: Option<String>,
+}
+
+async fn compact_session(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Option<Json<CompactRequest>>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let instructions = body.and_then(|Json(b)| b.instructions);
+    state.service.compact_remote_session(&id, instructions.as_deref()).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+async fn get_session_context(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.get_session_context(&id).await?)))
+}
+
+#[derive(serde::Deserialize)]
+struct V2MessagesQuery {
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+async fn get_v2_messages(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    Query(query): Query<V2MessagesQuery>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .get_v2_messages(&id, query.limit, query.cursor.as_deref())
+            .await?,
+    )))
+}
+
+async fn get_v2_model_list(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.fetch_v2_model_list(&id).await?)))
+}
+
+async fn get_v2_provider_list(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.fetch_v2_provider_list(&id).await?)))
 }

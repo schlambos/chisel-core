@@ -219,6 +219,44 @@ impl ConversationService {
         self.task(conversation_id)?.get_vcs_diff(mode).await
     }
 
+    // ── V2 session API (M22) ────────────────────────────────────────
+
+    /// M22: compact the remote session using V2 (with V1 fallback).
+    pub async fn compact_remote_session(
+        &self,
+        conversation_id: &str,
+        instructions: Option<&str>,
+    ) -> Result<(), AppError> {
+        self.task(conversation_id)?
+            .compact_remote_session(instructions)
+            .await
+    }
+
+    /// M22: get the session's active context window.
+    pub async fn get_session_context(&self, conversation_id: &str) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.get_session_context().await
+    }
+
+    /// M22: get V2 session messages with cursor-based pagination.
+    pub async fn get_v2_messages(
+        &self,
+        conversation_id: &str,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.get_v2_messages(limit, cursor).await
+    }
+
+    /// M22: fetch V2 model list.
+    pub async fn fetch_v2_model_list(&self, conversation_id: &str) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.fetch_v2_model_list().await
+    }
+
+    /// M22: fetch V2 provider list.
+    pub async fn fetch_v2_provider_list(&self, conversation_id: &str) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.fetch_v2_provider_list().await
+    }
+
     // ── Model ───────────────────────────────────────────────────────
 
     pub async fn get_model(&self, conversation_id: &str) -> Result<GetModelInfoResponse, AppError> {

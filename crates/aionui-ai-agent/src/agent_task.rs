@@ -540,6 +540,60 @@ impl AgentInstance {
         }
     }
 
+    /// M22: compact the remote OpenCode session using V2 (with V1 fallback).
+    pub async fn compact_remote_session(&self, instructions: Option<&str>) -> Result<(), AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_compact(instructions).await,
+            _ => Err(AppError::BadRequest(
+                "Compact is only supported for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M22: get the session's active context window.
+    pub async fn get_session_context(&self) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_get_context().await,
+            _ => Err(AppError::BadRequest(
+                "Context is only available for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M22: get V2 session messages with cursor-based pagination.
+    pub async fn get_v2_messages(
+        &self,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_v2_messages(limit, cursor).await,
+            _ => Err(AppError::BadRequest(
+                "V2 messages is only available for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M22: fetch V2 model list.
+    pub async fn fetch_v2_model_list(&self) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.fetch_v2_model_list().await,
+            _ => Err(AppError::BadRequest(
+                "V2 models is only available for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
+    /// M22: fetch V2 provider list.
+    pub async fn fetch_v2_provider_list(&self) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.fetch_v2_provider_list().await,
+            _ => Err(AppError::BadRequest(
+                "V2 providers is only available for OpenCode remote conversations".into(),
+            )),
+        }
+    }
+
     /// Get the current session model info. Only ACP exposes a model
     /// catalog; other variants report `model_info = None` so the UI can
     /// hide the model picker without an error.

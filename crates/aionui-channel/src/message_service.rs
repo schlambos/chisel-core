@@ -200,7 +200,8 @@ impl ChannelMessageService {
             // wouldn't meaningfully represent the nested sub-agent UI anyway).
             | AgentStreamEvent::OpencodeSubtask(_)
             | AgentStreamEvent::ToolInput(_)
-            | AgentStreamEvent::ToolProgress(_) => None,
+            | AgentStreamEvent::ToolProgress(_)
+            | AgentStreamEvent::OpencodeSessionCompacted(_) => None,
         }
     }
 

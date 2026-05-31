@@ -65,6 +65,19 @@ pub enum AgentStreamEvent {
     /// Long-running tool progress — stdout/stderr chunks, counters, or
     /// tool-specific status payloads emitted between tool start and completion.
     ToolProgress(ToolProgressEventData),
+    /// OpenCode session compaction result — emitted when the server auto-compacts
+    /// or when a manual compact completes. Contains the summary text, the range
+    /// of compacted messages, and the tokens reclaimed.
+    OpencodeSessionCompacted(OpencodeSessionCompactedData),
+}
+
+/// Data for the `OpencodeSessionCompacted` event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpencodeSessionCompactedData {
+    pub summary: String,
+    pub tokens_reclaimed: u64,
+    pub original_start_message_id: String,
+    pub original_end_message_id: String,
 }
 
 /// Data for the `Start` event.
