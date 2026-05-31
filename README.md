@@ -29,9 +29,9 @@
 
 ---
 
-## What Chisl Core Does
+## What Chislcore Does
 
-`aioncore` is the backend half of [Chisl](https://github.com/schlambos/chisel-ui). It runs as its own process — the desktop client connects to it over HTTP and WebSocket — and owns everything that isn't the UI:
+Chislcore is the backend half of [Chisl](https://github.com/schlambos/chisel-ui). It runs as its own process — the desktop client connects to it over HTTP and WebSocket — and owns everything that isn't the UI:
 
 - **Agent orchestration** — managing agent lifecycles across multiple backends, serializing tool turns, and relaying streamed output.
 - **Conversation state** — sessions, messages, confirmations, streaming responses, and persistence in SQLite.
@@ -83,7 +83,7 @@ Conversations are routed to an agent manager by protocol. Each manager implement
 
 ## Channels
 
-`aioncore` can drive agents from messaging platforms through a channel plugin system with pairing sessions.
+Chislcore can drive agents from messaging platforms through a channel plugin system with pairing sessions.
 
 | Channel  | Plugin     |
 | -------- | ---------- |
@@ -133,7 +133,7 @@ cargo run --bin aioncore -- --local
 
 Useful flags: `--host`, `--port`, `--data-dir <path>`, `--work-dir <path>`, `--log-level "info,aionui_mcp=trace"`. `--local` is the embedded mode the desktop app uses (no auth, open CORS).
 
-> When run alongside the desktop client, `chisel-ui` resolves the `aioncore` binary from `PATH` and launches it for you — you usually only run `bun run dev` in `chisel-ui` during development.
+> When run alongside the desktop client, `chisel-ui` resolves the `aioncore` binary (the shipped executable name) from `PATH` and launches it for you — you usually only run `bun run dev` in `chisel-ui` during development.
 
 ## CLI
 
@@ -169,7 +169,7 @@ just push
 
 ## Status
 
-Chisl Core is under active development. The API surface is still moving; treat it as unstable.
+Chislcore is under active development. The API surface is still moving; treat it as unstable.
 
 ## License
 
@@ -177,4 +177,4 @@ Licensed under [Apache-2.0](LICENSE).
 
 ## Heritage
 
-`aioncore` is a fork of [AionCore](https://github.com/iOfficeAI/AionCore) by iOfficeAI. The crate layout, runtime infrastructure, and agent-management primitives come from that project; the remote-OpenCode integration, the agentic-coding repositioning, and the Chisl rebrand are the divergence. Original copyright and license notices are preserved in accordance with the Apache License 2.0. **Not affiliated with the AionCore project or its maintainers.**
+Chislcore is a fork of [AionCore](https://github.com/iOfficeAI/AionCore) by iOfficeAI. The crate layout, runtime infrastructure, and agent-management primitives come from that project; the remote-OpenCode integration, the agentic-coding repositioning, and the Chisl rebrand are the divergence. Original copyright and license notices are preserved in accordance with the Apache License 2.0. **Not affiliated with the AionCore project or its maintainers.**
