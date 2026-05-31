@@ -194,6 +194,7 @@ fn event_type_name(event: &AgentStreamEvent) -> &'static str {
         AgentStreamEvent::OpencodeSubtask(_) => "OpencodeSubtask",
         AgentStreamEvent::ToolInput(_) => "ToolInput",
         AgentStreamEvent::ToolProgress(_) => "ToolProgress",
+        AgentStreamEvent::OpencodeSessionCompacted(_) => "OpencodeSessionCompacted",
     }
 }
 

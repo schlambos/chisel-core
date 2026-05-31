@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 /// Shared transport for V2 session-scoped requests.
 /// Mirrors `opencode_session_request` but targets `/api/session/{sessionID}...`.
+#[allow(clippy::too_many_arguments)]
 pub async fn v2_session_request(
     http_client: &reqwest::Client,
     base_url: &str,
@@ -106,6 +107,7 @@ pub async fn v2_get_context(
 
 /// V2 prompt (`POST /api/session/{sessionID}/prompt`).
 /// Returns the `SessionMessage` response (user message as processed).
+#[allow(clippy::too_many_arguments)]
 pub async fn v2_prompt(
     http_client: &reqwest::Client,
     base_url: &str,
