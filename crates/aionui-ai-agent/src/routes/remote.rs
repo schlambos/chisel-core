@@ -23,9 +23,9 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 
 use aionui_api_types::{
-    AgentModeOption, ApiResponse, CreateRemoteAgentRequest, HandshakeResponse, ModelInfoPayload, RemoteAgentListItem,
-    RemoteAgentResponse, RemoteSessionInfo, RemoteSkillInfo, TestRemoteAgentConnectionRequest,
-    UpdateRemoteAgentRequest,
+    AgentModeOption, ApiResponse, CreateRemoteAgentRequest, HandshakeResponse, ModelInfoPayload,
+    RemoteAgentHealthResponse, RemoteAgentListItem, RemoteAgentResponse, RemoteSessionInfo, RemoteSkillInfo,
+    TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
 };
 use aionui_auth::CurrentUser;
 use aionui_common::AppError;
@@ -40,6 +40,7 @@ pub fn remote_agent_routes(state: RemoteAgentRouterState) -> Router {
         .route("/api/remote-agents", get(list).post(create))
         .route("/api/remote-agents/test-connection", post(test_connection))
         .route("/api/remote-agents/{id}", get(get_one).put(update).delete(delete_one))
+        .route("/api/remote-agents/{id}/health", get(ping_health))
         .route("/api/remote-agents/{id}/handshake", post(handshake))
         .route("/api/remote-agents/{id}/models", get(fetch_models))
         .route("/api/remote-agents/{id}/agents", get(fetch_agents))
@@ -115,6 +116,15 @@ async fn handshake(
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<HandshakeResponse>>, AppError> {
     let resp = state.service.handshake(&id).await?;
+    Ok(Json(ApiResponse::ok(resp)))
+}
+
+async fn ping_health(
+    State(state): State<RemoteAgentRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<RemoteAgentHealthResponse>>, AppError> {
+    let resp = state.service.ping_health(&id).await?;
     Ok(Json(ApiResponse::ok(resp)))
 }
 

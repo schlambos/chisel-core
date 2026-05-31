@@ -158,6 +158,15 @@ pub struct RemoteSessionInfo {
     pub updated_at: Option<TimestampMs>,
 }
 
+/// Response for `GET /api/remote-agents/{id}/health`.
+#[derive(Debug, Serialize)]
+pub struct RemoteAgentHealthResponse {
+    pub healthy: bool,
+    pub latency_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Deserialize `Option<Option<T>>`:
 /// - JSON field absent → `None` (keep current value)
 /// - JSON `null` → `Some(None)` (clear the value)

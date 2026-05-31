@@ -383,6 +383,74 @@ impl RemoteAgentService {
         .await
     }
 
+    /// A02: lightweight health probe. Calls `GET /global/health` on the
+    /// upstream server and returns `{ healthy, latency_ms, error? }` without
+    /// updating the agent row's status (so the 60 s poll can't flap the
+    /// handshake-driven status indicator).
+    pub async fn ping_health(
+        &self,
+        id: &str,
+    ) -> Result<aionui_api_types::RemoteAgentHealthResponse, AppError> {
+        let row = self
+            .repo
+            .find_by_id(id)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::NotFound(format!("Remote agent '{id}' not found")))?;
+
+        let protocol = parse_protocol(&row.protocol);
+        let start = std::time::Instant::now();
+
+        match protocol {
+            RemoteAgentProtocol::OpenCode => {
+                let auth_type = parse_auth_type(&row.auth_type);
+                let auth_token =
+                    decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
+                let result = test_opencode_health(
+                    &row.url,
+                    auth_type,
+                    auth_token.as_deref(),
+                    row.allow_insecure,
+                )
+                .await;
+                let latency_ms = start.elapsed().as_millis() as u64;
+                match result {
+                    Ok(()) => Ok(aionui_api_types::RemoteAgentHealthResponse {
+                        healthy: true,
+                        latency_ms,
+                        error: None,
+                    }),
+                    Err(e) => Ok(aionui_api_types::RemoteAgentHealthResponse {
+                        healthy: false,
+                        latency_ms,
+                        error: Some(e.to_string()),
+                    }),
+                }
+            }
+            RemoteAgentProtocol::OpenClaw | RemoteAgentProtocol::Acp => {
+                let result = test_websocket_connection(&row.url).await;
+                let latency_ms = start.elapsed().as_millis() as u64;
+                match result {
+                    Ok(()) => Ok(aionui_api_types::RemoteAgentHealthResponse {
+                        healthy: true,
+                        latency_ms,
+                        error: None,
+                    }),
+                    Err(e) => Ok(aionui_api_types::RemoteAgentHealthResponse {
+                        healthy: false,
+                        latency_ms,
+                        error: Some(e.to_string()),
+                    }),
+                }
+            }
+            RemoteAgentProtocol::ZeroClaw => Ok(aionui_api_types::RemoteAgentHealthResponse {
+                healthy: false,
+                latency_ms: 0,
+                error: Some("ZeroClaw health probe is not supported".into()),
+            }),
+        }
+    }
+
     /// Propagate a rename / archive of an OpenCode-bound conversation to its
     /// server session (M06) via `PATCH /session/{sessionID}`. Best-effort: a
     /// no-op patch (`title` and `archived` both `None`) returns `Ok(())`
