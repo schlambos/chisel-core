@@ -254,7 +254,9 @@ mod tests {
         // that subscribes for turn N must NOT inherit a buffered terminal
         // event emitted during turn N-1.
         let rt = runtime();
-        rt.emit(AgentStreamEvent::Finish(FinishEventData { session_id: Some("stale".into()) }));
+        rt.emit(AgentStreamEvent::Finish(FinishEventData {
+            session_id: Some("stale".into()),
+        }));
         // Subscribe AFTER the stale Finish was already broadcast.
         let mut rx = rt.subscribe();
         assert!(

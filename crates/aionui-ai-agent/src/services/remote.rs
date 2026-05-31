@@ -387,10 +387,7 @@ impl RemoteAgentService {
     /// upstream server and returns `{ healthy, latency_ms, error? }` without
     /// updating the agent row's status (so the 60 s poll can't flap the
     /// handshake-driven status indicator).
-    pub async fn ping_health(
-        &self,
-        id: &str,
-    ) -> Result<aionui_api_types::RemoteAgentHealthResponse, AppError> {
+    pub async fn ping_health(&self, id: &str) -> Result<aionui_api_types::RemoteAgentHealthResponse, AppError> {
         let row = self
             .repo
             .find_by_id(id)
@@ -404,15 +401,8 @@ impl RemoteAgentService {
         match protocol {
             RemoteAgentProtocol::OpenCode => {
                 let auth_type = parse_auth_type(&row.auth_type);
-                let auth_token =
-                    decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
-                let result = test_opencode_health(
-                    &row.url,
-                    auth_type,
-                    auth_token.as_deref(),
-                    row.allow_insecure,
-                )
-                .await;
+                let auth_token = decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
+                let result = test_opencode_health(&row.url, auth_type, auth_token.as_deref(), row.allow_insecure).await;
                 let latency_ms = start.elapsed().as_millis() as u64;
                 match result {
                     Ok(()) => Ok(aionui_api_types::RemoteAgentHealthResponse {

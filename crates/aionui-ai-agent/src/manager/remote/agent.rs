@@ -2835,7 +2835,8 @@ impl RemoteAgentManager {
         // The stream relay treats `Finish` as a hard terminator, so a delta
         // emitted afterwards would never reach the renderer.
         self.delta_batcher.flush_all().await;
-        self.runtime.emit(AgentStreamEvent::Finish(FinishEventData { session_id }));
+        self.runtime
+            .emit(AgentStreamEvent::Finish(FinishEventData { session_id }));
         self.runtime.transition_to(ConversationStatus::Finished);
         self.release_turn_slot().await;
     }
@@ -3255,13 +3256,7 @@ impl RemoteAgentManager {
         let session_id = self.require_opencode_session().await?;
         let base_url = normalize_base_url(&self.remote_config.url);
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
-        super::opencode_v2::v2_get_context(
-            &self.http_client,
-            &base_url,
-            auth_header.as_deref(),
-            &session_id,
-        )
-        .await
+        super::opencode_v2::v2_get_context(&self.http_client, &base_url, auth_header.as_deref(), &session_id).await
     }
 
     /// M22 Phase 2: V2 prompt path. Sends via `POST /api/session/{id}/prompt`
@@ -3293,11 +3288,7 @@ impl RemoteAgentManager {
     }
 
     /// M22: get V2 session messages with cursor-based pagination.
-    pub async fn opencode_v2_messages(
-        &self,
-        limit: Option<u32>,
-        cursor: Option<&str>,
-    ) -> Result<Value, AppError> {
+    pub async fn opencode_v2_messages(&self, limit: Option<u32>, cursor: Option<&str>) -> Result<Value, AppError> {
         if !is_opencode_protocol(&self.remote_config.protocol) {
             return Err(AppError::BadRequest(
                 "V2 messages is only available for OpenCode remote connections".into(),
@@ -3431,9 +3422,7 @@ impl RemoteAgentManager {
             ));
         }
         if !partial.is_object() {
-            return Err(AppError::BadRequest(
-                "Global config patch must be a JSON object".into(),
-            ));
+            return Err(AppError::BadRequest("Global config patch must be a JSON object".into()));
         }
         self.opencode_config_request("/global/config", reqwest::Method::PATCH, Some(partial))
             .await
@@ -3515,10 +3504,7 @@ impl RemoteAgentManager {
         let url = format!("{base_url}{path}");
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
 
-        let mut req = self
-            .http_client
-            .request(method, &url)
-            .timeout(Duration::from_secs(15));
+        let mut req = self.http_client.request(method, &url).timeout(Duration::from_secs(15));
         if let Some(ref b) = body {
             req = req.json(b);
         }
@@ -3835,9 +3821,7 @@ impl RemoteAgentManager {
         // invocation (the user message is created but no assistant response is
         // generated, emitting only `session.status busy → idle`). This was the
         // root of the "2nd message returns nothing" bug.
-        if session_just_created
-            && let Some(mid) = opencode_message_id.filter(|m| m.starts_with("msg"))
-        {
+        if session_just_created && let Some(mid) = opencode_message_id.filter(|m| m.starts_with("msg")) {
             body["messageID"] = json!(mid);
         }
         if let Some(hint) = system_hint {
@@ -5446,7 +5430,10 @@ mod tests {
         }
 
         let events = drain_events(&mut rx);
-        let finishes = events.iter().filter(|e| matches!(e, AgentStreamEvent::Finish(_))).count();
+        let finishes = events
+            .iter()
+            .filter(|e| matches!(e, AgentStreamEvent::Finish(_)))
+            .count();
         assert_eq!(
             finishes, 1,
             "stray `busy` after the turn's Finish must not re-arm the gate and emit a second Finish; got {finishes}"
@@ -5471,8 +5458,14 @@ mod tests {
         }
 
         let events = drain_events(&mut rx);
-        let finishes = events.iter().filter(|e| matches!(e, AgentStreamEvent::Finish(_))).count();
-        assert_eq!(finishes, 1, "expected exactly one Finish for the terminal trio, got {finishes}");
+        let finishes = events
+            .iter()
+            .filter(|e| matches!(e, AgentStreamEvent::Finish(_)))
+            .count();
+        assert_eq!(
+            finishes, 1,
+            "expected exactly one Finish for the terminal trio, got {finishes}"
+        );
     }
 
     #[tokio::test]

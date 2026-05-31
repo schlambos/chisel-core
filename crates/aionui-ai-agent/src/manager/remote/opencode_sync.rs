@@ -42,10 +42,7 @@ pub async fn fetch_sync_history(
         .collect::<serde_json::Map<String, Value>>()
         .into();
 
-    let mut req = http_client
-        .post(&url)
-        .json(&body)
-        .timeout(Duration::from_secs(15));
+    let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(15));
     if let Some(h) = auth_header {
         req = req.header(AUTHORIZATION, h);
     }
@@ -75,22 +72,14 @@ fn parse_sync_events(val: &Value) -> Result<Vec<SyncEvent>, AppError> {
         .ok_or_else(|| AppError::BadGateway("OpenCode sync/history response was not an array".into()))?;
     let mut events = Vec::new();
     for item in arr {
-        let id = item
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let aggregate_id = item
             .get("aggregate_id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
         let seq = item.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
-        let event_type = item
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let event_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let data = item.get("data").cloned().unwrap_or(Value::Null);
         events.push(SyncEvent {
             id,
@@ -141,10 +130,7 @@ pub async fn steal_session(
 ) -> Result<String, AppError> {
     let url = format!("{base_url}/sync/steal");
     let body = json!({ "sessionID": session_id });
-    let mut req = http_client
-        .post(&url)
-        .json(&body)
-        .timeout(Duration::from_secs(15));
+    let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(15));
     if let Some(h) = auth_header {
         req = req.header(AUTHORIZATION, h);
     }

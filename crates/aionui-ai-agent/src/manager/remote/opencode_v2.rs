@@ -68,9 +68,7 @@ pub async fn v2_compact(
     session_id: &str,
     instructions: Option<&str>,
 ) -> Result<(), AppError> {
-    let body = instructions
-        .map(|s| json!({ "instructions": s }))
-        .unwrap_or(json!({}));
+    let body = instructions.map(|s| json!({ "instructions": s })).unwrap_or(json!({}));
     v2_session_request(
         http_client,
         base_url,
@@ -198,7 +196,7 @@ pub async fn v2_get_messages(
     limit: Option<u32>,
     cursor: Option<&str>,
 ) -> Result<Value, AppError> {
-    let mut subpath = format!("/message");
+    let mut subpath = "/message".to_string();
     let mut sep = '?';
     if let Some(l) = limit {
         subpath.push_str(&format!("{sep}limit={l}"));
@@ -314,10 +312,7 @@ pub fn parse_v2_models_as_entries(models: &[Value]) -> Vec<aionui_api_types::Mod
             Some(id) => id,
             None => continue,
         };
-        let name = model
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or(model_id);
+        let name = model.get("name").and_then(|v| v.as_str()).unwrap_or(model_id);
         entries.push(aionui_api_types::ModelInfoEntry {
             id: format!("{provider_id}::{model_id}"),
             label: format!("[{provider_id}] {name}"),

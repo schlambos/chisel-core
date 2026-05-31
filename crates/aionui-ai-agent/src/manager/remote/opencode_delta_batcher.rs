@@ -148,12 +148,7 @@ impl DeltaBatcherHandle {
     pub async fn flush_part(&self, part_id: &str) {
         let keys: Vec<DeltaKey> = {
             let guard = self.inner.lock().await;
-            guard
-                .pending
-                .keys()
-                .filter(|k| k.part_id == part_id)
-                .cloned()
-                .collect()
+            guard.pending.keys().filter(|k| k.part_id == part_id).cloned().collect()
         };
         for k in keys {
             self.flush_key(&k).await;

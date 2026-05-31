@@ -51,7 +51,10 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
         .route("/api/conversations/{id}/opencode/context", get(get_session_context))
         .route("/api/conversations/{id}/opencode/v2-messages", get(get_v2_messages))
         .route("/api/conversations/{id}/opencode/v2-models", get(get_v2_model_list))
-        .route("/api/conversations/{id}/opencode/v2-providers", get(get_v2_provider_list))
+        .route(
+            "/api/conversations/{id}/opencode/v2-providers",
+            get(get_v2_provider_list),
+        )
         .with_state(state)
 }
 
@@ -370,7 +373,10 @@ async fn compact_session(
     body: Option<Json<CompactRequest>>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let instructions = body.and_then(|Json(b)| b.instructions);
-    state.service.compact_remote_session(&id, instructions.as_deref()).await?;
+    state
+        .service
+        .compact_remote_session(&id, instructions.as_deref())
+        .await?;
     Ok(Json(ApiResponse::success()))
 }
 

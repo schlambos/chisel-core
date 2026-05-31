@@ -118,7 +118,8 @@ impl StreamRelay {
                 Ok(event) => match &event {
                     AgentStreamEvent::Thinking(data) => {
                         if data.status.as_deref() == Some("done") {
-                            self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
+                            self.complete_active_thinking(&mut active_thinking, current_model.as_ref())
+                                .await;
                             continue;
                         }
 
@@ -139,7 +140,8 @@ impl StreamRelay {
                         self.forward_to_websocket_with_msg_id(&segment.id, &event);
                     }
                     AgentStreamEvent::Text(data) => {
-                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
+                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref())
+                            .await;
 
                         let is_new_segment = active_text.is_none();
                         let segment = active_text.get_or_insert_with(|| TextSegmentState {
@@ -190,7 +192,8 @@ impl StreamRelay {
                             "StreamRelay received terminal event"
                         );
 
-                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
+                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref())
+                            .await;
                         self.close_active_text_segment(
                             &mut active_text,
                             &mut text_segments,
@@ -212,7 +215,8 @@ impl StreamRelay {
                         break outcome;
                     }
                     AgentStreamEvent::ToolCall(data) => {
-                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
+                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref())
+                            .await;
                         self.close_active_text_segment(
                             &mut active_text,
                             &mut text_segments,
@@ -224,7 +228,8 @@ impl StreamRelay {
                         self.persist_tool_call(data).await;
                     }
                     AgentStreamEvent::AcpToolCall(data) => {
-                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
+                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref())
+                            .await;
                         self.close_active_text_segment(
                             &mut active_text,
                             &mut text_segments,
@@ -244,7 +249,8 @@ impl StreamRelay {
                         self.forward_to_websocket(&event);
                     }
                     AgentStreamEvent::ToolGroup(entries) => {
-                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
+                        self.complete_active_thinking(&mut active_thinking, current_model.as_ref())
+                            .await;
                         self.close_active_text_segment(
                             &mut active_text,
                             &mut text_segments,
@@ -267,7 +273,8 @@ impl StreamRelay {
                         "StreamRelay channel closed without terminal event"
                     );
 
-                    self.complete_active_thinking(&mut active_thinking, current_model.as_ref()).await;
+                    self.complete_active_thinking(&mut active_thinking, current_model.as_ref())
+                        .await;
                     self.close_active_text_segment(
                         &mut active_text,
                         &mut text_segments,
@@ -533,7 +540,11 @@ impl StreamRelay {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn complete_active_thinking(&self, active_thinking: &mut Option<ThinkingSegmentState>, model: Option<&AssistantModelInfoEventData>) {
+    async fn complete_active_thinking(
+        &self,
+        active_thinking: &mut Option<ThinkingSegmentState>,
+        model: Option<&AssistantModelInfoEventData>,
+    ) {
         let Some(segment) = active_thinking.take() else {
             return;
         };

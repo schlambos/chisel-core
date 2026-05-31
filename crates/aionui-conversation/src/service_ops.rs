@@ -227,9 +227,7 @@ impl ConversationService {
         conversation_id: &str,
         instructions: Option<&str>,
     ) -> Result<(), AppError> {
-        self.task(conversation_id)?
-            .compact_remote_session(instructions)
-            .await
+        self.task(conversation_id)?.compact_remote_session(instructions).await
     }
 
     /// M22: get the session's active context window.

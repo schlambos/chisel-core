@@ -106,8 +106,8 @@ pub use provider::{
     SuggestionType, UpdateProviderRequest,
 };
 pub use remote_agent::{
-    CreateRemoteAgentRequest, HandshakeResponse, RemoteAgentHealthResponse, RemoteAgentListItem,
-    RemoteAgentResponse, RemoteSessionInfo, TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
+    CreateRemoteAgentRequest, HandshakeResponse, RemoteAgentHealthResponse, RemoteAgentListItem, RemoteAgentResponse,
+    RemoteSessionInfo, TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
 };
 pub use response::{ApiResponse, ErrorResponse};
 pub use shell::{
