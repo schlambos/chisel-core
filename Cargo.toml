@@ -22,6 +22,7 @@ members = [
   "crates/aionui-cron",
   "crates/aionui-assistant",
   "crates/aionui-app",
+  "crates/aionui-opencode-conformance",
 ]
 
 [workspace.package]

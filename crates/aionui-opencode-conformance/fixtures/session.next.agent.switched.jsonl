@@ -1,0 +1,3 @@
+{"id":"evt_e86cde15c001WFWGmwsqA3A1hM","type":"session.next.agent.switched","properties":{"sessionID":"ses_17932460fffeoWz66kj9E71unL","timestamp":"2026-06-02T05:28:20.059Z","agent":"minimax"}}
+{"id":"evt_e86d21daa001sx3JLHjgaNPFEB","type":"session.next.agent.switched","properties":{"sessionID":"ses_1792de27bffeIhI6gK6qB9vCPy","timestamp":"2026-06-02T05:32:57.642Z","agent":"minimax"}}
+{"id":"evt_e86d251eb001KqpeRzwWYRP2HN","type":"session.next.agent.switched","properties":{"sessionID":"ses_1792dae19ffefGGflCEYzvTUBf","timestamp":"2026-06-02T05:33:11.019Z","agent":"general"}}

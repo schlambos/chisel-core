@@ -1,0 +1,1 @@
+{"id":"evt_e86d42650002tI9tP3ee9E3X7p","type":"permission.asked","properties":{"id":"per_e86d42650001wWdSYBEMyDWSpz","sessionID":"ses_1792bfd2effel9t5EztPuSkwdw","permission":"external_directory","patterns":["/tmp/*"],"metadata":{},"always":["/tmp/*"],"tool":{"messageID":"msg_e86d417f4001l7u51Z5RiDeIL5","callID":"call_function_a87o455ospgn_1"}}}

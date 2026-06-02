@@ -1,0 +1,3 @@
+{"id":"evt_e86cde15e001KUm1Pr3UbvKBq1","type":"session.next.model.switched","properties":{"sessionID":"ses_17932460fffeoWz66kj9E71unL","timestamp":"2026-06-02T05:28:20.059Z","model":{"id":"MiniMax-M3","providerID":"minimax-coding-plan","variant":"default"}}}
+{"id":"evt_e86d21dad00197tHxoGiZLjnED","type":"session.next.model.switched","properties":{"sessionID":"ses_1792de27bffeIhI6gK6qB9vCPy","timestamp":"2026-06-02T05:32:57.642Z","model":{"id":"MiniMax-M3","providerID":"minimax-coding-plan","variant":"default"}}}
+{"id":"evt_e86d251ec001d3WnHtmU0CsN8P","type":"session.next.model.switched","properties":{"sessionID":"ses_1792dae19ffefGGflCEYzvTUBf","timestamp":"2026-06-02T05:33:11.019Z","model":{"id":"MiniMax-M3","providerID":"minimax-coding-plan","variant":"default"}}}

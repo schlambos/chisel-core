@@ -1,0 +1,17 @@
+[package]
+name = "aionui-opencode-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Test-only crate that pins the OpenCode SSE protocol surface Chisl's remote-OpenCode adapter assumes. Recorded JSONL fixtures + a forward-compatible parser test gated in CI."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
