@@ -27,10 +27,21 @@
 //! in [`PendingQuestion`] until every question is answered, then a single
 //! `reply` POST carries the full `answers` matrix.
 //!
-//! ### Known limitations (single-select button UI)
-//! - `multiple` (multi-select) degrades to a single selected label.
-//! - `custom` (freeform text) is not yet enterable; the user picks a provided
-//!   option or rejects. Both are tracked as follow-ups.
+//! ## P1.2a (D4) answer matrix
+//!
+//! - `multiple` (multi-select) — the renderer presents a chip-style
+//!   multi-select UI. We add a single synthetic `__question_all__` option
+//!   that, when selected, accepts ALL provided options (matching
+//!   OpenCode's `multiple` semantics). The renderer can also submit a
+//!   hand-picked subset; `record_multi` accepts a list of labels.
+//! - `custom` (freeform) — the renderer presents a freeform text input
+//!   with optional `secret: true` password mask. The answer is a single
+//!   string in the `answers` matrix and MUST NOT appear in logs,
+//!   telemetry, or i18n strings (P1.2a security constraint). We tag the
+//!   `Confirmation.options[0].params` with `kind: "freeform"` and
+//!   `secret: <bool>` so the renderer can pick the right input flavour.
+//! - Plain single-select — unchanged from M09; the provided labels are
+//!   radio choices and a Reject sentinel is appended.
 
 use aionui_common::{Confirmation, ConfirmationOption};
 use serde_json::{Value, json};
@@ -44,6 +55,15 @@ const QUESTION_REJECT_LABEL: &str = "Reject";
 /// flow in `agent.rs::confirm()`.
 const CALL_ID_PREFIX: &str = "question-";
 
+/// P1.2a (D4): multi-select "accept all" sentinel. When the user picks this
+/// option we treat the answer as "every provided option" — matches OpenCode's
+/// `multiple` semantics where submitting `[]` would be ambiguous.
+pub const QUESTION_ALL_VALUE: &str = "__question_all__";
+/// P1.2a (D4): freeform-text sentinel. The renderer substitutes the typed
+/// value at confirm time. Stamped into the `value` field of the
+/// `__question_freeform__` option so the round-trip is unambiguous.
+pub const QUESTION_FREEFORM_VALUE: &str = "__question_freeform__";
+
 /// One question within a [`ParsedQuestionRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedQuestion {
@@ -53,6 +73,10 @@ pub struct ParsedQuestion {
     pub options: Vec<(String, String)>,
     pub multiple: bool,
     pub custom: bool,
+    /// P1.2a (D4): if `custom: true` and this is also `true`, the renderer
+    /// MUST render a password-masked input and MUST NOT log/telemetry/i18n
+    /// the typed value.
+    pub secret: bool,
 }
 
 /// A parsed `question.asked` payload.
@@ -137,12 +161,17 @@ pub fn parse_question_request(props: &Value) -> Option<ParsedQuestionRequest> {
                 .unwrap_or_default();
             let multiple = q.get("multiple").and_then(|v| v.as_bool()).unwrap_or(false);
             let custom = q.get("custom").and_then(|v| v.as_bool()).unwrap_or(false);
+            // P1.2a (D4): secret flag only meaningful when `custom: true`.
+            // We never log / telemetry the typed value either way; the flag
+            // just tells the renderer to render a password-masked input.
+            let secret = q.get("secret").and_then(|v| v.as_bool()).unwrap_or(false) && custom;
             ParsedQuestion {
                 header,
                 question,
                 options,
                 multiple,
                 custom,
+                secret,
             }
         })
         .collect();
@@ -182,7 +211,8 @@ pub fn parse_question_call_id(call_id: &str) -> Option<(String, usize)> {
 
 /// Build one [`Confirmation`] per question so they queue into the Approvals
 /// tab. Each option becomes a radio choice keyed by its label; a Reject option
-/// is always appended.
+/// is always appended. P1.2a (D4): also emits a freeform option when
+/// `custom: true` and an "all" option when `multiple: true`.
 pub fn build_question_confirmations(req: &ParsedQuestionRequest) -> Vec<Confirmation> {
     req.questions
         .iter()
@@ -199,10 +229,13 @@ pub fn build_question_confirmations(req: &ParsedQuestionRequest) -> Vec<Confirma
                 }
             }
             if q.multiple {
-                description.push_str("\n(server allows multiple answers; pick the best one)");
+                description.push_str("\n(server allows multiple answers; pick one, several, or \"All\")");
             }
             if q.custom {
-                description.push_str("\n(server allows a custom answer; pick the closest option or Reject)");
+                let secret_hint = if q.secret { " (secret)" } else { "" };
+                description.push_str(&format!(
+                    "\n(server allows a custom answer{secret_hint}; type your own or pick the closest option)"
+                ));
             }
 
             let mut options: Vec<ConfirmationOption> = q
@@ -214,6 +247,32 @@ pub fn build_question_confirmations(req: &ParsedQuestionRequest) -> Vec<Confirma
                     params: None,
                 })
                 .collect();
+            // P1.2a (D4): freeform-text input. Renderer substitutes the
+            // typed value at confirm time; the typed value MUST NEVER be
+            // log/telemetry/i18n'd. The `kind`/`secret` flags in `params`
+            // let the renderer pick the right input flavour.
+            if q.custom {
+                let mut params = std::collections::HashMap::new();
+                params.insert("kind".to_string(), "freeform".to_string());
+                if q.secret {
+                    params.insert("secret".to_string(), "true".to_string());
+                }
+                options.push(ConfirmationOption {
+                    label: "Type a custom answer".to_string(),
+                    value: Value::String(QUESTION_FREEFORM_VALUE.to_string()),
+                    params: Some(params),
+                });
+            }
+            // P1.2a (D4): multi-select "All" option. Selecting this
+            // commits every provided label; a hand-picked subset is also
+            // supported via the same multi-select UI.
+            if q.multiple && !q.options.is_empty() {
+                options.push(ConfirmationOption {
+                    label: "All of the above".to_string(),
+                    value: Value::String(QUESTION_ALL_VALUE.to_string()),
+                    params: None,
+                });
+            }
             options.push(ConfirmationOption {
                 label: QUESTION_REJECT_LABEL.to_string(),
                 value: Value::String(QUESTION_REJECT_VALUE.to_string()),
@@ -292,6 +351,43 @@ mod tests {
         assert_eq!(q.options[0], ("Postgres".to_string(), "Relational, robust".to_string()));
         assert!(q.custom);
         assert!(!q.multiple);
+        // secret flag only meaningful when custom: true; no `secret` here.
+        assert!(!q.secret);
+    }
+
+    #[test]
+    fn parses_secret_flag_only_when_custom_is_true() {
+        let props = json!({
+            "id": "que_secret",
+            "sessionID": "ses_1",
+            "questions": [{
+                "header": "Token?",
+                "question": "Paste a token",
+                "options": [],
+                "multiple": false,
+                "custom": true,
+                "secret": true
+            }]
+        });
+        let req = parse_question_request(&props).expect("should parse");
+        let q = &req.questions[0];
+        assert!(q.custom);
+        assert!(q.secret, "secret:true + custom:true must land on ParsedQuestion.secret");
+        // Standalone secret without custom MUST NOT flip the bit.
+        let props2 = json!({
+            "id": "que_nosecret",
+            "sessionID": "ses_1",
+            "questions": [{
+                "header": "Pick",
+                "question": "Pick one",
+                "options": [{ "label": "A", "description": "" }],
+                "multiple": false,
+                "custom": false,
+                "secret": true
+            }]
+        });
+        let req2 = parse_question_request(&props2).expect("should parse");
+        assert!(!req2.questions[0].secret);
     }
 
     #[test]
@@ -327,14 +423,98 @@ mod tests {
         assert_eq!(c.title.as_deref(), Some("DB choice"));
         assert_eq!(c.command_type, None);
         assert_eq!(c.session_id.as_deref(), Some("ses_1"));
-        // 2 real options + Reject.
-        assert_eq!(c.options.len(), 3);
+        // 2 real options + freeform + Reject = 4
+        assert_eq!(c.options.len(), 4);
         assert_eq!(c.options[0].value, json!("Postgres"));
-        assert_eq!(c.options[2].value, json!(QUESTION_REJECT_VALUE));
+        // freeform option is appended before the Reject.
+        assert_eq!(c.options[2].value, json!(QUESTION_FREEFORM_VALUE));
+        assert_eq!(
+            c.options[2]
+                .params
+                .as_ref()
+                .and_then(|p| p.get("kind"))
+                .map(String::as_str),
+            Some("freeform")
+        );
+        // No secret flag on this props.
+        assert!(c.options[2].params.as_ref().and_then(|p| p.get("secret")).is_none());
+        assert_eq!(c.options[3].value, json!(QUESTION_REJECT_VALUE));
         // Option descriptions surface in the body.
         assert!(c.description.contains("Relational, robust"));
         // custom hint present.
         assert!(c.description.contains("custom answer"));
+    }
+
+    #[test]
+    fn builds_freeform_option_with_secret_flag() {
+        let props = json!({
+            "id": "que_secret",
+            "sessionID": "ses_1",
+            "questions": [{
+                "header": "Token?",
+                "question": "Paste a token",
+                "options": [],
+                "multiple": false,
+                "custom": true,
+                "secret": true
+            }]
+        });
+        let req = parse_question_request(&props).unwrap();
+        let confs = build_question_confirmations(&req);
+        assert_eq!(confs.len(), 1);
+        let c = &confs[0];
+        // 0 real options + freeform + Reject = 2
+        assert_eq!(c.options.len(), 2);
+        let freeform = c
+            .options
+            .iter()
+            .find(|o| o.value == json!(QUESTION_FREEFORM_VALUE))
+            .expect("freeform option present");
+        let params = freeform.params.as_ref().expect("params present");
+        assert_eq!(params.get("kind").map(String::as_str), Some("freeform"));
+        assert_eq!(params.get("secret").map(String::as_str), Some("true"));
+        // secret hint in the description body.
+        assert!(c.description.contains("(secret)"));
+    }
+
+    #[test]
+    fn builds_multiple_select_with_all_option() {
+        let props = json!({
+            "id": "que_multi",
+            "sessionID": "ses_1",
+            "questions": [{
+                "header": "Tools?",
+                "question": "Which tools?",
+                "options": [
+                    { "label": "bash", "description": "run shell" },
+                    { "label": "read", "description": "read file" },
+                    { "label": "write", "description": "write file" }
+                ],
+                "multiple": true,
+                "custom": false
+            }]
+        });
+        let req = parse_question_request(&props).unwrap();
+        let confs = build_question_confirmations(&req);
+        assert_eq!(confs.len(), 1);
+        let c = &confs[0];
+        // 3 real + All + Reject = 5
+        assert_eq!(c.options.len(), 5);
+        let all = c
+            .options
+            .iter()
+            .find(|o| o.value == json!(QUESTION_ALL_VALUE))
+            .expect("all option present");
+        assert_eq!(all.label, "All of the above");
+        // multi-select hint in the description.
+        assert!(c.description.contains("multiple answers"));
+    }
+
+    #[test]
+    fn all_value_present_in_options() {
+        // Guard against an accidental rename of the multi-select sentinel.
+        assert!(!QUESTION_ALL_VALUE.is_empty());
+        assert!(!QUESTION_FREEFORM_VALUE.is_empty());
     }
 
     #[test]
