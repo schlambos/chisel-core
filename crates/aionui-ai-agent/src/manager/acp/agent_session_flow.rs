@@ -265,6 +265,9 @@ impl AcpAgentManager {
                 // English string.
                 message: empty_finish_diagnostic_message(prompt_response.stop_reason),
                 code: Some("acp.empty_finish".into()),
+                kind: None,
+                metadata: None,
+                recoverable: None,
             }));
         }
 

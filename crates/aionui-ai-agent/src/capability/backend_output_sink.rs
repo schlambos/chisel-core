@@ -134,6 +134,9 @@ impl OutputSink for BackendOutputSink {
         let _ = self.event_tx.send(AgentStreamEvent::Error(ErrorEventData {
             message: msg.to_owned(),
             code: None,
+            kind: None,
+            metadata: None,
+            recoverable: None,
         }));
     }
 

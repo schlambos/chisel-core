@@ -189,10 +189,11 @@ impl RemoteSessionSyncService {
             .unwrap_or_else(aionui_common::now_ms);
         let updated_at = session.updated_at.unwrap_or(created_at);
         let title = session.title.clone().unwrap_or_else(|| "Untitled session".to_string());
-        let workspace = session.directory.clone().unwrap_or_default();
+        let remote_workspace = session.directory.clone().unwrap_or_default();
 
         let extra = serde_json::json!({
-            "workspace": workspace,
+            "workspace": "",
+            "remote_workspace": remote_workspace,
             "remote_agent_id": remote_agent_id,
             "sessionKey": session.id,
             "skills": [],

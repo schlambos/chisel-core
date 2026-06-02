@@ -97,6 +97,7 @@ pub enum EventKind {
     SessionStatus,
     SessionIdle,
     SessionError,
+    SessionNextRetried,
     SessionCompacted,
     SessionNextAgentSwitched,
     SessionNextModelSwitched,
@@ -155,7 +156,6 @@ pub enum IgnoredKind {
     TuiToastShow,
     SessionNextPrompted,
     SessionNextSynthetic,
-    SessionNextRetried,
     SessionNextStepStarted,
     SessionNextStepEnded,
     SessionNextStepFailed,
@@ -248,6 +248,11 @@ pub fn classify_event(value: &Value) -> Result<ClassifyOutcome, ClassifyError> {
             // the adapter still tolerates its absence. Only verify the envelope.
             let _ = props;
             Ok(ClassifyOutcome::Handled(EventKind::SessionError))
+        }
+        "session.next.retried" => {
+            require_str(event_type, props, "sessionID")?;
+            require_path(event_type, props, "attempt")?;
+            Ok(ClassifyOutcome::Handled(EventKind::SessionNextRetried))
         }
         "session.compacted" => {
             require_str(event_type, props, "sessionID")?;
@@ -385,7 +390,6 @@ pub fn classify_event(value: &Value) -> Result<ClassifyOutcome, ClassifyError> {
         "tui.toast.show" => Ok(ClassifyOutcome::Ignored(IgnoredKind::TuiToastShow)),
         "session.next.prompted" => Ok(ClassifyOutcome::Ignored(IgnoredKind::SessionNextPrompted)),
         "session.next.synthetic" => Ok(ClassifyOutcome::Ignored(IgnoredKind::SessionNextSynthetic)),
-        "session.next.retried" => Ok(ClassifyOutcome::Ignored(IgnoredKind::SessionNextRetried)),
         "session.next.step.started" => Ok(ClassifyOutcome::Ignored(IgnoredKind::SessionNextStepStarted)),
         "session.next.step.ended" => Ok(ClassifyOutcome::Ignored(IgnoredKind::SessionNextStepEnded)),
         "session.next.step.failed" => Ok(ClassifyOutcome::Ignored(IgnoredKind::SessionNextStepFailed)),

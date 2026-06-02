@@ -195,6 +195,10 @@ fn event_type_name(event: &AgentStreamEvent) -> &'static str {
         AgentStreamEvent::ToolInput(_) => "ToolInput",
         AgentStreamEvent::ToolProgress(_) => "ToolProgress",
         AgentStreamEvent::OpencodeSessionCompacted(_) => "OpencodeSessionCompacted",
+        AgentStreamEvent::SessionStatus(_) => "SessionStatus",
+        AgentStreamEvent::SessionIdle(_) => "SessionIdle",
+        AgentStreamEvent::Retry(_) => "Retry",
+        AgentStreamEvent::SessionErrorRecovered(_) => "SessionErrorRecovered",
     }
 }
 

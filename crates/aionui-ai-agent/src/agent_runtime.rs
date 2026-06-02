@@ -141,6 +141,9 @@ impl AgentRuntime {
         let _ = self.event_tx.send(AgentStreamEvent::Error(ErrorEventData {
             message: message.into(),
             code: None,
+            kind: None,
+            metadata: None,
+            recoverable: None,
         }));
     }
 }

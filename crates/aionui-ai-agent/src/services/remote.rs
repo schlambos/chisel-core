@@ -1000,6 +1000,7 @@ fn normalize_ms(n: f64) -> i64 {
 ///   status, input, output).
 /// - `step-start` / `step-finish` parts are skipped — they are flow
 ///   markers without user-visible content.
+/// - `retry` parts → lightweight `opencode_retry` rows preserving part order.
 async fn fetch_opencode_messages(
     url: &str,
     auth_type: RemoteAgentAuthType,
@@ -1131,12 +1132,61 @@ pub(crate) fn convert_opencode_messages(
                         },
                     ));
                 }
+                "retry" if is_assistant => {
+                    if let Some(row) = build_retry_row(
+                        conversation_id,
+                        part,
+                        created_at,
+                        opencode_message_id.as_deref().unwrap_or(""),
+                        part_id.as_deref().unwrap_or(""),
+                    ) {
+                        rows.push(row);
+                    }
+                }
                 // step-start / step-finish carry no user-visible payload.
                 _ => continue,
             }
         }
     }
     rows
+}
+
+fn build_retry_row(
+    conversation_id: &str,
+    part: &serde_json::Value,
+    created_at: i64,
+    message_id: &str,
+    part_id: &str,
+) -> Option<aionui_db::models::MessageRow> {
+    if message_id.is_empty() || part_id.is_empty() {
+        return None;
+    }
+    let reason = part
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let attempt = part.get("attempt").and_then(|v| v.as_u64()).unwrap_or(1);
+    let content = serde_json::json!({
+        "message_id": message_id,
+        "part_id": part_id,
+        "attempt": attempt,
+        "reason": reason,
+        "retry_after": part.get("retryAfter").or_else(|| part.get("retry_after")).and_then(|v| v.as_u64()),
+        "provider_hint": part.get("providerHint").or_else(|| part.get("provider_hint")).and_then(|v| v.as_str()),
+        "replay": true,
+    });
+    Some(aionui_db::models::MessageRow {
+        id: part_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        msg_id: Some(part_id.to_string()),
+        r#type: "opencode_retry".into(),
+        content: content.to_string(),
+        position: Some("left".into()),
+        status: Some("finish".into()),
+        hidden: false,
+        created_at,
+    })
 }
 
 fn extract_assistant_model(info: &serde_json::Value) -> Option<(String, String)> {

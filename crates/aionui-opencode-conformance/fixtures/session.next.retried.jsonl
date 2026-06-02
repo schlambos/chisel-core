@@ -1,0 +1,2 @@
+{"id":"evt_p11_retry_rate_limit","type":"session.next.retried","properties":{"timestamp":1717350000000,"sessionID":"ses_p11","messageID":"msg_p11","partID":"prt_p11_retry","attempt":2,"reason":"rate_limit","retryAfter":1500,"providerHint":"anthropic"}}
+{"id":"evt_p11_retry_unknown","type":"session.next.retried","properties":{"timestamp":1717350000100,"sessionID":"ses_p11","messageID":"msg_p11","partID":"prt_p11_retry2","attempt":3,"error":{"type":"new-upstream-reason","message":"retrying"}}}

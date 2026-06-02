@@ -201,7 +201,11 @@ impl ChannelMessageService {
             | AgentStreamEvent::OpencodeSubtask(_)
             | AgentStreamEvent::ToolInput(_)
             | AgentStreamEvent::ToolProgress(_)
-            | AgentStreamEvent::OpencodeSessionCompacted(_) => None,
+            | AgentStreamEvent::OpencodeSessionCompacted(_)
+            | AgentStreamEvent::SessionStatus(_)
+            | AgentStreamEvent::SessionIdle(_)
+            | AgentStreamEvent::Retry(_)
+            | AgentStreamEvent::SessionErrorRecovered(_) => None,
         }
     }
 

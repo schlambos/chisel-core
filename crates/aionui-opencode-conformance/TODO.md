@@ -90,7 +90,7 @@ Reason: the live capture session exercised text streaming, thinking, bash/write/
 - `EventAccountAdded` / `EventAccountRemoved` / `EventAccountSwitched` — emitted on `opencode auth` flows. Capture during a fresh provider login.
 - `EventSessionNextPrompted` — observed only when a model emits a prompted-text mirror; the capture model used `message.part.*` instead.
 - `EventSessionNextSynthetic` — synthetic-text mirror; same shape concern.
-- `EventSessionNextRetried` — requires a model that triggers a recoverable retry. Capture via a synthetic outage (e.g. by misconfiguring the provider during a turn).
+- ~~`EventSessionNextRetried` — requires a model that triggers a recoverable retry. Capture via a synthetic outage (e.g. by misconfiguring the provider during a turn).~~ Promoted in P1.1 on 2026-06-02 with `fixtures/session.next.retried.jsonl` synthetic upstream-shape coverage; live capture still desirable when a provider retry is reproducible.
 - `EventSessionNextShellStarted` / `ShellEnded` — requires the v2 shell-streaming path; the capture model routed shell through the bash tool's `message.part.updated`.
 - `EventSessionNextStepStarted` / `StepEnded` / `StepFailed` — same v2-streaming-path concern.
 - `EventSessionNextTextStarted` / `TextDelta` / `TextEnded` — same.

@@ -69,6 +69,56 @@ pub enum AgentStreamEvent {
     /// or when a manual compact completes. Contains the summary text, the range
     /// of compacted messages, and the tokens reclaimed.
     OpencodeSessionCompacted(OpencodeSessionCompactedData),
+    SessionStatus(SessionStatusEventData),
+    SessionIdle(SessionIdleEventData),
+    Retry(RetryEventData),
+    SessionErrorRecovered(SessionErrorRecoveredEventData),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionStatusEventData {
+    pub session_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionIdleEventData {
+    pub session_id: String,
+    pub reason: String,
+    pub at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryEventData {
+    pub message_id: String,
+    pub part_id: String,
+    pub attempt: u64,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypedErrorData {
+    pub message: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    pub recoverable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionErrorRecoveredEventData {
+    pub message_id: String,
+    pub part_id: String,
+    pub error: TypedErrorData,
+    pub recovery_action: String,
 }
 
 /// Data for the `OpencodeSessionCompacted` event.
@@ -140,6 +190,12 @@ pub struct ErrorEventData {
     pub message: String,
     #[serde(default)]
     pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recoverable: Option<bool>,
 }
 
 #[cfg(test)]
@@ -271,6 +327,9 @@ mod tests {
         let event = AgentStreamEvent::Error(ErrorEventData {
             message: "timeout".into(),
             code: Some("E001".into()),
+            kind: None,
+            metadata: None,
+            recoverable: None,
         });
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "error");

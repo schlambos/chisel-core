@@ -34,7 +34,8 @@ use crate::manager::remote::opencode_tool_call;
 use crate::manager::remote::subagent::{self, ChildSessionRegistry};
 use crate::protocol::events::{
     AcpPermissionEventData, AcpToolCallSessionUpdateKind, AgentStreamEvent, FinishEventData, OpencodeSubtaskStatus,
-    PlanEventData, StartEventData,
+    PlanEventData, RetryEventData, SessionErrorRecoveredEventData, SessionIdleEventData, SessionStatusEventData,
+    StartEventData, TypedErrorData,
 };
 use crate::types::SendMessageData;
 use aionui_common::ConfirmationOption;
@@ -303,7 +304,6 @@ const KNOWN_IGNORED_EVENTS: &[&str] = &[
     // 2. V2 streaming mirrors of the message.part.* path we already consume
     "session.next.prompted",
     "session.next.synthetic",
-    "session.next.retried",
     "session.next.step.started",
     "session.next.step.ended",
     "session.next.step.failed",
@@ -339,6 +339,158 @@ const KNOWN_IGNORED_EVENTS: &[&str] = &[
 /// unknown event in diagnostics.
 fn is_known_ignored_event(event_type: &str) -> bool {
     KNOWN_IGNORED_EVENTS.contains(&event_type)
+}
+
+fn opencode_status(raw: Option<&str>) -> (&'static str, Option<String>) {
+    match raw {
+        Some("busy") | Some("running") => ("running", None),
+        Some("idle") => ("idle", None),
+        Some("aborting") => ("aborting", None),
+        Some("aborted") => ("aborted", Some("aborted".to_string())),
+        Some("error") | Some("errored") => ("errored", Some("errored".to_string())),
+        Some(other) => ("idle", Some(other.to_string())),
+        None => ("idle", None),
+    }
+}
+
+fn opencode_idle_reason(props: &Value) -> String {
+    match props.get("reason").and_then(|v| v.as_str()) {
+        Some("completed") | Some("aborted") | Some("errored") | Some("compacted") => {
+            props.get("reason").and_then(|v| v.as_str()).unwrap().to_string()
+        }
+        Some(other) if other.contains("abort") => "aborted".to_string(),
+        Some(other) if other.contains("error") => "errored".to_string(),
+        Some(other) if other.contains("compact") => "compacted".to_string(),
+        _ => "completed".to_string(),
+    }
+}
+
+fn retry_reason(raw: Option<&str>) -> String {
+    match raw {
+        Some("rate_limit")
+        | Some("transient")
+        | Some("tool_error")
+        | Some("provider_error")
+        | Some("context_overflow") => raw.unwrap().to_string(),
+        Some(other) if other.contains("rate") || other.contains("limit") => "rate_limit".to_string(),
+        Some(other) if other.contains("context") => "context_overflow".to_string(),
+        Some(other) if other.contains("tool") => "tool_error".to_string(),
+        Some(other) if other.contains("provider") => "provider_error".to_string(),
+        Some(other) if other.contains("timeout") || other.contains("temporary") || other.contains("transient") => {
+            "transient".to_string()
+        }
+        _ => "unknown".to_string(),
+    }
+}
+
+fn redact_sensitive_text(input: &str) -> String {
+    let mut redact_next = false;
+    let words = input
+        .split_whitespace()
+        .map(|word| {
+            if redact_next {
+                redact_next = false;
+                return "[REDACTED]".to_string();
+            }
+            if word.eq_ignore_ascii_case("Bearer") {
+                redact_next = true;
+                return "[REDACTED]".to_string();
+            }
+            if word.starts_with("sk-") {
+                "[REDACTED]".to_string()
+            } else {
+                word.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    words.join(" ")
+}
+
+fn truncate_500(input: &str) -> String {
+    input.chars().take(500).collect()
+}
+
+fn typed_error_from_props(props: &Value) -> TypedErrorData {
+    let error = props.get("error").unwrap_or(&Value::Null);
+    let name = error
+        .get("name")
+        .or_else(|| error.get("type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let data = error.get("data").unwrap_or(error);
+    let raw_message = data
+        .get("message")
+        .or_else(|| error.get("message"))
+        .and_then(|v| v.as_str())
+        .or_else(|| props.get("error").and_then(|v| v.as_str()))
+        .unwrap_or("OpenCode session error");
+    let message = redact_sensitive_text(&truncate_500(raw_message));
+    let body_text = data.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    let combined_lower = format!("{raw_message} {body_text}").to_lowercase();
+    let kind = match name {
+        _ if combined_lower.contains("context") || combined_lower.contains("window") => "context_overflow",
+        _ if combined_lower.contains("maximum context")
+            || combined_lower.contains("token") && combined_lower.contains("limit") =>
+        {
+            "context_overflow"
+        }
+        "ProviderAuthError" => "provider_auth",
+        "ContextOverflowError" => "context_overflow",
+        "MessageOutputLengthError" => "output_length",
+        "MessageAbortedError" => "aborted",
+        "StructuredOutputError" => "structured_output",
+        "APIError" => "api",
+        _ if raw_message.to_lowercase().contains("auth") => "provider_auth",
+        _ if raw_message.to_lowercase().contains("abort") => "aborted",
+        _ => "unknown",
+    }
+    .to_string();
+
+    let mut metadata = serde_json::Map::new();
+    if let Some(provider_id) = data
+        .get("providerID")
+        .or_else(|| data.get("providerId"))
+        .and_then(|v| v.as_str())
+    {
+        metadata.insert("provider_id".to_string(), json!(provider_id));
+    }
+    if let Some(used) = data.get("used").and_then(|v| v.as_u64()) {
+        metadata.insert("used".to_string(), json!(used));
+    }
+    if let Some(limit) = data.get("limit").and_then(|v| v.as_u64()) {
+        metadata.insert("limit".to_string(), json!(limit));
+    }
+    if let Some(status_code) = data
+        .get("statusCode")
+        .or_else(|| data.get("status_code"))
+        .and_then(|v| v.as_u64())
+    {
+        metadata.insert("status_code".to_string(), json!(status_code));
+    }
+    if let Some(body) = data.get("body").and_then(|v| v.as_str()) {
+        metadata.insert("body".to_string(), json!(redact_sensitive_text(&truncate_500(body))));
+    }
+    if let Some(schema) = data
+        .get("schema")
+        .or_else(|| data.get("schemaName"))
+        .and_then(|v| v.as_str())
+    {
+        metadata.insert("schema".to_string(), json!(schema));
+    }
+    if let Some(partial) = data.get("partial").or_else(|| data.get("partialJson")) {
+        metadata.insert("partial".to_string(), partial.clone());
+    }
+    let recoverable = props
+        .get("recoverable")
+        .and_then(|v| v.as_bool())
+        .or_else(|| data.get("recoverable").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    TypedErrorData {
+        message,
+        kind,
+        metadata: (!metadata.is_empty()).then_some(Value::Object(metadata)),
+        recoverable,
+    }
 }
 
 /// Stable, **non-sensitive** fingerprint of an event's `properties` object,
@@ -1525,6 +1677,15 @@ impl RemoteAgentManager {
         match event_type {
             "session.status" => {
                 let status_type = props.get("status").and_then(|v| v.get("type")).and_then(|v| v.as_str());
+                if let Some(ref sid) = session_id {
+                    let (status, reason) = opencode_status(status_type);
+                    self.runtime
+                        .emit(AgentStreamEvent::SessionStatus(SessionStatusEventData {
+                            session_id: sid.clone(),
+                            status: status.to_string(),
+                            reason,
+                        }));
+                }
                 match status_type {
                     Some("busy") => {
                         self.runtime.bump_activity();
@@ -1586,6 +1747,13 @@ impl RemoteAgentManager {
                 }
             }
             "session.idle" => {
+                if let Some(ref sid) = session_id {
+                    self.runtime.emit(AgentStreamEvent::SessionIdle(SessionIdleEventData {
+                        session_id: sid.clone(),
+                        reason: opencode_idle_reason(props),
+                        at: props.get("at").and_then(|v| v.as_i64()).unwrap_or_else(now_ms),
+                    }));
+                }
                 // A child (sub-agent) going idle does NOT end the parent turn —
                 // it only marks the sub-agent complete. Emitting `Finish` for a
                 // child would terminate the parent's stream relay, dropping any
@@ -1614,19 +1782,8 @@ impl RemoteAgentManager {
             "session.error" => {
                 // OpenCode sends errors as { name: "...", data: { message: "..." } }
                 // in the "error" field of properties.
-                let message = props
-                    .get("error")
-                    .and_then(|e| {
-                        e.get("data")
-                            .and_then(|d| d.get("message"))
-                            .or_else(|| e.get("message"))
-                    })
-                    .and_then(|v| v.as_str())
-                    .or_else(|| {
-                        // Last resort: the error may be a plain string
-                        props.get("error").and_then(|v| v.as_str())
-                    })
-                    .unwrap_or("OpenCode session error");
+                let typed_error = typed_error_from_props(props);
+                let message = typed_error.message.as_str();
                 if is_child {
                     if let (Some(child_id), Some(parent_id)) = (session_id.as_ref(), parent_session_id.as_ref()) {
                         warn!(
@@ -1651,6 +1808,34 @@ impl RemoteAgentManager {
                         }
                     }
                 } else {
+                    if typed_error.recoverable {
+                        let message_id = props
+                            .get("messageID")
+                            .or_else(|| props.get("messageId"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let part_id = props
+                            .get("partID")
+                            .or_else(|| props.get("partId"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !message_id.is_empty() && !part_id.is_empty() {
+                            self.runtime.emit(AgentStreamEvent::SessionErrorRecovered(
+                                SessionErrorRecoveredEventData {
+                                    message_id: message_id.to_string(),
+                                    part_id: part_id.to_string(),
+                                    error: typed_error.clone(),
+                                    recovery_action: props
+                                        .get("recoveryAction")
+                                        .or_else(|| props.get("recovery_action"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("retry")
+                                        .to_string(),
+                                },
+                            ));
+                            return;
+                        }
+                    }
                     warn!(
                         conversation_id = %self.runtime.conversation_id(),
                         error = message,
@@ -1660,9 +1845,61 @@ impl RemoteAgentManager {
                         .emit(AgentStreamEvent::Error(crate::protocol::events::ErrorEventData {
                             message: message.to_string(),
                             code: None,
+                            kind: Some(typed_error.kind),
+                            metadata: typed_error.metadata,
+                            recoverable: Some(typed_error.recoverable),
                         }));
                     self.runtime.transition_to(ConversationStatus::Finished);
                 }
+            }
+            "session.next.retried" => {
+                let error = props.get("error").unwrap_or(&Value::Null);
+                let message_id = props
+                    .get("messageID")
+                    .or_else(|| props.get("messageId"))
+                    .or_else(|| error.get("messageID"))
+                    .or_else(|| error.get("messageId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let part_id = props
+                    .get("partID")
+                    .or_else(|| props.get("partId"))
+                    .or_else(|| error.get("partID"))
+                    .or_else(|| error.get("partId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if message_id.is_empty() || part_id.is_empty() {
+                    debug!(
+                        conversation_id = %self.runtime.conversation_id(),
+                        "session.next.retried missing message/part correlation"
+                    );
+                    return;
+                }
+                let reason = retry_reason(
+                    props
+                        .get("reason")
+                        .or_else(|| error.get("reason"))
+                        .or_else(|| error.get("type"))
+                        .and_then(|v| v.as_str()),
+                );
+                self.runtime.emit(AgentStreamEvent::Retry(RetryEventData {
+                    message_id: message_id.to_string(),
+                    part_id: part_id.to_string(),
+                    attempt: props.get("attempt").and_then(|v| v.as_u64()).unwrap_or(1),
+                    reason,
+                    retry_after: props
+                        .get("retryAfter")
+                        .or_else(|| props.get("retry_after"))
+                        .and_then(|v| v.as_u64()),
+                    provider_hint: props
+                        .get("providerHint")
+                        .or_else(|| props.get("provider_hint"))
+                        .or_else(|| error.get("providerID"))
+                        .or_else(|| error.get("providerId"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    replay: None,
+                }));
             }
             "session.next.model.switched" => {
                 let provider_id = props

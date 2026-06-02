@@ -136,6 +136,9 @@ fn map_chat_event(
             events.push(AgentStreamEvent::Error(ErrorEventData {
                 message: msg,
                 code: None,
+                kind: None,
+                metadata: None,
+                recoverable: None,
             }));
             text_state.turn_active = false;
         }
