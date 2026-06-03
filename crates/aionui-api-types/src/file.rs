@@ -318,6 +318,32 @@ pub struct SnapshotCompareResponse {
     pub unstaged: Vec<FileChangeInfoResponse>,
 }
 
+/// One file's unified diff against the snapshot baseline (Task 18).
+///
+/// `patch` is a standard `git diff`-style unified-diff string
+/// (`--- a/<path>\n+++ b/<path>\n@@ …`), exactly what a code review tool
+/// expects. `additions` and `deletions` are line counts (excluding the
+/// diff's own `@@`/`---`/`+++` headers), suitable for the
+/// "N files · +X / -Y lines" summary chip from Task 17. `operation`
+/// mirrors `FileChangeOperation` so the caller can render a "created" /
+/// "modified" / "deleted" label without parsing the patch text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDiffEntryResponse {
+    pub relative_path: String,
+    pub patch: String,
+    pub additions: u32,
+    pub deletions: u32,
+    pub operation: FileChangeOperation,
+}
+
+/// Response body for `POST /api/fs/snapshot/diff` and the wrapper
+/// returned by `GET /api/conversations/{id}/workspace/diff` (Task 18).
+/// A clean tree surfaces as `{ "files": [] }`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceDiffResponse {
+    pub files: Vec<FileDiffEntryResponse>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,5 +609,66 @@ mod tests {
         assert_eq!(resp.staged.len(), 1);
         assert_eq!(resp.staged[0].operation, FileChangeOperation::Delete);
         assert!(resp.unstaged.is_empty());
+    }
+
+    // -- FileDiffEntryResponse / WorkspaceDiffResponse (Task 18) --
+
+    #[test]
+    fn file_diff_entry_response_round_trip() {
+        let entry = FileDiffEntryResponse {
+            relative_path: "src/main.rs".into(),
+            patch: "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n".into(),
+            additions: 1,
+            deletions: 1,
+            operation: FileChangeOperation::Modify,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["relative_path"], "src/main.rs");
+        assert_eq!(json["additions"], 1);
+        assert_eq!(json["deletions"], 1);
+        assert_eq!(json["operation"], "modify");
+        assert!(json["patch"].as_str().unwrap().contains("--- a/src/main.rs"));
+
+        let round: FileDiffEntryResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(round.relative_path, "src/main.rs");
+        assert_eq!(round.additions, 1);
+        assert_eq!(round.deletions, 1);
+        assert_eq!(round.operation, FileChangeOperation::Modify);
+    }
+
+    #[test]
+    fn workspace_diff_response_empty_is_valid() {
+        let resp = WorkspaceDiffResponse { files: vec![] };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["files"].is_array());
+        assert_eq!(json["files"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn workspace_diff_response_deserialization() {
+        let raw = json!({
+            "files": [
+                {
+                    "relative_path": "a.txt",
+                    "patch": "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y\n",
+                    "additions": 1,
+                    "deletions": 1,
+                    "operation": "modify"
+                },
+                {
+                    "relative_path": "b.txt",
+                    "patch": "--- /dev/null\n+++ b/b.txt\n@@ -0,0 +1 @@\n+brand new\n",
+                    "additions": 1,
+                    "deletions": 0,
+                    "operation": "create"
+                }
+            ]
+        });
+        let resp: WorkspaceDiffResponse = serde_json::from_value(raw).unwrap();
+        assert_eq!(resp.files.len(), 2);
+        assert_eq!(resp.files[0].relative_path, "a.txt");
+        assert_eq!(resp.files[0].operation, FileChangeOperation::Modify);
+        assert_eq!(resp.files[1].relative_path, "b.txt");
+        assert_eq!(resp.files[1].operation, FileChangeOperation::Create);
     }
 }

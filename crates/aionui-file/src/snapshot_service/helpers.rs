@@ -8,9 +8,9 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use aionui_common::{AppError, FileChangeOperation};
-use git2::{IndexAddOption, Repository, Signature, Status, StatusOptions};
+use git2::{Delta, DiffOptions, IndexAddOption, Repository, Signature, Status, StatusOptions};
 
-use crate::types::{CompareResult, FileChangeInfo, SnapshotInfo, SnapshotMode};
+use crate::types::{CompareResult, FileChangeInfo, FileDiffEntry, SnapshotInfo, SnapshotMode};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -569,6 +569,128 @@ pub(super) fn list_branches(repo: &Repository) -> Result<Vec<String>, AppError> 
 }
 
 // ---------------------------------------------------------------------------
+// Workspace unified-diff (Task 18)
+// ---------------------------------------------------------------------------
+
+/// Build a unified diff between the snapshot baseline (HEAD) and the
+/// current working tree (one [`FileDiffEntry`] per changed file).
+///
+/// Uses `diff_tree_to_workdir` so untracked files (new files not yet in
+/// the snapshot index) surface as `Create` entries — this matches the
+/// intent of `git status`/`git diff HEAD` for an operator who has just
+/// asked the agent to write a new file. Ignored files are filtered by
+/// the snapshot repo's `.git/info/exclude` rules.
+///
+/// `--- /dev/null` is substituted for the old side of new files and
+/// `+++ /dev/null` for the old side of deleted files so the resulting
+/// patch text is consumable by any standard unified-diff parser without
+/// post-processing. Binary files are surfaced as the standard
+/// `Binary files a/<path> and b/<path> differ` line.
+pub(super) fn workspace_diff(repo: &Repository) -> Result<Vec<FileDiffEntry>, AppError> {
+    // Diff HEAD tree (or the empty tree for a fresh repo with no commits)
+    // against the working directory, including untracked files so a file
+    // the agent just created shows up in the modal.
+    let head_tree = match repo.head() {
+        Ok(head) => Some(
+            head.peel_to_tree()
+                .map_err(|e| AppError::Internal(format!("Failed to peel HEAD to tree: {}", e)))?,
+        ),
+        Err(_) => None,
+    };
+
+    let mut opts = DiffOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false)
+        .show_untracked_content(true)
+        .show_binary(true);
+
+    let diff = repo
+        .diff_tree_to_workdir(head_tree.as_ref(), Some(&mut opts))
+        .map_err(|e| AppError::Internal(format!("Failed to compute workspace diff: {}", e)))?;
+
+    let mut out = Vec::new();
+    for idx in 0..diff.deltas().len() {
+        let delta = match diff.get_delta(idx) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        let old_path = delta.old_file().path().and_then(|p| p.to_str()).unwrap_or("");
+        let new_path = delta.new_file().path().and_then(|p| p.to_str()).unwrap_or("");
+        // Prefer the new path for the entry (matches `git status` output
+        // for renames). Fall back to the old path when the new side is
+        // absent (i.e. a pure delete).
+        let relative_path = if new_path.is_empty() {
+            old_path.to_string()
+        } else {
+            new_path.to_string()
+        };
+
+        if relative_path.is_empty() {
+            // Submodule or otherwise pathless delta — skip.
+            continue;
+        }
+
+        let operation = match delta.status() {
+            // Untracked shows up on the workdir side (no counterpart in
+            // HEAD or the index). `git status` calls these "untracked",
+            // but for the "View changes" modal they are semantically a
+            // "create" — the agent wrote a new file that did not exist
+            // before. Map them to `Create` so the patch text
+            // (--- /dev/null +++ b/<path>) lines up with the operation
+            // label.
+            Delta::Added | Delta::Untracked => FileChangeOperation::Create,
+            Delta::Deleted => FileChangeOperation::Delete,
+            // Treat renames and copies as "modify" for the UI; the patch
+            // text still carries the full file content so reviewers see
+            // the change.
+            Delta::Renamed | Delta::Copied | Delta::Modified | Delta::Typechange => FileChangeOperation::Modify,
+            // Ignored files are filtered by `include_ignored(false)`.
+            // The remaining arms are belt-and-braces — libgit2 only
+            // emits them in pathological states — but covering them
+            // keeps the match exhaustive.
+            Delta::Ignored | Delta::Unreadable | Delta::Conflicted | Delta::Unmodified => continue,
+        };
+
+        // `Patch::from_diff` returns `Ok(None)` for deltas that produce
+        // no patch text (e.g. type-only changes on a clean tree) — skip
+        // those gracefully instead of erroring out.
+        let mut patch = match git2::Patch::from_diff(&diff, idx) {
+            Ok(Some(p)) => p,
+            Ok(None) => continue,
+            Err(e) => {
+                return Err(AppError::Internal(format!(
+                    "Failed to build patch for '{}': {}",
+                    relative_path, e
+                )));
+            }
+        };
+
+        let patch_text = String::from_utf8_lossy(
+            &patch
+                .to_buf()
+                .map_err(|e| AppError::Internal(format!("Failed to render patch for '{}': {}", relative_path, e)))?,
+        )
+        .into_owned();
+
+        let (_context, additions, deletions) = patch
+            .line_stats()
+            .map_err(|e| AppError::Internal(format!("Failed to count lines for '{}': {}", relative_path, e)))?;
+
+        out.push(FileDiffEntry {
+            relative_path,
+            patch: patch_text,
+            additions: additions as u32,
+            deletions: deletions as u32,
+            operation,
+        });
+    }
+
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -1072,5 +1194,146 @@ mod tests {
         assert_eq!(branches.len(), 3); // default + feature-a + feature-b
         assert!(branches.contains(&"feature-a".to_string()));
         assert!(branches.contains(&"feature-b".to_string()));
+    }
+
+    // -- workspace_diff (Task 18) --
+
+    /// Helper: init a git repo at `path` with a single initial commit
+    /// that contains `files` mapped to their string content.
+    fn init_repo_with_files(path: &Path, files: &[(&str, &str)]) {
+        let repo = Repository::init(path).unwrap();
+        let mut index = repo.index().unwrap();
+        for (name, _content) in files {
+            std::fs::write(path.join(name), _content).unwrap();
+            index.add_path(Path::new(name)).unwrap();
+        }
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let sig = Signature::now("seed", "seed@test").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "seed", &tree, &[]).unwrap();
+    }
+
+    #[test]
+    fn workspace_diff_empty_on_clean_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_files(tmp.path(), &[("a.txt", "hello")]);
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let entries = workspace_diff(&repo).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn workspace_diff_modified_file_produces_patch_and_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_files(tmp.path(), &[("hello.txt", "line1\nline2\nline3\n")]);
+
+        // Modify the file: replace line2, append line4
+        std::fs::write(tmp.path().join("hello.txt"), "line1\nLINE2-MODIFIED\nline3\nline4\n").unwrap();
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let entries = workspace_diff(&repo).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.relative_path, "hello.txt");
+        assert_eq!(entry.operation, FileChangeOperation::Modify);
+        assert!(entry.additions >= 2, "expected >= 2 additions, got {}", entry.additions);
+        assert!(entry.deletions >= 1, "expected >= 1 deletion, got {}", entry.deletions);
+        // Unified-diff headers must be present for any downstream parser.
+        assert!(entry.patch.contains("--- a/hello.txt"), "patch missing '---' header:\n{}", entry.patch);
+        assert!(entry.patch.contains("+++ b/hello.txt"), "patch missing '+++' header:\n{}", entry.patch);
+        assert!(entry.patch.contains("@@"), "patch missing hunk header:\n{}", entry.patch);
+    }
+
+    #[test]
+    fn workspace_diff_new_file_surfaces_with_create_operation() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_files(tmp.path(), &[("seed.txt", "x")]);
+
+        std::fs::write(tmp.path().join("new.txt"), "alpha\nbeta\n").unwrap();
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let entries = workspace_diff(&repo).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.relative_path, "new.txt");
+        assert_eq!(entry.operation, FileChangeOperation::Create);
+        assert_eq!(entry.additions, 2);
+        assert_eq!(entry.deletions, 0);
+        // New files use /dev/null on the old side — both headers present
+        // for downstream parsers that expect them.
+        assert!(entry.patch.contains("--- /dev/null"));
+        assert!(entry.patch.contains("+++ b/new.txt"));
+    }
+
+    #[test]
+    fn workspace_diff_deleted_file_surfaces_with_delete_operation() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_files(tmp.path(), &[("doomed.txt", "bye\n")]);
+
+        std::fs::remove_file(tmp.path().join("doomed.txt")).unwrap();
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let entries = workspace_diff(&repo).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.relative_path, "doomed.txt");
+        assert_eq!(entry.operation, FileChangeOperation::Delete);
+        assert_eq!(entry.deletions, 1);
+        assert_eq!(entry.additions, 0);
+        // Deleted files use /dev/null on the new side.
+        assert!(entry.patch.contains("--- a/doomed.txt"));
+        assert!(entry.patch.contains("+++ /dev/null"));
+    }
+
+    #[test]
+    fn workspace_diff_mixed_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_files(
+            tmp.path(),
+            &[("keep.txt", "stable"), ("modify.txt", "v0"), ("delete.txt", "x")],
+        );
+
+        std::fs::write(tmp.path().join("modify.txt"), "v1-modified").unwrap();
+        std::fs::remove_file(tmp.path().join("delete.txt")).unwrap();
+        std::fs::write(tmp.path().join("brand_new.txt"), "new file").unwrap();
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let entries = workspace_diff(&repo).unwrap();
+
+        // 3 changes total — none on `keep.txt`.
+        assert_eq!(entries.len(), 3);
+        let paths: Vec<&str> = entries.iter().map(|e| e.relative_path.as_str()).collect();
+        assert!(paths.contains(&"modify.txt"));
+        assert!(paths.contains(&"delete.txt"));
+        assert!(paths.contains(&"brand_new.txt"));
+        assert!(!paths.contains(&"keep.txt"));
+
+        let by_path: std::collections::HashMap<&str, &FileDiffEntry> =
+            entries.iter().map(|e| (e.relative_path.as_str(), e)).collect();
+        assert_eq!(by_path["modify.txt"].operation, FileChangeOperation::Modify);
+        assert_eq!(by_path["delete.txt"].operation, FileChangeOperation::Delete);
+        assert_eq!(by_path["brand_new.txt"].operation, FileChangeOperation::Create);
+    }
+
+    #[test]
+    fn workspace_diff_no_commits_returns_untracked_only() {
+        // A fresh repo with no commits at all — HEAD doesn't exist yet,
+        // so every existing file surfaces as a Create entry against an
+        // empty tree.
+        let tmp = tempfile::tempdir().unwrap();
+        let _repo = Repository::init(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("brand_new.txt"), "hi").unwrap();
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let entries = workspace_diff(&repo).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].relative_path, "brand_new.txt");
+        assert_eq!(entries[0].operation, FileChangeOperation::Create);
     }
 }
