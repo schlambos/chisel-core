@@ -14,9 +14,10 @@ use git2::Repository;
 use crate::types::{CompareResult, SnapshotInfo, SnapshotMode};
 
 use helpers::{
-    SNAPSHOT_DIR_PREFIX, WorkspaceState, build_info, discard_single_file, init_snapshot_repo, list_branches, open_repo,
-    parse_statuses, read_baseline, reset_single_file, resolve_workspace, stage_all_with_deletions, stage_single_file,
-    temp_repo_path, unstage_all_files, unstage_single_file,
+    SNAPSHOT_DIR_PREFIX, WorkspaceState, build_info, commit_tool_changes, discard_single_file, init_snapshot_repo,
+    list_branches, open_repo, parse_statuses, read_baseline, reset_single_file, resolve_workspace,
+    revert_files_from_commit, stage_all_with_deletions, stage_single_file, temp_repo_path, unstage_all_files,
+    unstage_single_file,
 };
 
 // ---------------------------------------------------------------------------
@@ -77,6 +78,64 @@ impl SnapshotService {
             }
         }
     }
+
+    /// Stage `changed_files` and create a commit on HEAD attributing the
+    /// change to `tool_call_id`. Returns the new commit SHA as a lowercase
+    /// hex string.
+    ///
+    /// Requires that exactly one workspace is tracked (per-conversation
+    /// scoping). Callers that need to scope by workspace key should resolve
+    /// the workspace explicitly and use the trait API.
+    pub async fn commit_tool_snapshot(
+        &self,
+        tool_call_id: &str,
+        changed_files: &[String],
+    ) -> Result<String, AppError> {
+        let state = get_single_workspace(&self.workspaces)?;
+        let tool_call_id = tool_call_id.to_owned();
+        let files: Vec<String> = changed_files.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            let repo = open_repo(&state)?;
+            let sha = commit_tool_changes(&repo, &tool_call_id, &files)?;
+            tracing::info!(
+                tool_call_id = %tool_call_id,
+                commit_sha = %sha,
+                files_changed = files.len(),
+                "Committed tool-call snapshot"
+            );
+            Ok::<String, AppError>(sha)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?
+    }
+
+    /// Restore the working tree for `files_to_revert` to the state recorded
+    /// in the **parent** of `commit_sha`. Files created by that tool call
+    /// (not present in the parent tree) are deleted from disk. The rest of
+    /// the working tree is left untouched.
+    pub async fn revert_to_tool_snapshot(
+        &self,
+        commit_sha: &str,
+        files_to_revert: &[String],
+    ) -> Result<(), AppError> {
+        let state = get_single_workspace(&self.workspaces)?;
+        let commit_sha = commit_sha.to_owned();
+        let files: Vec<String> = files_to_revert.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            let repo = open_repo(&state)?;
+            revert_files_from_commit(&repo, &state.workspace_path, &commit_sha, &files)?;
+            tracing::info!(
+                commit_sha = %commit_sha,
+                files_reverted = files.len(),
+                "Reverted tool-call snapshot (narrow)"
+            );
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +147,22 @@ fn get_state(workspaces: &DashMap<String, WorkspaceState>, workspace: &str) -> R
         .get(workspace)
         .map(|r| r.clone())
         .ok_or_else(|| AppError::BadRequest(format!("Workspace not initialized: {}", workspace)))
+}
+
+/// Return the single tracked workspace, or error if zero or more than one
+/// are tracked. Used by the per-tool-call inherent methods which assume a
+/// one-workspace context (per-conversation scoping).
+fn get_single_workspace(workspaces: &DashMap<String, WorkspaceState>) -> Result<WorkspaceState, AppError> {
+    let mut iter = workspaces.iter();
+    let first = iter
+        .next()
+        .ok_or_else(|| AppError::BadRequest("No workspace initialized".into()))?;
+    if iter.next().is_some() {
+        return Err(AppError::BadRequest(
+            "Per-tool-call snapshot methods require exactly one tracked workspace".into(),
+        ));
+    }
+    Ok(first.value().clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -292,5 +367,94 @@ impl crate::traits::ISnapshotService for SnapshotService {
             // git-repo mode: nothing to clean up
             Ok(())
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests (Task 14.2)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::ISnapshotService;
+    use git2::{Repository, Signature};
+    use std::path::Path;
+
+    /// Init a git repo at `path` with an initial commit that tracks `file`
+    /// with `content`.
+    fn init_repo_with_file(path: &Path, file: &str, content: &str) {
+        std::fs::write(path.join(file), content).unwrap();
+        let repo = Repository::init(path).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(file)).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let sig = Signature::now("seed", "seed@test").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "seed", &tree, &[]).unwrap();
+    }
+
+    #[tokio::test]
+    async fn narrow_revert_restores_modified_file_without_affecting_unrelated() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_file(tmp.path(), "target.txt", "v0");
+        std::fs::write(tmp.path().join("unrelated.txt"), "u0").unwrap();
+        // Commit unrelated.txt so both files are tracked at HEAD.
+        {
+            let repo = Repository::open(tmp.path()).unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("unrelated.txt")).unwrap();
+            index.write().unwrap();
+            let tree_oid = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_oid).unwrap();
+            let sig = Signature::now("seed", "seed@test").unwrap();
+            let head_oid = repo.head().unwrap().target().unwrap();
+            let parent = repo.find_commit(head_oid).unwrap();
+            repo.commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "add unrelated",
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+        }
+
+        let svc = SnapshotService::new();
+        let ws = tmp.path().to_str().unwrap();
+        svc.init(ws).await.unwrap();
+
+        // Simulate a tool call that modifies BOTH files.
+        std::fs::write(tmp.path().join("target.txt"), "v1-after-tool").unwrap();
+        std::fs::write(tmp.path().join("unrelated.txt"), "u1-after-tool").unwrap();
+
+        // Commit a snapshot of ONLY target.txt -- this is what the per-tool-call
+        // hook will do.
+        let sha = svc
+            .commit_tool_snapshot("call-1", &["target.txt".to_string()])
+            .await
+            .unwrap();
+        assert!(!sha.is_empty());
+        assert_eq!(sha.len(), 40);
+
+        // Modify unrelated.txt AFTER the tool-call commit. This simulates a
+        // later, unrelated tool call.
+        std::fs::write(tmp.path().join("unrelated.txt"), "u2-later-change").unwrap();
+
+        // Revert ONLY target.txt from the captured commit.
+        svc.revert_to_tool_snapshot(&sha, &["target.txt".to_string()])
+            .await
+            .unwrap();
+
+        // target.txt should be restored to the pre-tool-call state (v0).
+        let target_after = std::fs::read_to_string(tmp.path().join("target.txt")).unwrap();
+        assert_eq!(target_after, "v0");
+
+        // unrelated.txt must be untouched by the narrow revert -- it should
+        // still reflect the post-commit modification (u2-later-change).
+        let unrelated_after = std::fs::read_to_string(tmp.path().join("unrelated.txt")).unwrap();
+        assert_eq!(unrelated_after, "u2-later-change");
     }
 }

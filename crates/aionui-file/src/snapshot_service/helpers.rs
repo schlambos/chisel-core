@@ -427,6 +427,128 @@ fn checkout_path_from_head(repo: &Repository, rel_path: &str) -> Result<(), AppE
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Per-tool-call snapshot helpers (Task 14.2)
+// ---------------------------------------------------------------------------
+
+/// Commit a snapshot of the given file changes, attributing the commit to
+/// `tool_call_id`. Returns the new commit SHA as a lowercase hex string.
+///
+/// Staging rules:
+/// - Files that exist on disk are staged (added/updated in the index).
+/// - Files that do not exist on disk are removed from the index (deleted).
+/// - The current HEAD is used as the single parent. If the repo has no
+///   commits yet, the new commit has no parents.
+pub(super) fn commit_tool_changes(
+    repo: &Repository,
+    tool_call_id: &str,
+    changed_files: &[String],
+) -> Result<String, AppError> {
+    for path in changed_files {
+        stage_single_file(repo, path)?;
+    }
+
+    let mut index = repo
+        .index()
+        .map_err(|e| AppError::Internal(format!("Failed to get index: {}", e)))?;
+    let tree_oid = index
+        .write_tree()
+        .map_err(|e| AppError::Internal(format!("Failed to write tree: {}", e)))?;
+    let tree = repo
+        .find_tree(tree_oid)
+        .map_err(|e| AppError::Internal(format!("Failed to find tree: {}", e)))?;
+
+    let parents_vec: Vec<git2::Commit<'_>> = match repo.head() {
+        Ok(head) => {
+            let target = head
+                .target()
+                .ok_or_else(|| AppError::Internal("HEAD has no target".into()))?;
+            vec![repo
+                .find_commit(target)
+                .map_err(|e| AppError::Internal(format!("Failed to find HEAD commit: {}", e)))?]
+        }
+        Err(_) => Vec::new(),
+    };
+    let parents: Vec<&git2::Commit<'_>> = parents_vec.iter().collect();
+
+    let sig = Signature::now(SNAPSHOT_SIG_NAME, SNAPSHOT_SIG_EMAIL)
+        .map_err(|e| AppError::Internal(format!("Failed to create signature: {}", e)))?;
+    let message = format!("tool-call: {}", tool_call_id);
+
+    let commit_oid = repo
+        .commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)
+        .map_err(|e| AppError::Internal(format!("Failed to create tool-call commit: {}", e)))?;
+
+    Ok(commit_oid.to_string())
+}
+
+/// Restore a narrow set of files in the working tree to the state recorded
+/// in the **parent** of `commit_sha`. Files not present in the parent tree
+/// are removed from disk (the tool call created them). The rest of the
+/// working tree is left untouched.
+pub(super) fn revert_files_from_commit(
+    repo: &Repository,
+    workspace: &Path,
+    commit_sha: &str,
+    files_to_revert: &[String],
+) -> Result<(), AppError> {
+    let oid = git2::Oid::from_str(commit_sha)
+        .map_err(|e| AppError::BadRequest(format!("Invalid commit SHA '{}': {}", commit_sha, e)))?;
+    let commit = repo
+        .find_commit(oid)
+        .map_err(|e| AppError::NotFound(format!("Commit not found '{}': {}", commit_sha, e)))?;
+
+    let parent = commit.parent(0).map_err(|e| {
+        AppError::BadRequest(format!(
+            "Commit {} has no parent; cannot revert from initial state: {}",
+            commit_sha, e
+        ))
+    })?;
+    let parent_tree = parent
+        .tree()
+        .map_err(|e| AppError::Internal(format!("Failed to get parent tree: {}", e)))?;
+
+    for path in files_to_revert {
+        match parent_tree.get_path(Path::new(path)) {
+            Ok(_) => {
+                let mut cb = git2::build::CheckoutBuilder::new();
+                cb.force().path(path);
+                repo.checkout_tree(parent_tree.as_object(), Some(&mut cb))
+                    .map_err(|e| {
+                        AppError::Internal(format!(
+                            "Failed to checkout '{}' from parent of {}: {}",
+                            path, commit_sha, e
+                        ))
+                    })?;
+            }
+            Err(_) => {
+                let abs_path = workspace.join(path);
+                if abs_path.exists() {
+                    if abs_path.is_dir() {
+                        std::fs::remove_dir(&abs_path).map_err(|e| {
+                            AppError::Internal(format!(
+                                "Failed to remove directory '{}': {}",
+                                abs_path.display(),
+                                e
+                            ))
+                        })?;
+                    } else {
+                        std::fs::remove_file(&abs_path).map_err(|e| {
+                            AppError::Internal(format!(
+                                "Failed to remove file '{}': {}",
+                                abs_path.display(),
+                                e
+                            ))
+                        })?;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// List all branch names in the repository.
 pub(super) fn list_branches(repo: &Repository) -> Result<Vec<String>, AppError> {
     let branches = repo
