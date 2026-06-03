@@ -14,6 +14,7 @@ use aionui_api_types::{
 use aionui_auth::CurrentUser;
 use aionui_common::AppError;
 
+use crate::service::RevertToolCallResponse;
 use crate::state::ConversationRouterState;
 
 /// Build the conversation router (CRUD + message flow + confirmation + extended operations).
@@ -30,6 +31,15 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
         .route("/api/conversations/{id}/artifacts/{artifactId}", patch(update_artifact))
         .route("/api/conversations/{id}/cancel", post(cancel))
         .route("/api/conversations/{id}/warmup", post(warmup))
+        // Per-tool-call snapshot revert (Task 14.3). Guards the same
+        // conversation ownership check as the rest of the router; the
+        // service layer additionally checks that the snapshot deps are
+        // wired (returns 500 with a clear message if not) and that the
+        // requested `tool_call_id` belongs to *this* conversation.
+        .route(
+            "/api/conversations/{id}/opencode/revert-tool-call",
+            post(revert_tool_call),
+        )
         // Confirmation system
         .route("/api/conversations/{id}/confirmations", get(list_confirmations))
         .route("/api/conversations/{id}/confirmations/{callId}/confirm", post(confirm))
@@ -266,4 +276,34 @@ async fn active_count(
 ) -> Result<Json<ApiResponse<ActiveCountResponse>>, AppError> {
     let count = state.task_manager.active_count();
     Ok(Json(ApiResponse::ok(ActiveCountResponse { count })))
+}
+
+// ── Per-Tool-Call Snapshot Revert (Task 14.3) ──────────────────────
+
+/// Request body for `POST /api/conversations/{id}/opencode/revert-tool-call`.
+///
+/// `tool_call_id` is the JSON-RPC `id` of the OpenCode `tools/call` request
+/// that originally mutated the working tree. The client obtains it from the
+/// per-call snapshot ledger (populated by the local fs MCP hook in
+/// `aionui-ai-agent/src/manager/remote/local_fs_mcp/tools.rs`).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RevertToolCallRequest {
+    pub tool_call_id: String,
+}
+
+async fn revert_tool_call(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<RevertToolCallRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<RevertToolCallResponse>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    if req.tool_call_id.trim().is_empty() {
+        return Err(AppError::BadRequest("tool_call_id must not be empty".into()));
+    }
+    let result = state
+        .service
+        .revert_tool_call(&user.id, &id, &req.tool_call_id)
+        .await?;
+    Ok(Json(ApiResponse::ok(result)))
 }

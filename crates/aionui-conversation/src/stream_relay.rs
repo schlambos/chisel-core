@@ -1070,6 +1070,9 @@ mod tests {
         tx.send(AgentStreamEvent::Error(ErrorEventData {
             message: "Something went wrong".into(),
             code: None,
+            kind: None,
+            metadata: None,
+            recoverable: None,
         }))
         .unwrap();
 

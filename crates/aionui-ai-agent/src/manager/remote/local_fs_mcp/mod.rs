@@ -8,9 +8,12 @@ pub mod project_tree;
 pub mod protocol;
 pub mod server;
 pub mod shell;
+pub mod snapshot_deps;
 pub mod tools;
 
 pub use server::{ContactProbe, LocalFsMcpServer};
 pub use shell::{
     ElicitationHandler, ElicitationOutcome, ElicitationRequest, McpRequestContext, ShellApproval, ShellApprover,
 };
+pub use snapshot_deps::{SnapshotDeps, get as snapshot_deps_get, set as snapshot_deps_set};
+pub use tools::SnapshotHook;

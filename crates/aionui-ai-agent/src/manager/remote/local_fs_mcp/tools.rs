@@ -7,6 +7,9 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use aionui_db::IOpencodeToolSnapshotRepository;
+use aionui_db::models::OpencodeToolSnapshotRow;
+use aionui_file::{ISnapshotService, SnapshotService};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ignore::WalkBuilder;
@@ -17,6 +20,38 @@ use tokio::fs;
 use tracing::warn;
 
 use super::shell::{self, ElicitationHandler, McpRequestContext, ShellApproval, ShellApprover};
+
+/// Bundle of dependencies the per-tool-call snapshot hook needs. Optional —
+/// if `None` (or any inner field missing) the hook is a no-op. See
+/// [`commit_tool_snapshot_after`] for the failure-tolerant semantics.
+#[derive(Clone)]
+pub struct SnapshotHook {
+    pub snapshot_service: Arc<SnapshotService>,
+    pub tool_snapshot_repo: Arc<dyn IOpencodeToolSnapshotRepository>,
+    pub conversation_id: String,
+    pub workspace_root: PathBuf,
+    /// Set to `true` after a successful first `init`; guards the per-server
+    /// one-shot init so we don't fight the snapshot service for a temp repo
+    /// on every tool call.
+    init_done: Arc<tokio::sync::Mutex<bool>>,
+}
+
+impl SnapshotHook {
+    pub fn new(
+        snapshot_service: Arc<SnapshotService>,
+        tool_snapshot_repo: Arc<dyn IOpencodeToolSnapshotRepository>,
+        conversation_id: String,
+        workspace_root: PathBuf,
+    ) -> Self {
+        Self {
+            snapshot_service,
+            tool_snapshot_repo,
+            conversation_id,
+            workspace_root,
+            init_done: Arc::new(tokio::sync::Mutex::new(false)),
+        }
+    }
+}
 
 const MAX_READ_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB cap per read
 const MAX_GREP_FILES: usize = 5000;
@@ -269,6 +304,18 @@ struct ListEntry {
 /// [`McpRequestContext`]) so the approver / elicitation handler can route the
 /// resulting UI prompt to the right sub-agent transcript instead of bubbling
 /// it up at the parent transcript level.
+///
+/// `tool_call_id` is the JSON-RPC `id` of the inbound request, used as the
+/// primary key of the per-tool-call snapshot ledger. `None` for `tools/list`
+/// and non-`tools/call` methods (not passed in this dispatch).
+///
+/// `snapshot_hook` is the optional per-conversation handle to the Git-backed
+/// snapshot service + the `opencode_tool_snapshots` DB repo. When `Some`,
+/// the mutating ops (`write_file`, `delete_file`, `rename`) commit a per-call
+/// snapshot and persist the ledger row on success. When `None`, the hook is
+/// a no-op (preserves the non-OpenCode paths and the test-only invocations
+/// that don't want a DB write).
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch(
     root: &Path,
     tool: &str,
@@ -276,56 +323,162 @@ pub async fn dispatch(
     approver: Option<&Arc<dyn ShellApprover>>,
     elicitation: Option<&Arc<dyn ElicitationHandler>>,
     context: &McpRequestContext,
+    tool_call_id: Option<&str>,
+    snapshot_hook: Option<&SnapshotHook>,
 ) -> (String, bool) {
     let _ = elicitation; // reserved for future per-tool elicitation calls.
-    match tool {
-        "read_file" => match serde_json::from_value::<ReadInput>(args.clone()) {
-            Ok(input) => match read_file(root, &input.path).await {
-                Ok(text) => (text, false),
-                Err(e) => (e, true),
-            },
-            Err(e) => (format!("invalid params: {e}"), true),
-        },
-        "write_file" => match serde_json::from_value::<WriteInput>(args.clone()) {
-            Ok(input) => match write_file(root, &input.path, &input.content).await {
-                Ok(msg) => (msg, false),
-                Err(e) => (e, true),
-            },
-            Err(e) => (format!("invalid params: {e}"), true),
-        },
-        "list_dir" => match serde_json::from_value::<ListInput>(args.clone()) {
-            Ok(input) => match list_dir(root, &input.path).await {
-                Ok(json_text) => (json_text, false),
-                Err(e) => (e, true),
-            },
-            Err(e) => (format!("invalid params: {e}"), true),
-        },
-        "grep_dir" => match serde_json::from_value::<GrepInput>(args.clone()) {
-            Ok(input) => match grep_dir(root, &input.pattern, &input.path, input.case_insensitive) {
-                Ok(json_text) => (json_text, false),
-                Err(e) => (e, true),
-            },
-            Err(e) => (format!("invalid params: {e}"), true),
-        },
-        "delete_file" => match serde_json::from_value::<DeleteInput>(args.clone()) {
-            Ok(input) => match delete_file(root, &input.path).await {
-                Ok(msg) => (msg, false),
-                Err(e) => (e, true),
-            },
-            Err(e) => (format!("invalid params: {e}"), true),
-        },
-        "rename" => match serde_json::from_value::<RenameInput>(args.clone()) {
-            Ok(input) => match rename(root, &input.from, &input.to).await {
-                Ok(msg) => (msg, false),
-                Err(e) => (e, true),
-            },
-            Err(e) => (format!("invalid params: {e}"), true),
-        },
-        "run_shell" => match serde_json::from_value::<ShellInput>(args.clone()) {
-            Ok(input) => run_shell(root, &input.command, approver, context).await,
-            Err(e) => (format!("invalid params: {e}"), true),
-        },
-        _ => (format!("unknown tool: {tool}"), true),
+    let result = match tool {
+        "read_file" => dispatch_read(root, args).await,
+        "write_file" => dispatch_write(root, args).await,
+        "list_dir" => dispatch_list(root, args).await,
+        "grep_dir" => dispatch_grep(root, args).await,
+        "delete_file" => dispatch_delete(root, args).await,
+        "rename" => dispatch_rename(root, args).await,
+        "run_shell" => dispatch_run_shell(root, args, approver, context).await,
+        _ => Err(format!("unknown tool: {tool}")),
+    };
+
+    match result {
+        Ok((text, false, changed)) => {
+            // Per-tool-call snapshot hook. Fires only on success, only for
+            // mutating tools that returned a non-empty changed-files list.
+            if !changed.is_empty()
+                && let (Some(id), Some(hook)) = (tool_call_id, snapshot_hook)
+            {
+                commit_tool_snapshot_after(hook, id, changed).await;
+            }
+            (text, false)
+        }
+        Ok((text, true, _)) => (text, true),
+        Err(msg) => (msg, true),
+    }
+}
+
+async fn dispatch_read(root: &Path, args: &Value) -> Result<(String, bool, Vec<String>), String> {
+    let input: ReadInput = serde_json::from_value(args.clone()).map_err(|e| format!("invalid params: {e}"))?;
+    read_file(root, &input.path).await.map(|t| (t, false, Vec::new()))
+}
+
+async fn dispatch_write(root: &Path, args: &Value) -> Result<(String, bool, Vec<String>), String> {
+    let input: WriteInput = serde_json::from_value(args.clone()).map_err(|e| format!("invalid params: {e}"))?;
+    write_file(root, &input.path, &input.content)
+        .await
+        .map(|m| (m, false, vec![input.path]))
+}
+
+async fn dispatch_list(root: &Path, args: &Value) -> Result<(String, bool, Vec<String>), String> {
+    let input: ListInput = serde_json::from_value(args.clone()).map_err(|e| format!("invalid params: {e}"))?;
+    list_dir(root, &input.path).await.map(|t| (t, false, Vec::new()))
+}
+
+async fn dispatch_grep(root: &Path, args: &Value) -> Result<(String, bool, Vec<String>), String> {
+    let input: GrepInput = serde_json::from_value(args.clone()).map_err(|e| format!("invalid params: {e}"))?;
+    grep_dir(root, &input.pattern, &input.path, input.case_insensitive).map(|t| (t, false, Vec::new()))
+}
+
+async fn dispatch_delete(root: &Path, args: &Value) -> Result<(String, bool, Vec<String>), String> {
+    let input: DeleteInput = serde_json::from_value(args.clone()).map_err(|e| format!("invalid params: {e}"))?;
+    delete_file(root, &input.path)
+        .await
+        .map(|m| (m, false, vec![input.path]))
+}
+
+async fn dispatch_rename(root: &Path, args: &Value) -> Result<(String, bool, Vec<String>), String> {
+    let input: RenameInput = serde_json::from_value(args.clone()).map_err(|e| format!("invalid params: {e}"))?;
+    // Both endpoints touched: `from` (removed) and `to` (created). The
+    // snapshot commit records both so the narrow revert can restore the
+    // source if the tool call created it, or delete the destination if the
+    // tool call created that.
+    rename(root, &input.from, &input.to)
+        .await
+        .map(|m| (m, false, vec![input.from, input.to]))
+}
+
+async fn dispatch_run_shell(
+    root: &Path,
+    args: &Value,
+    approver: Option<&Arc<dyn ShellApprover>>,
+    context: &McpRequestContext,
+) -> Result<(String, bool, Vec<String>), String> {
+    let input: ShellInput = serde_json::from_value(args.clone()).map_err(|e| format!("invalid params: {e}"))?;
+    // `run_shell` is intentionally not snapshotted here: the per-shell-call
+    // delta attribution is out of scope for Task 14.3 (see
+    // `forge-5-02-critical-per-tool-call-snapshotting.md` §5 step 3 — that
+    // work is a follow-up). Passing an empty changed-files list keeps the
+    // hook inert for shell invocations.
+    let (text, is_error) = run_shell(root, &input.command, approver, context).await;
+    Ok((text, is_error, Vec::new()))
+}
+
+/// Lazily init the snapshot service for the workspace, then commit a
+/// per-tool-call snapshot and persist the resulting commit SHA + changed
+/// files to `opencode_tool_snapshots`.
+///
+/// Best-effort: any failure (init, commit, DB insert) is logged and swallowed
+/// so a transient snapshot/DB outage never breaks the tool call's success
+/// path back to the model. The model still sees the original `Ok` response.
+async fn commit_tool_snapshot_after(hook: &SnapshotHook, tool_call_id: &str, files: Vec<String>) {
+    if files.is_empty() {
+        return;
+    }
+
+    // Lazy one-shot init under a per-server mutex. The snapshot service is
+    // process-global, so two conversations racing for the same workspace key
+    // would otherwise both try to `init_snapshot_repo` for the same temp
+    // path; the in-server flag only protects within this server, but the
+    // snapshot service's own `init` is idempotent enough (it removes-then-
+    // recreates the temp dir on re-entry).
+    {
+        let mut done = hook.init_done.lock().await;
+        if !*done {
+            let ws = hook.workspace_root.to_string_lossy().into_owned();
+            if let Err(e) = hook.snapshot_service.init(&ws).await {
+                warn!(
+                    error = %e,
+                    workspace = %ws,
+                    "Snapshot service init failed; per-tool-call hook will be a no-op"
+                );
+                return;
+            }
+            *done = true;
+        }
+    }
+
+    let commit_sha = match hook.snapshot_service.commit_tool_snapshot(tool_call_id, &files).await {
+        Ok(sha) => sha,
+        Err(e) => {
+            warn!(
+                error = %e,
+                tool_call_id,
+                files_changed = files.len(),
+                "commit_tool_snapshot failed; skipping DB ledger write"
+            );
+            return;
+        }
+    };
+
+    let files_json = match serde_json::to_string(&files) {
+        Ok(j) => j,
+        Err(e) => {
+            warn!(error = %e, "failed to serialize files_changed for ledger row; using []");
+            "[]".to_string()
+        }
+    };
+
+    let row = OpencodeToolSnapshotRow {
+        tool_call_id: tool_call_id.to_string(),
+        conversation_id: hook.conversation_id.clone(),
+        commit_sha,
+        files_changed_json: files_json,
+        created_at: aionui_common::now_ms(),
+    };
+
+    if let Err(e) = hook.tool_snapshot_repo.insert(&row).await {
+        warn!(
+            error = %e,
+            tool_call_id,
+            "failed to insert opencode_tool_snapshots ledger row"
+        );
     }
 }
 
@@ -592,6 +745,8 @@ mod tests {
             None,
             None,
             &McpRequestContext::default(),
+            None,
+            None,
         )
         .await;
         assert!(!err, "write_file should succeed: {out}");
@@ -608,6 +763,8 @@ mod tests {
             None,
             None,
             &McpRequestContext::default(),
+            None,
+            None,
         )
         .await;
         assert!(!err, "write_file should succeed: {out}");
@@ -619,6 +776,8 @@ mod tests {
             None,
             None,
             &McpRequestContext::default(),
+            None,
+            None,
         )
         .await;
         assert!(!err, "read_file should succeed: {out}");
@@ -637,6 +796,8 @@ mod tests {
             None,
             None,
             &McpRequestContext::default(),
+            None,
+            None,
         )
         .await;
         assert!(!err);
@@ -655,6 +816,8 @@ mod tests {
             None,
             None,
             &McpRequestContext::default(),
+            None,
+            None,
         )
         .await;
         assert!(err);
@@ -672,6 +835,8 @@ mod tests {
             None,
             None,
             &McpRequestContext::default(),
+            None,
+            None,
         )
         .await;
         assert!(!err, "grep failed: {out}");
@@ -709,6 +874,8 @@ mod tests {
             Some(&approver),
             None,
             &McpRequestContext::default(),
+            None,
+            None,
         )
         .await;
         assert!(!err, "approved command should run: {out}");
@@ -730,6 +897,8 @@ mod tests {
             Some(&approver),
             None,
             &McpRequestContext::default(),
+            None,
+            None,
         )
         .await;
         assert!(err, "rejected command must report an error");
@@ -750,6 +919,8 @@ mod tests {
             None,
             None,
             &McpRequestContext::default(),
+            None,
+            None,
         )
         .await;
         assert!(err, "must fail closed with no approver");
@@ -770,9 +941,231 @@ mod tests {
             Some(&approver),
             None,
             &McpRequestContext::default(),
+            None,
+            None,
         )
         .await;
         assert!(err, "empty command must error");
         assert!(out.contains("empty command"), "unexpected message: {out}");
+    }
+
+    // ── Per-tool-call snapshot hook (Task 14.3) ─────────────────────
+
+    use aionui_db::SqliteOpencodeToolSnapshotRepository;
+    use aionui_db::init_database_memory;
+    use aionui_db::IConversationRepository;
+    use aionui_db::IUserRepository;
+    use aionui_file::SnapshotService;
+
+    /// Test harness for the snapshot hook: a real `SnapshotService` (backed
+    /// by a temp-dir workspace) and a real `SqliteOpencodeToolSnapshotRepository`
+    /// (in-memory) wired through `SnapshotHook`.
+    struct HookHarness {
+        #[allow(dead_code)]
+        snapshot_service: Arc<SnapshotService>,
+        tool_snapshot_repo: Arc<dyn aionui_db::IOpencodeToolSnapshotRepository>,
+        conversation_id: String,
+        workspace_root: PathBuf,
+        hook: SnapshotHook,
+    }
+
+    async fn make_hook_harness() -> (HookHarness, TempDir) {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let root = workspace.path().canonicalize().expect("canonicalize");
+        let db = init_database_memory().await.expect("init db");
+        let pool = db.pool().clone();
+        // The tool_snapshot_repo's FK chain is users -> conversations ->
+        // opencode_tool_snapshots; seed both parents via the repository
+        // APIs so the schema stays one source of truth.
+        let user_repo = aionui_db::SqliteUserRepository::new(pool.clone());
+        let user = user_repo
+            .create_user("tester", "")
+            .await
+            .expect("seed user");
+        let conversation_repo = aionui_db::SqliteConversationRepository::new(pool.clone());
+        let row = aionui_db::models::ConversationRow {
+            id: "conv-hook".into(),
+            user_id: user.id.clone(),
+            name: "test conv".into(),
+            r#type: "acp".into(),
+            extra: "{}".into(),
+            model: None,
+            status: Some("pending".into()),
+            source: None,
+            channel_chat_id: None,
+            pinned: false,
+            pinned_at: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        conversation_repo.create(&row).await.expect("seed conversation");
+        let snapshot_service = Arc::new(SnapshotService::new());
+        let tool_snapshot_repo: Arc<dyn aionui_db::IOpencodeToolSnapshotRepository> =
+            Arc::new(SqliteOpencodeToolSnapshotRepository::new(pool));
+        let hook = SnapshotHook::new(
+            snapshot_service.clone(),
+            tool_snapshot_repo.clone(),
+            "conv-hook".to_string(),
+            root.clone(),
+        );
+        let harness = HookHarness {
+            snapshot_service,
+            tool_snapshot_repo,
+            conversation_id: "conv-hook".to_string(),
+            workspace_root: root,
+            hook,
+        };
+        (harness, workspace)
+    }
+
+    #[tokio::test]
+    async fn snapshot_hook_records_write_file_ledger_row() {
+        let (harness, _g) = make_hook_harness().await;
+        let (out, err) = dispatch(
+            &harness.workspace_root,
+            "write_file",
+            &json!({"path": "hello.txt", "content": "hi"}),
+            None,
+            None,
+            &McpRequestContext::default(),
+            Some("call-1"),
+            Some(&harness.hook),
+        )
+        .await;
+        assert!(!err, "write_file should succeed: {out}");
+        assert!(harness.workspace_root.join("hello.txt").exists());
+
+        // Give the lazy init's tokio::Mutex a beat to release before the
+        // next call's hook runs; otherwise the second init is held back
+        // waiting on the first's dropped guard.
+        drop(out);
+
+        // Ledger row should now exist with the tool_call_id we passed.
+        let row = harness
+            .tool_snapshot_repo
+            .get_by_tool_call_id("call-1")
+            .await
+            .expect("db ok")
+            .expect("ledger row exists for call-1");
+        assert_eq!(row.conversation_id, harness.conversation_id);
+        assert_eq!(row.files_changed_json, r#"["hello.txt"]"#);
+        assert_eq!(row.commit_sha.len(), 40, "commit sha should be 40 hex chars");
+    }
+
+    #[tokio::test]
+    async fn snapshot_hook_records_delete_file_ledger_row() {
+        let (harness, _g) = make_hook_harness().await;
+        // Pre-create the file so `delete_file` has a target.
+        std::fs::write(harness.workspace_root.join("bye.txt"), "x").unwrap();
+        let (out, err) = dispatch(
+            &harness.workspace_root,
+            "delete_file",
+            &json!({"path": "bye.txt"}),
+            None,
+            None,
+            &McpRequestContext::default(),
+            Some("call-del"),
+            Some(&harness.hook),
+        )
+        .await;
+        assert!(!err, "delete_file should succeed: {out}");
+        assert!(!harness.workspace_root.join("bye.txt").exists());
+
+        let row = harness
+            .tool_snapshot_repo
+            .get_by_tool_call_id("call-del")
+            .await
+            .expect("db ok")
+            .expect("ledger row exists for call-del");
+        assert_eq!(row.files_changed_json, r#"["bye.txt"]"#);
+    }
+
+    #[tokio::test]
+    async fn snapshot_hook_records_rename_with_both_paths() {
+        let (harness, _g) = make_hook_harness().await;
+        std::fs::write(harness.workspace_root.join("old.txt"), "x").unwrap();
+        let (out, err) = dispatch(
+            &harness.workspace_root,
+            "rename",
+            &json!({"from": "old.txt", "to": "new.txt"}),
+            None,
+            None,
+            &McpRequestContext::default(),
+            Some("call-rename"),
+            Some(&harness.hook),
+        )
+        .await;
+        assert!(!err, "rename should succeed: {out}");
+        assert!(!harness.workspace_root.join("old.txt").exists());
+        assert!(harness.workspace_root.join("new.txt").exists());
+
+        let row = harness
+            .tool_snapshot_repo
+            .get_by_tool_call_id("call-rename")
+            .await
+            .expect("db ok")
+            .expect("ledger row exists for call-rename");
+        // Both paths persisted so a narrow revert can re-create `old.txt`
+        // and delete `new.txt`.
+        let files: Vec<String> = serde_json::from_str(&row.files_changed_json).expect("valid json");
+        assert_eq!(files, vec!["old.txt", "new.txt"]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_hook_is_inert_when_tool_call_id_missing() {
+        // No tool_call_id → the dispatch wrapper treats the call as
+        // un-attributable and skips the hook entirely. The mutation still
+        // succeeds (the model must not see a different error path just
+        // because the upstream caller forgot to set a `jsonrpc id`).
+        let (harness, _g) = make_hook_harness().await;
+        let (out, err) = dispatch(
+            &harness.workspace_root,
+            "write_file",
+            &json!({"path": "silent.txt", "content": "x"}),
+            None,
+            None,
+            &McpRequestContext::default(),
+            None,
+            Some(&harness.hook),
+        )
+        .await;
+        assert!(!err, "write_file should succeed: {out}");
+        assert!(harness.workspace_root.join("silent.txt").exists());
+
+        // No ledger row should exist for a missing tool_call_id.
+        let row = harness
+            .tool_snapshot_repo
+            .get_by_tool_call_id("missing")
+            .await
+            .expect("db ok");
+        assert!(row.is_none(), "no row expected for absent tool_call_id");
+    }
+
+    #[tokio::test]
+    async fn snapshot_hook_no_ops_when_hook_absent() {
+        // Existing non-OpenCode / test path: `snapshot_hook = None`. The
+        // dispatch must continue to work and must NOT touch the DB.
+        let (_g, root) = tmp();
+        let db = init_database_memory().await.expect("init db");
+        let tool_snapshot_repo: Arc<dyn aionui_db::IOpencodeToolSnapshotRepository> =
+            Arc::new(SqliteOpencodeToolSnapshotRepository::new(db.pool().clone()));
+        let (out, err) = dispatch(
+            &root,
+            "write_file",
+            &json!({"path": "nohook.txt", "content": "x"}),
+            None,
+            None,
+            &McpRequestContext::default(),
+            Some("call-nohook"),
+            None,
+        )
+        .await;
+        assert!(!err, "write_file should succeed: {out}");
+        assert!(root.join("nohook.txt").exists());
+        let row = tool_snapshot_repo
+            .get_by_tool_call_id("call-nohook")
+            .await
+            .expect("db ok");
+        assert!(row.is_none(), "no row when hook is None");
     }
 }

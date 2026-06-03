@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +22,7 @@ use crate::agent_runtime::AgentRuntime;
 use crate::manager::remote::local_fs_mcp::project_tree::render_project_tree_default;
 use crate::manager::remote::local_fs_mcp::{
     ElicitationHandler, ElicitationOutcome, ElicitationRequest, LocalFsMcpServer, McpRequestContext, ShellApproval,
-    ShellApprover,
+    ShellApprover, SnapshotHook,
 };
 use crate::manager::remote::opencode_commands::{self, OpenCodeCommand};
 use crate::manager::remote::opencode_delta_batcher::DeltaBatcherHandle;
@@ -1302,6 +1303,12 @@ pub struct RemoteAgentManager {
     /// `None` for unit-test constructors that don't exercise the
     /// stale-session path.
     conversation_repo: Option<Arc<dyn aionui_db::IConversationRepository>>,
+    /// (Task 14.3) Snapshot deps are *not* constructor-injected — they
+    /// are resolved at runtime from the process-global
+    /// [`super::local_fs_mcp::SnapshotDepsRegistry`] so the
+    /// `aionui-app` composition root can wire (or skip wiring) them
+    /// without changing the agent's struct shape. The fields below are
+    /// gone; see `ensure_local_fs_mcp` for the lookup site.
     /// Per-part SSE delta accumulator (E03). Token deltas for the same
     /// `(messageID, partID, field)` are coalesced on a ~16 ms frame and
     /// emitted as a single `Text`/`Thinking` event, rather than firing one
@@ -1329,6 +1336,11 @@ impl RemoteAgentManager {
     /// call sites use [`Self::new`] (no repo) until they are migrated
     /// to provide one — the absence of a repo just disables the
     /// stale-session context-dump fallback.
+    ///
+    /// (Task 14.3) The per-tool-call snapshot deps are **not** a
+    /// constructor parameter — they live in the process-global
+    /// [`super::local_fs_mcp::SnapshotDepsRegistry`] so aionui-app can
+    /// wire (or skip) them without changing this struct's surface.
     pub async fn new_with_history(
         conversation_id: String,
         workspace: String,
@@ -3302,6 +3314,22 @@ impl RemoteAgentManager {
         let shell_approver: Arc<dyn ShellApprover> = approver.clone();
         let elicitation_handler: Arc<dyn crate::manager::remote::local_fs_mcp::ElicitationHandler> = approver;
 
+        // Arm the per-tool-call snapshot hook (Task 14.3) iff the
+        // composition root installed the deps in the process-global
+        // [`SnapshotDepsRegistry`]. While the global is unset the hook
+        // stays a no-op so non-OpenCode backends, tests, and
+        // not-yet-wired production deploys all degrade to the pre-14.3
+        // behavior (mutating tools still work, no snapshot is committed,
+        // no ledger row is written).
+        let snapshot_hook = crate::manager::remote::local_fs_mcp::snapshot_deps_get().map(|deps| {
+            SnapshotHook::new(
+                deps.snapshot_service,
+                deps.tool_snapshot_repo,
+                conversation_id.clone(),
+                PathBuf::from(&workspace),
+            )
+        });
+
         match opencode_mcp::start_and_register(
             &self.http_client,
             base_url,
@@ -3310,6 +3338,7 @@ impl RemoteAgentManager {
             &workspace,
             Some(shell_approver),
             Some(elicitation_handler),
+            snapshot_hook,
         )
         .await
         {

@@ -49,7 +49,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use super::local_fs_mcp::{ContactProbe, LocalFsMcpServer, ShellApprover};
+use super::local_fs_mcp::{ContactProbe, LocalFsMcpServer, ShellApprover, SnapshotHook};
 use super::reachability::{Plan, current_route_ip, plan};
 
 /// Stable MCP name registered with OpenCode for the client-side fs bridge.
@@ -450,6 +450,7 @@ impl RegistrationOutcome {
 /// `disconnect_from_opencode` should be called on teardown. A background
 /// [`spawn_reachability_guardian`] should be started to re-register if the
 /// network later changes.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_and_register(
     http_client: &reqwest::Client,
     base_url: &str,
@@ -458,6 +459,7 @@ pub async fn start_and_register(
     workspace_root: &str,
     approver: Option<Arc<dyn ShellApprover>>,
     elicitation: Option<Arc<dyn super::local_fs_mcp::ElicitationHandler>>,
+    snapshot_hook: Option<SnapshotHook>,
 ) -> Result<LocalFsMcpServer, String> {
     // First-touch-per-process: clear any aionui-local-fs* leftovers from a
     // prior aioncore run before registering ours. Idempotent across
@@ -468,9 +470,16 @@ pub async fn start_and_register(
     let bind = plan.bind_addr();
 
     let token = Uuid::new_v4().to_string();
-    let server = LocalFsMcpServer::start(workspace_root.into(), bind, token.clone(), approver, elicitation)
-        .await
-        .map_err(|e| format!("failed to start local fs MCP server: {e}"))?;
+    let server = LocalFsMcpServer::start(
+        workspace_root.into(),
+        bind,
+        token.clone(),
+        approver,
+        elicitation,
+        snapshot_hook,
+    )
+    .await
+    .map_err(|e| format!("failed to start local fs MCP server: {e}"))?;
     let probe = server.contact_probe();
 
     let ctx = RegisterCtx {

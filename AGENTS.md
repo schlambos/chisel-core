@@ -105,11 +105,11 @@ Every domain crate must follow:
 
 New subprocess spawn sites must use `aionui_runtime::Builder::agent(program)` or `aionui_runtime::Builder::clean_cli(program)`. Do NOT use raw `tokio::process::Command`. See [ARCHITECTURE.md § Runtime Infrastructure](./ARCHITECTURE.md#runtime-infrastructure) for details.
 
-### Pushing Code
+### Committing Code
 
-Always use `just push` instead of `git push`.
-It runs fmt → clippy → test before pushing, preventing CI failures.
-Supports the same arguments as `git push` (e.g. `just push -u origin feat/branch`).
+Always use `git commit` after completing the required verification steps.
+Run formatting, linting, and tests before committing to prevent CI failures.
+Use standard Git commit syntax with a clear English commit message (e.g. `git commit -m "Describe the change"`).
 
 ### Add Endpoint to Existing Crate
 
@@ -227,10 +227,15 @@ cargo clippy -p aionui-<crate1> -p aionui-<crate2> -- -D warnings              #
 cargo test -p aionui-<crate1> -p aionui-<crate2>                               # Test affected crates
 ```
 
-### Before Push (full workspace)
+### Before Commit (full workspace)
 
 ```bash
-just push                                             # fmt → clippy → test → git push
+cargo fmt --all -- --check                           # Format gate
+cargo clippy --workspace -- -D warnings              # Full workspace lint
+cargo test --workspace                               # Full workspace test
+git status                                           # Review changed files
+git add <files>                                      # Stage intended changes
+git commit -m "Describe the change"                  # Commit with a clear English message
 ```
 
 ## Changelog

@@ -7,6 +7,7 @@ pub mod service;
 mod service_ops;
 pub mod skill_resolver;
 pub mod skill_snapshot;
+pub mod snapshot_deps;
 pub mod state;
 pub mod stream_relay;
 pub mod task_options;
@@ -17,7 +18,8 @@ pub use response_middleware::{
 };
 pub use routes::conversation_routes;
 pub use routes_aux::conversation_ops_routes;
-pub use service::ConversationService;
+pub use service::{ConversationService, RevertToolCallResponse};
+pub use snapshot_deps::{SnapshotDeps, get as snapshot_deps_get, set as snapshot_deps_set};
 pub use state::ConversationRouterState;
 
 #[cfg(test)]

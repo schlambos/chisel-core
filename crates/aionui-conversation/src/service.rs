@@ -19,8 +19,10 @@ use aionui_common::{
 use aionui_db::models::MessageRow;
 use aionui_db::{
     ConversationFilters, ConversationRowUpdate, CreateAcpSessionParams, IAcpSessionRepository,
-    IAgentMetadataRepository, IConversationRepository, SaveRuntimeStateParams, SortOrder,
+    IAgentMetadataRepository, IConversationRepository, IOpencodeToolSnapshotRepository, SaveRuntimeStateParams,
+    SortOrder,
 };
+use aionui_file::SnapshotService;
 use aionui_realtime::EventBroadcaster;
 use tracing::{debug, error, info, warn};
 
@@ -57,6 +59,16 @@ pub struct ConversationService {
     conversation_repo: Arc<dyn IConversationRepository>,
     agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
     acp_session_repo: Arc<dyn IAcpSessionRepository>,
+
+    // Per-tool-call snapshot hook (Task 14.3) — the API surface that powers
+    // `POST /api/conversations/{id}/opencode/revert-tool-call`. Backed by
+    // a process-global registry (see `snapshot_deps` module) so the
+    // composition root can wire (or skip) wiring without changing this
+    // struct's surface — mirrors the `aionui-ai-agent` `SnapshotDepsRegistry`
+    // pattern. The local `RwLock` overrides only exist for in-process
+    // tests that want to swap the deps without touching the global.
+    snapshot_service: Arc<RwLock<Option<Arc<SnapshotService>>>>,
+    tool_snapshot_repo: Arc<RwLock<Option<Arc<dyn IOpencodeToolSnapshotRepository>>>>,
 }
 
 // ── Construction & Dependency Injection ──────────────────────────────
@@ -84,6 +96,31 @@ impl ConversationService {
             conversation_repo,
             agent_metadata_repo,
             acp_session_repo,
+
+            snapshot_service: Arc::new(RwLock::new(None)),
+            tool_snapshot_repo: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Register the Git-backed snapshot service used by the
+    /// `revert-tool-call` route. Required for the route to be operative —
+    /// the route returns a 501-style "service not configured" error while
+    /// either of the snapshot deps is `None`. Mirrors the `with_cron_service`
+    /// post-construction setter pattern so existing composition roots
+    /// (which construct the service in one place and wire deps elsewhere)
+    /// keep compiling.
+    pub fn with_snapshot_service(&self, snapshot_service: Arc<SnapshotService>) {
+        if let Ok(mut guard) = self.snapshot_service.write() {
+            *guard = Some(snapshot_service);
+        }
+    }
+
+    /// Register the per-tool-call snapshot ledger repo. Paired with
+    /// [`with_snapshot_service`]; both must be set for the route to
+    /// actually revert anything.
+    pub fn with_tool_snapshot_repo(&self, repo: Arc<dyn IOpencodeToolSnapshotRepository>) {
+        if let Ok(mut guard) = self.tool_snapshot_repo.write() {
+            *guard = Some(repo);
         }
     }
 
@@ -1013,6 +1050,127 @@ impl ConversationService {
     }
 }
 
+// ── Per-Tool-Call Snapshot Revert (Task 14.3) ──────────────────────
+
+impl ConversationService {
+    /// Revert the working tree of a single OpenCode tool call back to its
+    /// pre-call state. Looks up the ledger row by `tool_call_id`, fetches
+    /// the recorded commit SHA + files, and asks the snapshot service to
+    /// narrow-checkout the files from the commit's parent tree.
+    ///
+    /// 1. Verifies the conversation exists and belongs to the user.
+    /// 2. Verifies both snapshot deps are wired (route returns 501-style
+    ///    "service not configured" while either is `None`).
+    /// 3. Fetches the ledger row; 404 if the tool call was never snapshotted
+    ///    (e.g. non-OpenCode backend, or the call failed before the hook).
+    /// 4. Calls `snapshot_service.revert_to_tool_snapshot(commit_sha, files)`.
+    #[tracing::instrument(skip_all, fields(user_id = %user_id, conversation_id = %conversation_id, tool_call_id = %tool_call_id))]
+    pub async fn revert_tool_call(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        tool_call_id: &str,
+    ) -> Result<RevertToolCallResponse, AppError> {
+        // 1. Ownership + existence.
+        let row = self
+            .conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|r| r.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+
+        // 2. Snapshot deps wired? Resolution order:
+        //    a) per-service slot (tests / per-instance overrides)
+        //    b) process-global registry (production path —
+        //       `aionui-app::services` calls `snapshot_deps::set` at startup)
+        //    c) neither → 500-style "service not configured"
+        let per_service_svc = self
+            .snapshot_service
+            .read()
+            .ok()
+            .and_then(|g| g.clone());
+        let per_service_repo = self
+            .tool_snapshot_repo
+            .read()
+            .ok()
+            .and_then(|g| g.clone());
+        let global = crate::snapshot_deps::get();
+        let snapshot_service = per_service_svc
+            .or_else(|| global.as_ref().map(|d| d.snapshot_service.clone()))
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "Snapshot service not configured; cannot revert tool call. \
+                     The composition root must call \
+                     aionui_conversation::snapshot_deps_set(...) (or the per-service \
+                     ConversationService::with_snapshot_service) at startup."
+                        .into(),
+                )
+            })?;
+        let tool_snapshot_repo = per_service_repo
+            .or_else(|| global.map(|d| d.tool_snapshot_repo))
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "opencode_tool_snapshots repo not configured; cannot revert tool call. \
+                     The composition root must call \
+                     aionui_conversation::snapshot_deps_set(...) (or the per-service \
+                     ConversationService::with_tool_snapshot_repo) at startup."
+                        .into(),
+                )
+            })?;
+
+        // 3. Ledger lookup. The DB is keyed by tool_call_id, not by
+        //    conversation, so a single repository lookup is enough. We
+        //    additionally verify the row's conversation_id matches the URL
+        //    path so a leaked tool_call_id from another conversation can't
+        //    be used to revert this conversation's working tree.
+        let snapshot_row = tool_snapshot_repo
+            .get_by_tool_call_id(tool_call_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("snapshot ledger lookup failed: {e}")))?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "No tool-call snapshot recorded for tool_call_id '{tool_call_id}'"
+                ))
+            })?;
+
+        if snapshot_row.conversation_id != conversation_id {
+            return Err(AppError::NotFound(format!(
+                "No tool-call snapshot for tool_call_id '{tool_call_id}' in this conversation"
+            )));
+        }
+        // Touch the row var to keep the ownership check explicit; it's
+        // currently unused below but the comparison is the security gate.
+        let _ = row;
+
+        // 4. Decode the files list. A corrupt JSON value (e.g. truncated by
+        //    a manual DB edit) surfaces as a 500 with a clear message
+        //    rather than silently reverting zero files.
+        let files: Vec<String> = serde_json::from_str(&snapshot_row.files_changed_json).map_err(|e| {
+            AppError::Internal(format!(
+                "ledger row for tool_call_id '{tool_call_id}' has invalid files_changed_json: {e}"
+            ))
+        })?;
+
+        // 5. Narrow revert from the parent of the recorded commit.
+        snapshot_service
+            .revert_to_tool_snapshot(&snapshot_row.commit_sha, &files)
+            .await?;
+
+        info!(
+            tool_call_id,
+            commit_sha = %snapshot_row.commit_sha,
+            files_reverted = files.len(),
+            "Reverted tool-call snapshot"
+        );
+
+        Ok(RevertToolCallResponse {
+            tool_call_id: tool_call_id.to_string(),
+            commit_sha: snapshot_row.commit_sha,
+            files_reverted: files.len(),
+        })
+    }
+}
+
 // ── Message Flow (send / stop / warmup) ─────────────────────────────
 
 impl ConversationService {
@@ -1812,4 +1970,18 @@ mod tests {
         assert_eq!(lineage.agent_name, "");
         assert!(!lineage.has_any_identity());
     }
+}
+
+// ── Per-Tool-Call Revert Response Type (Task 14.3) ─────────────────
+
+/// Response body for `POST /api/conversations/{id}/opencode/revert-tool-call`.
+///
+/// Carries the snapshot's commit SHA and the number of files that were
+/// reverted, so the UI can confirm what was undone without a follow-up
+/// request to the snapshot ledger.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RevertToolCallResponse {
+    pub tool_call_id: String,
+    pub commit_sha: String,
+    pub files_reverted: usize,
 }

@@ -28,7 +28,7 @@ use super::protocol::{
     SERVER_VERSION,
 };
 use super::shell::{ElicitationHandler, McpRequestContext, ShellApprover};
-use super::tools::{all_tool_descriptors, dispatch};
+use super::tools::{SnapshotHook, all_tool_descriptors, dispatch};
 
 /// Header names OpenCode injects on tool-call forwarding so the MCP server can
 /// attribute the call back to the originating session. Names match the
@@ -132,6 +132,12 @@ struct McpAppState {
     /// disabled (tools that need it fail closed); shell + filesystem tools
     /// are unaffected.
     elicitation: Option<Arc<dyn ElicitationHandler>>,
+    /// Per-conversation handle to the Git-backed snapshot service + the
+    /// `opencode_tool_snapshots` DB repo. When `Some`, mutating fs tool
+    /// calls commit a per-tool-call snapshot and persist the ledger row.
+    /// `None` for non-OpenCode backends, tests, and any composition root
+    /// that has not yet wired the deps.
+    snapshot_hook: Option<SnapshotHook>,
 }
 
 /// Running MCP server handle. Drops trigger graceful shutdown.
@@ -156,12 +162,19 @@ impl LocalFsMcpServer {
     /// `elicitation`, when `Some`, wires the host agent's elicitation flow so
     /// tools can prompt the user mid-call. `None` disables elicitation
     /// (tools requiring it fail closed).
+    ///
+    /// `snapshot_hook`, when `Some`, arms the per-tool-call snapshot hook on
+    /// the mutating fs tools (`write_file`, `delete_file`, `rename`). When
+    /// `None`, those tools still run but no snapshot is committed and no
+    /// ledger row is written (preserves non-OpenCode backends, tests, and
+    /// composition roots that have not yet wired the deps).
     pub async fn start(
         project_root: PathBuf,
         bind: SocketAddr,
         auth_token: String,
         approver: Option<Arc<dyn ShellApprover>>,
         elicitation: Option<Arc<dyn ElicitationHandler>>,
+        snapshot_hook: Option<SnapshotHook>,
     ) -> std::io::Result<Self> {
         if !project_root.is_dir() {
             return Err(std::io::Error::new(
@@ -177,6 +190,7 @@ impl LocalFsMcpServer {
             probe: probe.clone(),
             approver,
             elicitation,
+            snapshot_hook,
         };
         let app = Router::new().route("/", post(handle_rpc)).with_state(state);
 
@@ -333,6 +347,11 @@ async fn handle_rpc(
                 // with the originating (parent or child) session id.
                 let request_context = extract_request_context(&headers);
                 let has_session_attribution = request_context.session_id.is_some();
+                // The JSON-RPC `id` is unique per `tools/call` request and
+                // stable across retries (OpenCode client contract). Use it as
+                // the snapshot ledger's `tool_call_id` — the API revert route
+                // will receive the same string back from the UI.
+                let tool_call_id = req.id.as_ref().map(jsonrpc_id_to_string).filter(|s| !s.is_empty());
                 let (text, is_error) = dispatch(
                     &state.project_root,
                     tool_name,
@@ -340,6 +359,8 @@ async fn handle_rpc(
                     state.approver.as_ref(),
                     state.elicitation.as_ref(),
                     &request_context,
+                    tool_call_id.as_deref(),
+                    state.snapshot_hook.as_ref(),
                 )
                 .await;
                 if is_error {
@@ -400,6 +421,23 @@ fn json_response(resp: JsonRpcResponse) -> Json<Value> {
     Json(serde_json::to_value(resp).unwrap_or(Value::Null))
 }
 
+/// Stringify a JSON-RPC `id` for use as a stable per-call identifier (the
+/// snapshot ledger's `tool_call_id` PK). JSON-RPC allows string, number, or
+/// null; we collapse to a string and pass through null/empty as `None` (the
+/// caller filters with `filter(|s| !s.is_empty())`). The string form keeps
+/// numeric ids loss-less and matches the wire contract the OpenCode client
+/// uses for its own `callID` keys.
+fn jsonrpc_id_to_string(id: &Value) -> String {
+    match id {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Null => String::new(),
+        // Per spec, ids are never objects/arrays — fall back to a stable
+        // JSON serialization so we still get a deterministic key.
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +452,7 @@ mod tests {
             dir.path().to_path_buf(),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             token.clone(),
+            None,
             None,
             None,
         )
