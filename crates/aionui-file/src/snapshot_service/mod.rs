@@ -136,6 +136,107 @@ impl SnapshotService {
         .await
         .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?
     }
+
+    /// Native workspace VCS status (Task 18.1).
+    ///
+    /// Reads the workspace's local git repo directly (does not require a
+    /// prior [`ISnapshotService::init`] call) and returns a unified-diff
+    /// payload when the workspace is a tracked git repo. When no `.git`
+    /// directory is present, returns `mode = "not-git"` with empty
+    /// `patches` so the UI can prompt the user to call
+    /// `workspace_vcs_init`.
+    ///
+    /// This is an inherent method (not on `ISnapshotService`) because the
+    /// existing trait is keyed on the already-registered workspace state
+    /// and assumes the workspace has been `init`'d; the Task 18.1
+    /// status route needs to answer the "is this even a git repo?"
+    /// question without forcing a state mutation on the dashboard load.
+    pub async fn workspace_vcs_status(
+        &self,
+        workspace: &str,
+    ) -> Result<aionui_api_types::WorkspaceVcsResponse, AppError> {
+        use aionui_api_types::{FileDiffEntryResponse, WorkspaceVcsResponse, WorkspaceVcsSummary};
+        use git2::Repository;
+
+        let workspace = workspace.to_owned();
+
+        tokio::task::spawn_blocking(move || {
+            let canonical = resolve_workspace(&workspace)?;
+            let git_dir = canonical.join(".git");
+
+            if !git_dir.exists() {
+                return Ok(WorkspaceVcsResponse {
+                    mode: "not-git".into(),
+                    is_tracked: false,
+                    summary: WorkspaceVcsSummary::default(),
+                    patches: Vec::new(),
+                });
+            }
+
+            let repo = Repository::open(&canonical).map_err(|e| {
+                AppError::Internal(format!(
+                    "Failed to open git repo at {}: {}",
+                    canonical.display(),
+                    e
+                ))
+            })?;
+
+            let entries = helpers::workspace_diff(&repo)?;
+
+            let mut files_changed: usize = 0;
+            let mut additions: usize = 0;
+            let mut deletions: usize = 0;
+            let patches: Vec<FileDiffEntryResponse> = entries
+                .into_iter()
+                .map(|e| {
+                    files_changed += 1;
+                    additions += e.additions as usize;
+                    deletions += e.deletions as usize;
+                    FileDiffEntryResponse {
+                        relative_path: e.relative_path,
+                        patch: e.patch,
+                        additions: e.additions,
+                        deletions: e.deletions,
+                        // Decouple the response from `aionui-common`'s
+                        // `lowercase` serde rename by serialising the
+                        // `Debug` string of the internal
+                        // `FileChangeOperation` ("Create" | "Modify" |
+                        // "Delete") — matches the convention adopted in
+                        // Task 18 for `FileDiffEntryResponse`.
+                        operation: format!("{:?}", e.operation),
+                    }
+                })
+                .collect();
+
+            Ok(WorkspaceVcsResponse {
+                mode: "git".into(),
+                is_tracked: true,
+                summary: WorkspaceVcsSummary {
+                    files_changed,
+                    additions,
+                    deletions,
+                },
+                patches,
+            })
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?
+    }
+
+    /// Native workspace VCS init (Task 18.1).
+    ///
+    /// Idempotent. For a workspace that is already a git repo this just
+    /// confirms it is registered in the service's per-workspace state.
+    /// For a non-git workspace this creates a temporary git repo under
+    /// the system temp dir that tracks the workspace via a separate
+    /// worktree (snapshot mode), so subsequent `workspace_vcs_status`
+    /// calls can return a meaningful diff. Delegates to the existing
+    /// [`ISnapshotService::init`] implementation, which already handles
+    /// both modes and the "already initialized" path.
+    pub async fn workspace_vcs_init(&self, workspace: &str) -> Result<(), AppError> {
+        crate::traits::ISnapshotService::init(self, workspace).await?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

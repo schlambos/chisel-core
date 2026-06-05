@@ -9,7 +9,7 @@ use aionui_api_types::{
     ConfirmRequest, ConfirmationListResponse, ConversationArtifactListResponse, ConversationArtifactResponse,
     ConversationListResponse, ConversationResponse, CreateConversationRequest, ListConversationsQuery,
     ListMessagesQuery, MessageListResponse, MessageSearchResponse, SearchMessagesQuery, SendMessageRequest,
-    SendMessageResponse, UpdateConversationArtifactRequest, UpdateConversationRequest,
+    SendMessageResponse, UpdateConversationArtifactRequest, UpdateConversationRequest, WorkspaceVcsResponse,
 };
 use aionui_auth::CurrentUser;
 use aionui_common::AppError;
@@ -39,6 +39,18 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
         .route(
             "/api/conversations/{id}/opencode/revert-tool-call",
             post(revert_tool_call),
+        )
+        // Native workspace VCS status (Task 18.1). Reads the local
+        // workspace git repo directly (no per-conversation `init`) and
+        // returns a unified-diff payload or a `mode = "not-git"` signal
+        // so the UI can prompt the user to call `/vcs/init`.
+        .route(
+            "/api/conversations/{id}/workspace/vcs",
+            get(get_workspace_vcs),
+        )
+        .route(
+            "/api/conversations/{id}/workspace/vcs/init",
+            post(init_workspace_vcs),
         )
         // Confirmation system
         .route("/api/conversations/{id}/confirmations", get(list_confirmations))
@@ -306,4 +318,30 @@ async fn revert_tool_call(
         .revert_tool_call(&user.id, &id, &req.tool_call_id)
         .await?;
     Ok(Json(ApiResponse::ok(result)))
+}
+
+// ── Native Workspace VCS (Task 18.1) ────────────────────────────
+
+async fn get_workspace_vcs(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<WorkspaceVcsResponse>>, AppError> {
+    let ws = state.service.get_workspace_path(&id).await?;
+    let deps = crate::snapshot_deps::get()
+        .ok_or_else(|| AppError::Internal("Snapshot service not wired".into()))?;
+    let resp = deps.snapshot_service.workspace_vcs_status(&ws).await?;
+    Ok(Json(ApiResponse::ok(resp)))
+}
+
+async fn init_workspace_vcs(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let ws = state.service.get_workspace_path(&id).await?;
+    let deps = crate::snapshot_deps::get()
+        .ok_or_else(|| AppError::Internal("Snapshot service not wired".into()))?;
+    deps.snapshot_service.workspace_vcs_init(&ws).await?;
+    Ok(Json(ApiResponse::ok(())))
 }

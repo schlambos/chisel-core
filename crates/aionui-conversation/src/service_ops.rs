@@ -310,6 +310,32 @@ impl ConversationService {
 
     // ── Workspace browsing ──────────────────────────────────────────
 
+    /// Resolve the absolute workspace path stored on the conversation's
+    /// `extra.workspace` field. Used by the per-conversation VCS
+    /// endpoints (Task 18.1) to bridge between the conversation id in
+    /// the URL and the on-disk directory we should query.
+    pub async fn get_workspace_path(&self, conversation_id: &str) -> Result<String, AppError> {
+        let row = self
+            .conversation_repo()
+            .get(conversation_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to load conversation: {e}")))?
+            .ok_or_else(|| AppError::NotFound(format!("Conversation '{conversation_id}' not found")))?;
+
+        let extra: serde_json::Value =
+            serde_json::from_str(&row.extra).map_err(|e| AppError::Internal(format!("Invalid extra JSON: {e}")))?;
+        let workspace = extra
+            .get("workspace")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+        if workspace.is_empty() {
+            return Err(AppError::BadRequest("Conversation has no workspace assigned".into()));
+        }
+        Ok(workspace)
+    }
+
     /// Enumerate entries under `query.path` inside the conversation's
     /// workspace root. Enforces workspace isolation (no traversal outside
     /// the root, with an allowance for symlinked sub-directories) and a

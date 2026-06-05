@@ -126,6 +126,20 @@ pub struct CompareResult {
     pub unstaged: Vec<FileChangeInfo>,
 }
 
+/// One file's unified diff against the workspace baseline (Task 18).
+///
+/// Internal mirror of `aionui_api_types::FileDiffEntryResponse` — the
+/// snapshot service produces this and the route handler maps it to the
+/// public response type.
+#[derive(Debug, Clone)]
+pub struct FileDiffEntry {
+    pub relative_path: String,
+    pub patch: String,
+    pub additions: u32,
+    pub deletions: u32,
+    pub operation: FileChangeOperation,
+}
+
 // ---------------------------------------------------------------------------
 // ZIP
 // ---------------------------------------------------------------------------

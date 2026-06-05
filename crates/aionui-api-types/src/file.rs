@@ -326,14 +326,17 @@ pub struct SnapshotCompareResponse {
 /// diff's own `@@`/`---`/`+++` headers), suitable for the
 /// "N files · +X / -Y lines" summary chip from Task 17. `operation`
 /// mirrors `FileChangeOperation` so the caller can render a "created" /
-/// "modified" / "deleted" label without parsing the patch text.
+/// "modified" / "deleted" label without parsing the patch text. Stored
+/// as the `Debug` string (`"Create" | "Modify" | "Delete"`) so the
+/// response is decoupled from the `aionui-common` enum's
+/// `lowercase` serde rename rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileDiffEntryResponse {
     pub relative_path: String,
     pub patch: String,
     pub additions: u32,
     pub deletions: u32,
-    pub operation: FileChangeOperation,
+    pub operation: String,
 }
 
 /// Response body for `POST /api/fs/snapshot/diff` and the wrapper
@@ -342,6 +345,31 @@ pub struct FileDiffEntryResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceDiffResponse {
     pub files: Vec<FileDiffEntryResponse>,
+}
+
+/// Response body for `GET /api/conversations/{id}/workspace/vcs` (Task 18.1).
+///
+/// `mode` is `"git"` when the workspace is a tracked git repo and
+/// `"not-git"` when no `.git` directory is present. `is_tracked` mirrors
+/// `mode == "git"` for typed callers that don't want to compare strings.
+/// `summary` rolls up `files_changed`, `additions`, and `deletions` across
+/// the whole `patches` list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceVcsResponse {
+    pub mode: String,
+    pub is_tracked: bool,
+    pub summary: WorkspaceVcsSummary,
+    pub patches: Vec<FileDiffEntryResponse>,
+}
+
+/// Roll-up of `WorkspaceVcsResponse::patches`. Counts are line totals
+/// (not files-of-additions); the UI shows them in the "N files · +X / -Y
+/// lines" header chip.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkspaceVcsSummary {
+    pub files_changed: usize,
+    pub additions: usize,
+    pub deletions: usize,
 }
 
 #[cfg(test)]
@@ -620,20 +648,20 @@ mod tests {
             patch: "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n".into(),
             additions: 1,
             deletions: 1,
-            operation: FileChangeOperation::Modify,
+            operation: "Modify".into(),
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["relative_path"], "src/main.rs");
         assert_eq!(json["additions"], 1);
         assert_eq!(json["deletions"], 1);
-        assert_eq!(json["operation"], "modify");
+        assert_eq!(json["operation"], "Modify");
         assert!(json["patch"].as_str().unwrap().contains("--- a/src/main.rs"));
 
         let round: FileDiffEntryResponse = serde_json::from_value(json).unwrap();
         assert_eq!(round.relative_path, "src/main.rs");
         assert_eq!(round.additions, 1);
         assert_eq!(round.deletions, 1);
-        assert_eq!(round.operation, FileChangeOperation::Modify);
+        assert_eq!(round.operation, "Modify");
     }
 
     #[test]
@@ -653,22 +681,22 @@ mod tests {
                     "patch": "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y\n",
                     "additions": 1,
                     "deletions": 1,
-                    "operation": "modify"
+                    "operation": "Modify"
                 },
                 {
                     "relative_path": "b.txt",
                     "patch": "--- /dev/null\n+++ b/b.txt\n@@ -0,0 +1 @@\n+brand new\n",
                     "additions": 1,
                     "deletions": 0,
-                    "operation": "create"
+                    "operation": "Create"
                 }
             ]
         });
         let resp: WorkspaceDiffResponse = serde_json::from_value(raw).unwrap();
         assert_eq!(resp.files.len(), 2);
         assert_eq!(resp.files[0].relative_path, "a.txt");
-        assert_eq!(resp.files[0].operation, FileChangeOperation::Modify);
+        assert_eq!(resp.files[0].operation, "Modify");
         assert_eq!(resp.files[1].relative_path, "b.txt");
-        assert_eq!(resp.files[1].operation, FileChangeOperation::Create);
+        assert_eq!(resp.files[1].operation, "Create");
     }
 }
