@@ -6,6 +6,7 @@
 //!   workspace via a separate worktree.
 
 mod helpers;
+pub mod restore_plan;
 
 use aionui_common::{AppError, FileChangeOperation};
 use dashmap::DashMap;
@@ -132,6 +133,45 @@ impl SnapshotService {
                 "Reverted tool-call snapshot (narrow)"
             );
             Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?
+    }
+
+    /// Build a pure restore plan for an existing `opencode_tool_snapshots` ledger row.
+    ///
+    /// Pure w.r.t. the filesystem: does not checkout, write, or call OpenCode.
+    /// Scoped to the single tracked workspace (per-conversation). The plan
+    /// documents unsupported coverage (run_shell, non-local-fs MCP, OpenCode
+    /// session revert) in the returned type rather than mutating the ledger.
+    pub async fn tool_call_restore_plan_from_ledger(
+        &self,
+        tool_call_id: &str,
+        commit_sha: &str,
+        files_changed_json: &str,
+    ) -> Result<restore_plan::ToolCallRestorePlan, AppError> {
+        let state = get_single_workspace(&self.workspaces)?;
+        let tool_call_id = tool_call_id.to_owned();
+        let commit_sha = commit_sha.to_owned();
+        let files_changed_json = files_changed_json.to_owned();
+
+        tokio::task::spawn_blocking(move || {
+            let repo = open_repo(&state)?;
+            let plan = restore_plan::build_tool_call_restore_plan_from_ledger_json(
+                &tool_call_id,
+                &commit_sha,
+                &files_changed_json,
+                &repo,
+            );
+            tracing::info!(
+                tool_call_id = %tool_call_id,
+                commit_sha = %commit_sha,
+                paths_planned = plan.paths.len(),
+                errors = plan.errors.len(),
+                warnings = plan.warnings.len(),
+                "Computed tool-call restore plan"
+            );
+            Ok::<restore_plan::ToolCallRestorePlan, AppError>(plan)
         })
         .await
         .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?

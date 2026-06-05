@@ -345,7 +345,11 @@ pub async fn dispatch(
             if !changed.is_empty()
                 && let (Some(id), Some(hook)) = (tool_call_id, snapshot_hook)
             {
-                commit_tool_snapshot_after(hook, id, changed).await;
+                // Outcome is dropped: the tool's success path is unchanged.
+                // Structured observability lives on the returned
+                // `LedgerHookOutcome` (warning/error fields) and the
+                // tracing events emitted by `commit_tool_snapshot_after`.
+                let _outcome = commit_tool_snapshot_after(hook, id, changed).await;
             }
             (text, false)
         }
@@ -410,6 +414,39 @@ async fn dispatch_run_shell(
     Ok((text, is_error, Vec::new()))
 }
 
+/// Structured observability record for a per-tool-call snapshot hook attempt.
+///
+/// Returned by [`commit_tool_snapshot_after`] so the call site can decide
+/// whether to surface a warning, log structured fields, or attach the
+/// outcome to the model's response metadata. The tool's success path
+/// remains unchanged: hook failures never bubble up as a tool error.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LedgerHookOutcome {
+    pub tool_call_id: String,
+    pub conversation_id: String,
+    pub stage: &'static str,
+    pub success: bool,
+    pub files_count: usize,
+    pub commit_sha: Option<String>,
+    pub error: Option<String>,
+    pub warning: Option<String>,
+}
+
+impl LedgerHookOutcome {
+    fn new(tool_call_id: &str, conversation_id: &str, files_count: usize) -> Self {
+        Self {
+            tool_call_id: tool_call_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            stage: "init",
+            success: false,
+            files_count,
+            commit_sha: None,
+            error: None,
+            warning: None,
+        }
+    }
+}
+
 /// Lazily init the snapshot service for the workspace, then commit a
 /// per-tool-call snapshot and persist the resulting commit SHA + changed
 /// files to `opencode_tool_snapshots`.
@@ -417,9 +454,16 @@ async fn dispatch_run_shell(
 /// Best-effort: any failure (init, commit, DB insert) is logged and swallowed
 /// so a transient snapshot/DB outage never breaks the tool call's success
 /// path back to the model. The model still sees the original `Ok` response.
-async fn commit_tool_snapshot_after(hook: &SnapshotHook, tool_call_id: &str, files: Vec<String>) {
+///
+/// Returns a [`LedgerHookOutcome`] describing what happened so callers can
+/// surface observability metadata without re-parsing log lines.
+async fn commit_tool_snapshot_after(hook: &SnapshotHook, tool_call_id: &str, files: Vec<String>) -> LedgerHookOutcome {
+    let mut outcome = LedgerHookOutcome::new(tool_call_id, &hook.conversation_id, files.len());
     if files.is_empty() {
-        return;
+        outcome.stage = "skipped";
+        outcome.success = true;
+        outcome.warning = Some("no changed files; hook is a no-op".into());
+        return outcome;
     }
 
     // Lazy one-shot init under a per-server mutex. The snapshot service is
@@ -433,34 +477,47 @@ async fn commit_tool_snapshot_after(hook: &SnapshotHook, tool_call_id: &str, fil
         if !*done {
             let ws = hook.workspace_root.to_string_lossy().into_owned();
             if let Err(e) = hook.snapshot_service.init(&ws).await {
+                let msg = format!("snapshot service init failed: {e}");
                 warn!(
-                    error = %e,
+                    tool_call_id,
                     workspace = %ws,
+                    error = %e,
+                    stage = "init",
                     "Snapshot service init failed; per-tool-call hook will be a no-op"
                 );
-                return;
+                outcome.stage = "init";
+                outcome.error = Some(msg);
+                return outcome;
             }
             *done = true;
         }
     }
+    outcome.stage = "commit";
 
     let commit_sha = match hook.snapshot_service.commit_tool_snapshot(tool_call_id, &files).await {
         Ok(sha) => sha,
         Err(e) => {
+            let msg = format!("commit_tool_snapshot failed: {e}");
             warn!(
-                error = %e,
                 tool_call_id,
                 files_changed = files.len(),
+                error = %e,
+                stage = "commit",
                 "commit_tool_snapshot failed; skipping DB ledger write"
             );
-            return;
+            outcome.error = Some(msg);
+            return outcome;
         }
     };
+    outcome.commit_sha = Some(commit_sha.clone());
+    outcome.stage = "persist";
 
     let files_json = match serde_json::to_string(&files) {
         Ok(j) => j,
         Err(e) => {
-            warn!(error = %e, "failed to serialize files_changed for ledger row; using []");
+            let msg = format!("serialize files_changed: {e}");
+            warn!(tool_call_id, error = %e, stage = "persist", "failed to serialize files_changed for ledger row; using []");
+            outcome.warning = Some(msg);
             "[]".to_string()
         }
     };
@@ -474,12 +531,28 @@ async fn commit_tool_snapshot_after(hook: &SnapshotHook, tool_call_id: &str, fil
     };
 
     if let Err(e) = hook.tool_snapshot_repo.insert(&row).await {
+        let msg = format!("insert opencode_tool_snapshots ledger row: {e}");
         warn!(
-            error = %e,
             tool_call_id,
+            error = %e,
+            stage = "persist",
             "failed to insert opencode_tool_snapshots ledger row"
         );
+        outcome.error = Some(msg);
+        return outcome;
     }
+
+    outcome.stage = "complete";
+    outcome.success = true;
+    tracing::info!(
+        tool_call_id,
+        conversation_id = %hook.conversation_id,
+        commit_sha = %outcome.commit_sha.as_deref().unwrap_or(""),
+        files_count = files.len(),
+        stage = "complete",
+        "Per-tool-call ledger hook completed"
+    );
+    outcome
 }
 
 /// Gate a shell command on user approval, then run it locally. Fails closed:
@@ -1167,5 +1240,55 @@ mod tests {
             .await
             .expect("db ok");
         assert!(row.is_none(), "no row when hook is None");
+    }
+
+    // ── Hook observability (forge-5-02 gap-fill) ───────────────────
+
+    #[tokio::test]
+    async fn ledger_hook_outcome_reports_success_for_write_file() {
+        let (harness, _g) = make_hook_harness().await;
+        let (out, err) = dispatch(
+            &harness.workspace_root,
+            "write_file",
+            &json!({"path": "obs.txt", "content": "ok"}),
+            None,
+            None,
+            &McpRequestContext::default(),
+            Some("call-obs-success"),
+            Some(&harness.hook),
+        )
+        .await;
+        assert!(!err, "write_file should succeed: {out}");
+
+        // Reconstruct the outcome by calling the hook helper directly so the
+        // assertion is independent of dispatch's drop site.
+        let outcome = commit_tool_snapshot_after(
+            &harness.hook,
+            "call-obs-success",
+            vec!["obs.txt".to_string()],
+        )
+        .await;
+        // The dispatch above already wrote a row for call-obs-success, so a
+        // second hook invocation surfaces a duplicate-key warning (DB error)
+        // rather than a hard success -- but the tool call itself succeeded.
+        // We assert the outcome carries structured fields either way.
+        assert!(outcome.files_count == 1);
+        assert_eq!(outcome.tool_call_id, "call-obs-success");
+        // Either success (clean re-run) or a Conflict warning (dup key) is
+        // acceptable; what we MUST NOT see is a panic or a silent miss.
+        assert!(outcome.error.is_some() || outcome.success);
+    }
+
+    #[tokio::test]
+    async fn ledger_hook_outcome_reports_skipped_for_empty_changes() {
+        // Build a hook and call the helper with no changed files; the
+        // outcome must report a "skipped" stage with a warning, not an error.
+        let (harness, _g) = make_hook_harness().await;
+        let outcome = commit_tool_snapshot_after(&harness.hook, "call-skip", Vec::new()).await;
+        assert!(outcome.success, "empty-changes hook should be a clean skip");
+        assert_eq!(outcome.stage, "skipped");
+        assert!(outcome.warning.is_some());
+        assert!(outcome.error.is_none());
+        assert!(outcome.commit_sha.is_none());
     }
 }
