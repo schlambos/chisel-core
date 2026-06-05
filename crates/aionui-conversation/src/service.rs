@@ -9,8 +9,9 @@ use aionui_api_types::{
     ConversationArtifactKind, ConversationArtifactListResponse, ConversationArtifactResponse,
     ConversationArtifactStatus, ConversationListResponse, ConversationResponse, CreateConversationRequest,
     ListConversationsQuery, ListMessagesQuery, MessageListResponse, MessageResponse, MessageSearchResponse,
-    SearchMessagesQuery, SendMessageRequest, UpdateConversationArtifactRequest, UpdateConversationRequest,
-    WebSocketMessage,
+    RestorePathEntryResponse, RestorePathOperation, RestorePlanUnsupportedCoverage, SearchMessagesQuery,
+    SendMessageRequest, ToolCallRestorePlanDetail, ToolCallRestorePlanResponse, UpdateConversationArtifactRequest,
+    UpdateConversationRequest, WebSocketMessage,
 };
 use aionui_common::{
     AgentType, AppError, ConversationSource, ConversationStatus, ErrorChain, OnConversationDelete,
@@ -1167,6 +1168,157 @@ impl ConversationService {
             tool_call_id: tool_call_id.to_string(),
             commit_sha: snapshot_row.commit_sha,
             files_reverted: files.len(),
+        })
+    }
+
+    /// Read-only preview of the restore plan for a single OpenCode tool
+    /// call. Looks up the `opencode_tool_snapshots` ledger row and asks
+    /// the snapshot service to compute a pure plan (no filesystem
+    /// mutation, no OpenCode call).
+    ///
+    /// Returns a `ToolCallRestorePlanResponse` with `found = false` (and
+    /// a structured empty body) when:
+    /// 1. the conversation does not exist or does not belong to the user,
+    /// 2. the snapshot deps are not wired, or
+    /// 3. no ledger row exists for the given `tool_call_id` in this
+    ///    conversation.
+    ///
+    /// The "not found" path is non-error: the UI uses it to render a
+    /// friendly "no snapshot recorded for this call" state instead of
+    /// treating the request as a hard failure. `actionable` is `true`
+    /// only when the plan has no top-level errors and every per-path
+    /// entry has no errors — the UI uses that to gate the existing
+    /// revert control without needing to inspect the paths.
+    #[tracing::instrument(skip_all, fields(user_id = %user_id, conversation_id = %conversation_id, tool_call_id = %tool_call_id))]
+    pub async fn tool_call_restore_plan(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        tool_call_id: &str,
+    ) -> Result<ToolCallRestorePlanResponse, AppError> {
+        // 1. Ownership + existence. The same `NotFound` collapse used by
+        //    `revert_tool_call` so we do not leak existence to other
+        //    users.
+        let row = self
+            .conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|r| r.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+        let _ = row;
+
+        // 2. Snapshot deps wired? Same two-tier resolution as the
+        //    revert route: per-service slot first, then process-global
+        //    registry, then 500-style "service not configured".
+        let per_service_svc = self.snapshot_service.read().ok().and_then(|g| g.clone());
+        let per_service_repo = self.tool_snapshot_repo.read().ok().and_then(|g| g.clone());
+        let global = crate::snapshot_deps::get();
+        let snapshot_service = per_service_svc
+            .or_else(|| global.as_ref().map(|d| d.snapshot_service.clone()))
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "Snapshot service not configured; cannot compute tool-call restore plan. \
+                     The composition root must call \
+                     aionui_conversation::snapshot_deps_set(...) (or the per-service \
+                     ConversationService::with_snapshot_service) at startup."
+                        .into(),
+                )
+            })?;
+        let tool_snapshot_repo = per_service_repo
+            .or_else(|| global.map(|d| d.tool_snapshot_repo))
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "opencode_tool_snapshots repo not configured; cannot compute tool-call \
+                     restore plan. The composition root must call \
+                     aionui_conversation::snapshot_deps_set(...) (or the per-service \
+                     ConversationService::with_tool_snapshot_repo) at startup."
+                        .into(),
+                )
+            })?;
+
+        // 3. Ledger lookup. Missing row → `found = false`, not an error.
+        //    Cross-conversation guard: a `tool_call_id` recorded for a
+        //    *different* conversation must not surface its plan here.
+        let snapshot_row = match tool_snapshot_repo
+            .get_by_tool_call_id(tool_call_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("snapshot ledger lookup failed: {e}")))?
+        {
+            Some(r) if r.conversation_id == conversation_id => r,
+            Some(_) => {
+                return Ok(ToolCallRestorePlanResponse {
+                    tool_call_id: tool_call_id.to_string(),
+                    found: false,
+                    plan: None,
+                    actionable: false,
+                    unsupported_coverage: RestorePlanUnsupportedCoverage::default(),
+                });
+            }
+            None => {
+                return Ok(ToolCallRestorePlanResponse {
+                    tool_call_id: tool_call_id.to_string(),
+                    found: false,
+                    plan: None,
+                    actionable: false,
+                    unsupported_coverage: RestorePlanUnsupportedCoverage::default(),
+                });
+            }
+        };
+
+        // 4. Delegate the actual git walk to the snapshot service. This
+        //    is a pure, non-mutating call: no checkout, no write, no
+        //    OpenCode roundtrip. The returned plan already carries
+        //    per-path operation / restorability / preview-blocked
+        //    signals and a top-level errors/warnings list.
+        let raw_plan = snapshot_service
+            .tool_call_restore_plan_from_ledger(
+                tool_call_id,
+                &snapshot_row.commit_sha,
+                &snapshot_row.files_changed_json,
+            )
+            .await?;
+
+        let actionable = aionui_file::restore_plan_is_actionable(&raw_plan);
+        let paths: Vec<RestorePathEntryResponse> = raw_plan
+            .paths
+            .into_iter()
+            .map(|p| RestorePathEntryResponse {
+                path: p.path,
+                operation: match p.operation {
+                    aionui_file::RestorePathOperation::Create => RestorePathOperation::Create,
+                    aionui_file::RestorePathOperation::Modify => RestorePathOperation::Modify,
+                    aionui_file::RestorePathOperation::Delete => RestorePathOperation::Delete,
+                    aionui_file::RestorePathOperation::Unknown => RestorePathOperation::Unknown,
+                },
+                prior_content_restorable: p.prior_content_restorable,
+                preview_blocked: p.preview_blocked,
+                source_commit_sha: p.source_commit_sha,
+                warnings: p.warnings,
+                errors: p.errors,
+            })
+            .collect();
+
+        let detail = ToolCallRestorePlanDetail {
+            commit_sha: raw_plan.commit_sha,
+            paths,
+            warnings: raw_plan.warnings,
+            errors: raw_plan.errors,
+        };
+
+        info!(
+            tool_call_id,
+            commit_sha = %snapshot_row.commit_sha,
+            paths_planned = detail.paths.len(),
+            actionable,
+            "Computed tool-call restore plan (read-only)"
+        );
+
+        Ok(ToolCallRestorePlanResponse {
+            tool_call_id: tool_call_id.to_string(),
+            found: true,
+            plan: Some(detail),
+            actionable,
+            unsupported_coverage: RestorePlanUnsupportedCoverage::default(),
         })
     }
 }

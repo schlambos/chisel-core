@@ -9,7 +9,8 @@ use aionui_api_types::{
     ConfirmRequest, ConfirmationListResponse, ConversationArtifactListResponse, ConversationArtifactResponse,
     ConversationListResponse, ConversationResponse, CreateConversationRequest, ListConversationsQuery,
     ListMessagesQuery, MessageListResponse, MessageSearchResponse, SearchMessagesQuery, SendMessageRequest,
-    SendMessageResponse, UpdateConversationArtifactRequest, UpdateConversationRequest, WorkspaceVcsResponse,
+    SendMessageResponse, ToolCallRestorePlanResponse, UpdateConversationArtifactRequest, UpdateConversationRequest,
+    WorkspaceVcsResponse,
 };
 use aionui_auth::CurrentUser;
 use aionui_common::AppError;
@@ -39,6 +40,14 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
         .route(
             "/api/conversations/{id}/opencode/revert-tool-call",
             post(revert_tool_call),
+        )
+        // Read-only restore-plan preview (forge-5-02-03). Surfaces the
+        // existing ledger row to the UI so the user can see what a
+        // future revert would do *before* clicking the revert button.
+        // Does not mutate the working tree and does not call OpenCode.
+        .route(
+            "/api/conversations/{id}/opencode/tool-call-restore-plan",
+            get(get_tool_call_restore_plan),
         )
         // Native workspace VCS status (Task 18.1). Reads the local
         // workspace git repo directly (no per-conversation `init`) and
@@ -316,6 +325,35 @@ async fn revert_tool_call(
     let result = state
         .service
         .revert_tool_call(&user.id, &id, &req.tool_call_id)
+        .await?;
+    Ok(Json(ApiResponse::ok(result)))
+}
+
+// ── Read-Only Tool-Call Restore Plan (forge-5-02-03) ────────────────
+
+/// Query string for `GET /api/conversations/{id}/opencode/tool-call-restore-plan`.
+///
+/// `tool_call_id` is the JSON-RPC `id` of the OpenCode `tools/call`
+/// request whose restore plan should be previewed. The client obtains
+/// it from the per-call snapshot ledger (populated by the local fs MCP
+/// hook in `aionui-ai-agent/src/manager/remote/local_fs_mcp/tools.rs`).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ToolCallRestorePlanQuery {
+    pub tool_call_id: String,
+}
+
+async fn get_tool_call_restore_plan(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    Query(query): Query<ToolCallRestorePlanQuery>,
+) -> Result<Json<ApiResponse<ToolCallRestorePlanResponse>>, AppError> {
+    if query.tool_call_id.trim().is_empty() {
+        return Err(AppError::BadRequest("tool_call_id must not be empty".into()));
+    }
+    let result = state
+        .service
+        .tool_call_restore_plan(&user.id, &id, &query.tool_call_id)
         .await?;
     Ok(Json(ApiResponse::ok(result)))
 }

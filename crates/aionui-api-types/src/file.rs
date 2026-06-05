@@ -372,6 +372,108 @@ pub struct WorkspaceVcsSummary {
     pub deletions: usize,
 }
 
+// ---------------------------------------------------------------------------
+// K. Read-only tool-call restore plan (forge-5-02-03)
+// ---------------------------------------------------------------------------
+//
+// Response body for
+// `GET /api/conversations/{id}/opencode/tool-call-restore-plan?tool_call_id=…`.
+//
+// Read-only preview over the existing `opencode_tool_snapshots` ledger
+// row; the route does not mutate the working tree. Mirrors the
+// `aionui_file::snapshot_service::restore_plan` types but lives here so
+// the API contract is decoupled from the file-crate's internal
+// representation (a future change to the git internals will not ripple
+// into the wire contract).
+
+/// Operation that a per-path restore would perform on the working tree.
+/// Serialised as a `snake_case` string for stability across the
+/// `aionui-common` `lowercase` rename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestorePathOperation {
+    Create,
+    Modify,
+    Delete,
+    Unknown,
+}
+
+/// Per-path entry inside a tool-call restore plan. Surface for the UI
+/// preview so the user can see exactly what a future revert would do
+/// per file before committing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestorePathEntryResponse {
+    pub path: String,
+    pub operation: RestorePathOperation,
+    /// `true` when pre-tool content can be recovered from the parent of
+    /// `commit_sha` (e.g. a `Modify` whose parent blob is readable).
+    pub prior_content_restorable: bool,
+    /// `true` when prior content exists but is not UTF-8 text — the
+    /// preview pane should render a binary marker rather than the
+    /// decoded bytes.
+    pub preview_blocked: bool,
+    /// Parent commit of the tool-call snapshot (baseline for narrow
+    /// revert). `None` when the tool-call commit has no parent.
+    pub source_commit_sha: Option<String>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// Response body for
+/// `GET /api/conversations/{id}/opencode/tool-call-restore-plan`.
+///
+/// `found` is `false` when no ledger row exists for the requested
+/// `tool_call_id` in this conversation (the UI shows a friendly
+/// "no snapshot" state instead of a 404). When `found` is `true`,
+/// `plan` carries the per-path preview and `actionable` is `true` only
+/// when every entry has zero blocking errors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallRestorePlanResponse {
+    pub tool_call_id: String,
+    pub found: bool,
+    pub plan: Option<ToolCallRestorePlanDetail>,
+    pub actionable: bool,
+    pub unsupported_coverage: RestorePlanUnsupportedCoverage,
+}
+
+/// Inner plan body. Kept separate from the response wrapper so the UI
+/// can type the optional `plan` field without having to re-declare
+/// every key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallRestorePlanDetail {
+    pub commit_sha: String,
+    pub paths: Vec<RestorePathEntryResponse>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// Tools and mutation surfaces **not** covered by the per-tool-call
+/// ledger in this slice. Surfaced so the UI can render an explicit
+/// "this plan does not cover …" panel rather than over-promising what
+/// a restore will undo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestorePlanUnsupportedCoverage {
+    /// `run_shell` post-exec deltas are not attributed to tool_call_id
+    /// without live shell tracking.
+    pub run_shell_not_snapshotted: bool,
+    /// Mutations outside `local_fs_mcp` (other MCP bridges, OpenCode
+    /// built-ins) are not ledgered.
+    pub non_local_fs_mcp_not_covered: bool,
+    /// OpenCode conversation/session revert is a separate surface; this
+    /// plan is filesystem-only.
+    pub opencode_session_revert_not_used: bool,
+}
+
+impl Default for RestorePlanUnsupportedCoverage {
+    fn default() -> Self {
+        Self {
+            run_shell_not_snapshotted: true,
+            non_local_fs_mcp_not_covered: true,
+            opencode_session_revert_not_used: true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,5 +800,70 @@ mod tests {
         assert_eq!(resp.files[0].operation, "Modify");
         assert_eq!(resp.files[1].relative_path, "b.txt");
         assert_eq!(resp.files[1].operation, "Create");
+    }
+
+    // -- Restore plan (forge-5-02-03) -----------------------------------
+
+    #[test]
+    fn restore_path_operation_uses_snake_case() {
+        assert_eq!(
+            serde_json::to_value(RestorePathOperation::Create).unwrap(),
+            json!("create")
+        );
+        assert_eq!(
+            serde_json::to_value(RestorePathOperation::Modify).unwrap(),
+            json!("modify")
+        );
+        assert_eq!(
+            serde_json::to_value(RestorePathOperation::Delete).unwrap(),
+            json!("delete")
+        );
+        assert_eq!(
+            serde_json::to_value(RestorePathOperation::Unknown).unwrap(),
+            json!("unknown")
+        );
+    }
+
+    #[test]
+    fn restore_plan_response_found_round_trips() {
+        let resp = ToolCallRestorePlanResponse {
+            tool_call_id: "tc-1".into(),
+            found: true,
+            actionable: true,
+            plan: Some(ToolCallRestorePlanDetail {
+                commit_sha: "abc".into(),
+                paths: vec![RestorePathEntryResponse {
+                    path: "a.txt".into(),
+                    operation: RestorePathOperation::Modify,
+                    prior_content_restorable: true,
+                    preview_blocked: false,
+                    source_commit_sha: Some("def".into()),
+                    warnings: vec![],
+                    errors: vec![],
+                }],
+                warnings: vec![],
+                errors: vec![],
+            }),
+            unsupported_coverage: RestorePlanUnsupportedCoverage::default(),
+        };
+        let value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(value["tool_call_id"], "tc-1");
+        assert_eq!(value["found"], true);
+        assert_eq!(value["plan"]["paths"][0]["operation"], "modify");
+        assert_eq!(value["unsupported_coverage"]["run_shell_not_snapshotted"], true);
+    }
+
+    #[test]
+    fn restore_plan_response_not_found_has_no_plan() {
+        let resp = ToolCallRestorePlanResponse {
+            tool_call_id: "missing".into(),
+            found: false,
+            actionable: false,
+            plan: None,
+            unsupported_coverage: RestorePlanUnsupportedCoverage::default(),
+        };
+        let value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(value["found"], false);
+        assert!(value["plan"].is_null());
     }
 }
