@@ -3676,13 +3676,14 @@ impl RemoteAgentManager {
     /// M22 Phase 2: V2 prompt path. Sends via `POST /api/session/{id}/prompt`
     /// instead of V1 `/session/{id}/prompt_async`. The V2 endpoint returns a
     /// `SessionMessage` synchronously, and streaming still arrives via SSE.
-    pub async fn opencode_send_v2(
-        &self,
-        content: &str,
-        model: Option<&Value>,
-        agent: Option<&str>,
-        inject_skills: &[String],
-    ) -> Result<(), AppError> {
+    ///
+    /// D1 fix: the V2 `Prompt` schema does not accept per-prompt `model`,
+    /// `agent`, or `skills` fields. This function therefore takes only the
+    /// prompt text — model/agent override prompts and slash commands are
+    /// dispatched to the V1 path (`opencode_send`) by `send_message`, and
+    /// skills are silently dropped (with a warning log) when the V2 path
+    /// is taken. Callers must not pass model/agent/skills through here.
+    pub async fn opencode_send_v2(&self, content: &str) -> Result<(), AppError> {
         let session_id = self.require_opencode_session().await?;
         let base_url = normalize_base_url(&self.remote_config.url);
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
@@ -3692,9 +3693,6 @@ impl RemoteAgentManager {
             auth_header.as_deref(),
             &session_id,
             content,
-            model,
-            agent,
-            inject_skills,
             Some("immediate"),
         )
         .await
@@ -4669,8 +4667,60 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             if is_first {
                 self.emit_model_info().await;
             }
-            self.opencode_send(&data.content, data.opencode_message_id.as_deref(), &data.inject_skills)
+            // D1 fix — narrow V1 fallback for overrides only.
+            //
+            // The V2 `Prompt` schema is `{ text, files?, agents?, references? }`
+            // and the V2 server strips per-prompt `model` / `agent` / `skills`
+            // fields. The V2 server's declared switch endpoints
+            // (`/api/session/:id/switch-agent`, `/api/session/:id/switch-model`)
+            // have no HTTP handler implementation in `handlers/v2/session.ts`
+            // and the V2 service-layer methods are placeholders that only
+            // publish events, so they cannot apply a per-prompt override
+            // before the next prompt. Therefore:
+            //
+            //   - Standard prompt (no override, no slash command): use the
+            //     modern V2 prompt path. This is the default.
+            //   - Prompt with a session-level model or agent override
+            //     (`state.desired_model` / `state.desired_agent`, set via
+            //     `set_model()` / `set_mode()`): fall back to V1, which is
+            //     the only path that currently honors per-prompt model/agent
+            //     fields in the request body.
+            //   - Slash command (`content` starts with `/`): fall back to V1
+            //     because the V1 dispatcher expands the command and may
+            //     produce per-command overrides; V2 has no equivalent
+            //     expansion.
+            //   - Skills-only injection is NOT a reason to fall back to V1.
+            //     When the V2 path is taken with skills requested, a warning
+            //     is logged so the absence of skill injection is visible in
+            //     traces (the UI-visible state must not imply the skill was
+            //     applied when the server will strip it).
+            let (model_override, agent_override, is_slash_command) = {
+                let state = self.state.read().await;
+                (
+                    state.desired_model.is_some(),
+                    state.desired_agent.is_some(),
+                    data.content.starts_with('/'),
+                )
+            };
+            if model_override || agent_override || is_slash_command {
+                self.opencode_send(
+                    &data.content,
+                    data.opencode_message_id.as_deref(),
+                    &data.inject_skills,
+                )
                 .await
+            } else {
+                if !data.inject_skills.is_empty() {
+                    warn!(
+                        conversation_id = %self.runtime.conversation_id(),
+                        "OpenCode V2 prompt path does not support per-prompt skill injection; \
+                         the V2 server strips prompt.skills. Requested skills will not be applied \
+                         for this turn. Route skills through the V1 path or session-level \
+                         configuration if injection is required."
+                    );
+                }
+                self.opencode_send_v2(&data.content).await
+            }
         } else if is_first {
             let payload = json!({
                 "type": "sessionsReset",

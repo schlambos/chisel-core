@@ -107,32 +107,28 @@ pub async fn v2_get_context(
 
 /// V2 prompt (`POST /api/session/{sessionID}/prompt`).
 /// Returns the `SessionMessage` response (user message as processed).
-#[allow(clippy::too_many_arguments)]
+///
+/// D1 fix: OpenCode V2 `Prompt` schema is `{ text, files?, agents?, references? }`
+/// (see `core/src/session-prompt.ts` `Prompt` class). The V2 server does NOT
+/// accept per-prompt `model`, `agent`, or `skills` fields — they are stripped
+/// server-side, silently breaking per-prompt model/agent overrides and skill
+/// injection on the V2 path. Callers that need per-prompt model/agent overrides
+/// must route through the V1 prompt path; callers that need skill injection
+/// must use V1 or accept the loss. See `opencode_send_v2` and the dispatch
+/// policy in `agent.rs` `send_message` for the narrow V1 fallback rules.
+///
+/// Only `text` is sent in the `prompt` object. The `delivery` field is the
+/// V2 server's own queueing mode (`"immediate"` runs the agent loop
+/// synchronously; `"deferred"` queues it).
 pub async fn v2_prompt(
     http_client: &reqwest::Client,
     base_url: &str,
     auth_header: Option<&str>,
     session_id: &str,
     prompt_text: &str,
-    model: Option<&Value>,
-    agent: Option<&str>,
-    inject_skills: &[String],
     delivery: Option<&str>,
 ) -> Result<Value, AppError> {
-    let prompt = json!({
-        "text": prompt_text,
-    });
-    let mut body = json!({ "prompt": prompt });
-
-    if let Some(m) = model {
-        body["prompt"]["model"] = m.clone();
-    }
-    if let Some(a) = agent {
-        body["prompt"]["agent"] = json!(a);
-    }
-    if !inject_skills.is_empty() {
-        body["prompt"]["skills"] = json!(inject_skills);
-    }
+    let mut body = json!({ "prompt": { "text": prompt_text } });
     if let Some(d) = delivery {
         body["delivery"] = json!(d);
     }
