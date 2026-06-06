@@ -1,6 +1,9 @@
 pub mod agent;
 pub mod local_fs_mcp;
 pub mod opencode_commands;
+pub mod opencode_context;
+pub mod opencode_fs;
+pub mod opencode_provider_auth;
 pub mod opencode_delta_batcher;
 pub mod opencode_log_forwarder;
 pub mod opencode_mcp;

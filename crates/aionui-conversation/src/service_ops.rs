@@ -255,6 +255,45 @@ impl ConversationService {
         self.task(conversation_id)?.fetch_v2_provider_list().await
     }
 
+    /// M13: list files on the remote OpenCode workspace.
+    pub async fn remote_list_files(&self, conversation_id: &str, path: &str) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.remote_list_files(path).await
+    }
+
+    /// M13: read a file from the remote OpenCode workspace.
+    pub async fn remote_read_file(&self, conversation_id: &str, path: &str) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.remote_read_file(path).await
+    }
+
+    /// M13: find files on the remote OpenCode workspace.
+    pub async fn remote_find_files(
+        &self,
+        conversation_id: &str,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?
+            .remote_find_files(query, limit)
+            .await
+    }
+
+    /// M13: text search on the remote OpenCode workspace.
+    pub async fn remote_find_text(
+        &self,
+        conversation_id: &str,
+        pattern: &str,
+        limit: Option<u32>,
+    ) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?
+            .remote_find_text(pattern, limit)
+            .await
+    }
+
+    /// M13: symbol search on the remote OpenCode workspace.
+    pub async fn remote_find_symbols(&self, conversation_id: &str, query: &str) -> Result<serde_json::Value, AppError> {
+        self.task(conversation_id)?.remote_find_symbols(query).await
+    }
+
     // ── Model ───────────────────────────────────────────────────────
 
     pub async fn get_model(&self, conversation_id: &str) -> Result<GetModelInfoResponse, AppError> {
@@ -347,6 +386,15 @@ impl ConversationService {
     ) -> Result<Vec<WorkspaceEntry>, AppError> {
         if query.path.trim().is_empty() {
             return Err(AppError::BadRequest("path must not be empty".into()));
+        }
+
+        if let Ok(agent) = self.get_or_build_agent(conversation_id).await {
+            if let Some(entries) = agent
+                .browse_remote_workspace(&query.path, query.search.as_deref())
+                .await?
+            {
+                return Ok(entries);
+            }
         }
 
         let row = self

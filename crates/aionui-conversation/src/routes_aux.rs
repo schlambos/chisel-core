@@ -55,6 +55,11 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
             "/api/conversations/{id}/opencode/v2-providers",
             get(get_v2_provider_list),
         )
+        .route("/api/conversations/{id}/opencode/files", get(list_remote_files))
+        .route("/api/conversations/{id}/opencode/file/content", post(read_remote_file))
+        .route("/api/conversations/{id}/opencode/find/files", get(find_remote_files))
+        .route("/api/conversations/{id}/opencode/find/text", get(find_remote_text))
+        .route("/api/conversations/{id}/opencode/find/symbols", get(find_remote_symbols))
         .with_state(state)
 }
 
@@ -424,4 +429,100 @@ async fn get_v2_provider_list(
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     Ok(Json(ApiResponse::ok(state.service.fetch_v2_provider_list(&id).await?)))
+}
+
+#[derive(serde::Deserialize)]
+struct RemoteFilesQuery {
+    #[serde(default = "default_path_dot")]
+    path: String,
+}
+
+fn default_path_dot() -> String {
+    ".".to_string()
+}
+
+async fn list_remote_files(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    Query(query): Query<RemoteFilesQuery>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state.service.remote_list_files(&id, &query.path).await?,
+    )))
+}
+
+#[derive(serde::Deserialize)]
+struct RemoteFileReadRequest {
+    path: String,
+}
+
+async fn read_remote_file(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<RemoteFileReadRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    Ok(Json(ApiResponse::ok(
+        state.service.remote_read_file(&id, &req.path).await?,
+    )))
+}
+
+#[derive(serde::Deserialize)]
+struct RemoteFindFilesQuery {
+    query: String,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+async fn find_remote_files(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    Query(query): Query<RemoteFindFilesQuery>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .remote_find_files(&id, &query.query, query.limit)
+            .await?,
+    )))
+}
+
+#[derive(serde::Deserialize)]
+struct RemoteFindTextQuery {
+    pattern: String,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+async fn find_remote_text(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    Query(query): Query<RemoteFindTextQuery>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .remote_find_text(&id, &query.pattern, query.limit)
+            .await?,
+    )))
+}
+
+#[derive(serde::Deserialize)]
+struct RemoteFindSymbolsQuery {
+    query: String,
+}
+
+async fn find_remote_symbols(
+    State(state): State<ConversationRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    Query(query): Query<RemoteFindSymbolsQuery>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state.service.remote_find_symbols(&id, &query.query).await?,
+    )))
 }

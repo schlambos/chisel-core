@@ -26,7 +26,7 @@ use crate::types::SendMessageData;
 
 use aionui_api_types::{
     GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, RemoteSkillInfo, SideQuestionRequest, SideQuestionResponse,
-    SlashCommandItem,
+    SlashCommandItem, WorkspaceEntry,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -594,6 +594,80 @@ impl AgentInstance {
         }
     }
 
+    /// M13: remote OpenCode file tree (`GET /file`).
+    pub async fn remote_list_files(&self, path: &str) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_list_files(path).await,
+            _ => Err(AppError::BadRequest(
+                "Remote file listing requires an OpenCode remote conversation".into(),
+            )),
+        }
+    }
+
+    /// M13: read a file from the remote OpenCode workspace.
+    pub async fn remote_read_file(&self, path: &str) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_read_file(path).await,
+            _ => Err(AppError::BadRequest(
+                "Remote file read requires an OpenCode remote conversation".into(),
+            )),
+        }
+    }
+
+    /// M13: find files on the remote OpenCode workspace.
+    pub async fn remote_find_files(
+        &self,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_find_files(query, limit).await,
+            _ => Err(AppError::BadRequest(
+                "Remote file search requires an OpenCode remote conversation".into(),
+            )),
+        }
+    }
+
+    /// M13: text search on the remote OpenCode workspace.
+    pub async fn remote_find_text(
+        &self,
+        pattern: &str,
+        limit: Option<u32>,
+    ) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_find_text(pattern, limit).await,
+            _ => Err(AppError::BadRequest(
+                "Remote text search requires an OpenCode remote conversation".into(),
+            )),
+        }
+    }
+
+    /// M13: symbol search on the remote OpenCode workspace.
+    pub async fn remote_find_symbols(&self, query: &str) -> Result<serde_json::Value, AppError> {
+        match self {
+            Self::Remote(m) => m.opencode_find_symbols(query).await,
+            _ => Err(AppError::BadRequest(
+                "Remote symbol search requires an OpenCode remote conversation".into(),
+            )),
+        }
+    }
+
+    /// M13: browse the remote OpenCode file tree when `tool_host: "server"`.
+    /// Returns `None` when the conversation should use local filesystem browsing.
+    pub async fn browse_remote_workspace(
+        &self,
+        path: &str,
+        search: Option<&str>,
+    ) -> Result<Option<Vec<WorkspaceEntry>>, AppError> {
+        match self {
+            Self::Remote(m) if m.uses_server_tool_host() => {
+                let raw = m.opencode_list_files(path).await?;
+                Ok(Some(map_opencode_file_nodes(raw, search)))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Get the current session model info. Only ACP exposes a model
     /// catalog; other variants report `model_info = None` so the UI can
     /// hide the model picker without an error.
@@ -762,6 +836,37 @@ fn merge_model_info(
     cc_switch_info: Option<ModelInfoPayload>,
 ) -> Option<ModelInfoPayload> {
     sdk_info.or(cc_switch_info)
+}
+
+fn map_opencode_file_nodes(value: serde_json::Value, search: Option<&str>) -> Vec<WorkspaceEntry> {
+    let nodes = value.as_array().cloned().unwrap_or_default();
+    let mut entries = Vec::new();
+    for node in nodes {
+        let name = node.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if name.is_empty() {
+            continue;
+        }
+        if let Some(s) = search {
+            if !s.is_empty() && !name.to_lowercase().contains(&s.to_lowercase()) {
+                continue;
+            }
+        }
+        let entry_type = node
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("file")
+            .to_string();
+        entries.push(WorkspaceEntry { name, entry_type });
+    }
+    entries.sort_by(|a, b| {
+        let type_cmp = a.entry_type.cmp(&b.entry_type);
+        if type_cmp == std::cmp::Ordering::Equal {
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        } else {
+            type_cmp
+        }
+    });
+    entries
 }
 
 #[cfg(test)]

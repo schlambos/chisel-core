@@ -13,22 +13,32 @@ use aionui_common::AppError;
 use reqwest::header::AUTHORIZATION;
 use serde_json::{Value, json};
 
+use super::agent::RemoteAgentConfig;
+use super::opencode_context::append_v2_location;
+
+/// Optional server-tools location scoping for V2 routes.
+pub type V2Location<'a> = Option<(&'a RemoteAgentConfig, &'a str)>;
+
+fn scoped_v2_url(base: &str, cfg: V2Location<'_>) -> String {
+    match cfg {
+        Some((c, ws)) => append_v2_location(base, c, ws),
+        None => base.to_string(),
+    }
+}
+
 /// Shared transport for V2 session-scoped requests.
 /// Mirrors `opencode_session_request` but targets `/api/session/{sessionID}...`.
 #[allow(clippy::too_many_arguments)]
 pub async fn v2_session_request(
     http_client: &reqwest::Client,
-    base_url: &str,
+    url: &str,
     auth_header: Option<&str>,
-    session_id: &str,
     method: reqwest::Method,
-    subpath: &str,
     body: Option<Value>,
     timeout_secs: u64,
 ) -> Result<Value, AppError> {
-    let url = format!("{base_url}/api/session/{session_id}{subpath}");
     let mut req = http_client
-        .request(method, &url)
+        .request(method, url)
         .timeout(Duration::from_secs(timeout_secs));
     if let Some(ref b) = body {
         req = req.json(b);
@@ -58,6 +68,10 @@ pub async fn v2_session_request(
         .map_err(|e| AppError::BadGateway(format!("OpenCode V2 session response was not JSON: {e}")))
 }
 
+fn v2_session_url(base_url: &str, session_id: &str, subpath: &str, location: V2Location<'_>) -> String {
+    scoped_v2_url(&format!("{base_url}/api/session/{session_id}{subpath}"), location)
+}
+
 /// V2 compact the session (`POST /api/session/{sessionID}/compact`).
 /// Replaces V1 `POST /session/{id}/summarize`. The V2 endpoint does not
 /// require `providerID`/`modelID` in the body — the server uses the
@@ -68,15 +82,15 @@ pub async fn v2_compact(
     auth_header: Option<&str>,
     session_id: &str,
     instructions: Option<&str>,
+    location: V2Location<'_>,
 ) -> Result<(), AppError> {
     let body = instructions.map(|s| json!({ "instructions": s })).unwrap_or(json!({}));
+    let url = v2_session_url(base_url, session_id, "/compact", location);
     v2_session_request(
         http_client,
-        base_url,
+        &url,
         auth_header,
-        session_id,
         reqwest::Method::POST,
-        "/compact",
         Some(body),
         120,
     )
@@ -91,14 +105,14 @@ pub async fn v2_get_context(
     base_url: &str,
     auth_header: Option<&str>,
     session_id: &str,
+    location: V2Location<'_>,
 ) -> Result<Value, AppError> {
+    let url = v2_session_url(base_url, session_id, "/context", location);
     v2_session_request(
         http_client,
-        base_url,
+        &url,
         auth_header,
-        session_id,
         reqwest::Method::GET,
-        "/context",
         None,
         30,
     )
@@ -127,19 +141,19 @@ pub async fn v2_prompt(
     session_id: &str,
     prompt_text: &str,
     delivery: Option<&str>,
+    location: V2Location<'_>,
 ) -> Result<Value, AppError> {
     let mut body = json!({ "prompt": { "text": prompt_text } });
     if let Some(d) = delivery {
         body["delivery"] = json!(d);
     }
 
+    let url = v2_session_url(base_url, session_id, "/prompt", location);
     v2_session_request(
         http_client,
-        base_url,
+        &url,
         auth_header,
-        session_id,
         reqwest::Method::POST,
-        "/prompt",
         Some(body),
         120,
     )
@@ -154,6 +168,7 @@ pub async fn v2_list_sessions(
     auth_header: Option<&str>,
     limit: Option<u32>,
     cursor: Option<&str>,
+    location: V2Location<'_>,
 ) -> Result<Value, AppError> {
     let mut url = format!("{base_url}/api/session");
     let mut sep = '?';
@@ -164,6 +179,7 @@ pub async fn v2_list_sessions(
     if let Some(c) = cursor {
         url.push_str(&format!("{sep}cursor={c}"));
     }
+    let url = scoped_v2_url(&url, location);
     let mut req = http_client.get(&url).timeout(Duration::from_secs(15));
     if let Some(h) = auth_header {
         req = req.header(AUTHORIZATION, h);
@@ -193,6 +209,7 @@ pub async fn v2_get_messages(
     session_id: &str,
     limit: Option<u32>,
     cursor: Option<&str>,
+    location: V2Location<'_>,
 ) -> Result<Value, AppError> {
     let mut subpath = "/message".to_string();
     let mut sep = '?';
@@ -203,13 +220,12 @@ pub async fn v2_get_messages(
     if let Some(c) = cursor {
         subpath.push_str(&format!("{sep}cursor={c}"));
     }
+    let url = v2_session_url(base_url, session_id, &subpath, location);
     v2_session_request(
         http_client,
-        base_url,
+        &url,
         auth_header,
-        session_id,
         reqwest::Method::GET,
-        &subpath,
         None,
         30,
     )
@@ -223,14 +239,14 @@ pub async fn v2_wait(
     base_url: &str,
     auth_header: Option<&str>,
     session_id: &str,
+    location: V2Location<'_>,
 ) -> Result<(), AppError> {
+    let url = v2_session_url(base_url, session_id, "/wait", location);
     v2_session_request(
         http_client,
-        base_url,
+        &url,
         auth_header,
-        session_id,
         reqwest::Method::POST,
-        "/wait",
         None,
         300,
     )
@@ -243,8 +259,9 @@ pub async fn fetch_v2_models(
     http_client: &reqwest::Client,
     base_url: &str,
     auth_header: Option<&str>,
+    location: V2Location<'_>,
 ) -> Result<Value, AppError> {
-    let url = format!("{base_url}/api/model");
+    let url = scoped_v2_url(&format!("{base_url}/api/model"), location);
     let mut req = http_client.get(&url).timeout(Duration::from_secs(10));
     if let Some(h) = auth_header {
         req = req.header(AUTHORIZATION, h);
@@ -270,8 +287,9 @@ pub async fn fetch_v2_providers(
     http_client: &reqwest::Client,
     base_url: &str,
     auth_header: Option<&str>,
+    location: V2Location<'_>,
 ) -> Result<Value, AppError> {
-    let url = format!("{base_url}/api/provider");
+    let url = scoped_v2_url(&format!("{base_url}/api/provider"), location);
     let mut req = http_client.get(&url).timeout(Duration::from_secs(10));
     if let Some(h) = auth_header {
         req = req.header(AUTHORIZATION, h);

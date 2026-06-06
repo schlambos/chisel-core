@@ -482,7 +482,87 @@ impl RemoteAgentService {
         .await
     }
 
+    /// M12: list OpenCode providers with auth state for the settings UI.
+    pub async fn fetch_provider_catalog(&self, remote_agent_id: &str) -> Result<serde_json::Value, AppError> {
+        let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
+        crate::manager::remote::opencode_provider_auth::list_providers(&client, &cfg).await
+    }
+
+    /// M12: set provider API credentials on the remote OpenCode server.
+    pub async fn set_provider_credentials(
+        &self,
+        remote_agent_id: &str,
+        provider_id: &str,
+        api_key: &str,
+    ) -> Result<(), AppError> {
+        let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
+        crate::manager::remote::opencode_provider_auth::set_api_key(&client, &cfg, provider_id, api_key).await
+    }
+
+    /// M12: clear provider credentials on the remote OpenCode server.
+    pub async fn delete_provider_credentials(
+        &self,
+        remote_agent_id: &str,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
+        crate::manager::remote::opencode_provider_auth::delete_provider_auth(&client, &cfg, provider_id).await
+    }
+
+    /// M12: start provider OAuth — returns authorize URL payload from server.
+    pub async fn start_provider_oauth(
+        &self,
+        remote_agent_id: &str,
+        provider_id: &str,
+    ) -> Result<serde_json::Value, AppError> {
+        let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
+        crate::manager::remote::opencode_provider_auth::start_provider_oauth(&client, &cfg, provider_id).await
+    }
+
+    /// M12: complete provider OAuth with authorization code.
+    pub async fn complete_provider_oauth(
+        &self,
+        remote_agent_id: &str,
+        provider_id: &str,
+        code: &str,
+    ) -> Result<(), AppError> {
+        let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
+        crate::manager::remote::opencode_provider_auth::complete_provider_oauth(&client, &cfg, provider_id, code).await
+    }
+
     // ── Private helpers ──────────────────────────────────────────
+
+    async fn opencode_client_config(
+        &self,
+        remote_agent_id: &str,
+    ) -> Result<(reqwest::Client, crate::manager::remote::RemoteAgentConfig), AppError> {
+        let row = self
+            .repo
+            .find_by_id(remote_agent_id)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::NotFound(format!("Remote agent '{remote_agent_id}' not found")))?;
+        if parse_protocol(&row.protocol) != RemoteAgentProtocol::OpenCode {
+            return Err(AppError::BadRequest(
+                "Provider auth is only supported for OpenCode remote agents".into(),
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .danger_accept_invalid_certs(row.allow_insecure)
+            .build()
+            .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))?;
+        let cfg = crate::manager::remote::RemoteAgentConfig {
+            remote_agent_id: row.id.clone(),
+            protocol: row.protocol.clone(),
+            url: row.url.clone(),
+            auth_type: row.auth_type.clone(),
+            auth_token: decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?,
+            allow_insecure: row.allow_insecure,
+            tool_host: row.tool_host.clone(),
+        };
+        Ok((client, cfg))
+    }
 
     fn row_to_list_item(&self, row: RemoteAgentRow) -> Result<RemoteAgentListItem, AppError> {
         Ok(RemoteAgentListItem {

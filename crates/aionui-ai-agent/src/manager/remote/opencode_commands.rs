@@ -143,6 +143,48 @@ pub fn expand_template(template: &str, args: &str) -> String {
     .into_owned()
 }
 
+/// Run a slash command via `POST /session/{sessionID}/command`. The server
+/// expands the command template; clients should prefer this over local
+/// template expansion when the command is in the catalog.
+pub async fn execute_server_command(
+    http_client: &reqwest::Client,
+    url: &str,
+    auth_header: Option<&str>,
+    command_line: &str,
+    agent: Option<&str>,
+    model: Option<&str>,
+) -> Result<(), aionui_common::AppError> {
+    use aionui_common::AppError;
+    use reqwest::header::AUTHORIZATION;
+
+    let mut body = serde_json::json!({ "command": command_line });
+    if let Some(a) = agent {
+        body["agent"] = serde_json::json!(a);
+    }
+    if let Some(m) = model {
+        body["model"] = serde_json::json!(m);
+    }
+    let mut req = http_client
+        .post(url)
+        .json(&body)
+        .timeout(Duration::from_secs(120));
+    if let Some(h) = auth_header {
+        req = req.header(AUTHORIZATION, h);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("OpenCode POST /command failed: {e}")))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(AppError::BadGateway(format!(
+            "OpenCode POST /command returned {status}: {body_text}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

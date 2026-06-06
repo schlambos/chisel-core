@@ -214,6 +214,11 @@ struct RemoteState {
     /// "Patterns: *.go, src/*" as a chip row instead of a single line in
     /// the description blob.
     prompt_patterns: HashMap<String, Vec<String>>,
+    /// C03: whether `POST /session/{id}/init` succeeded for the current
+    /// server-side session. Resumed sessions are treated as initialized.
+    session_initialized: bool,
+    /// M20: last known sync sequence per aggregate id for reconnect backfill.
+    last_sync_seqs: HashMap<String, u64>,
 }
 
 /// Configuration for connecting to a remote agent.
@@ -235,7 +240,7 @@ pub struct RemoteAgentConfig {
 /// Whether this config requests the OpenCode server's own tools instead of the
 /// client-side local-fs MCP. Only meaningful for the opencode protocol; any
 /// value other than exactly "server" is treated as the default "local".
-fn is_server_tool_host(cfg: &RemoteAgentConfig) -> bool {
+pub(crate) fn is_server_tool_host(cfg: &RemoteAgentConfig) -> bool {
     is_opencode_protocol(&cfg.protocol) && cfg.tool_host == "server"
 }
 
@@ -835,7 +840,7 @@ async fn resolve_event_path(client: &reqwest::Client, base_url: &str, auth_heade
     }
 }
 
-fn normalize_base_url(url: &str) -> String {
+pub(crate) fn normalize_base_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
 }
 
@@ -858,7 +863,7 @@ fn next_opencode_message_id(messages: &Value, message_id: &str) -> Option<String
         .map(|s| s.to_string())
 }
 
-fn build_auth_header(auth_type: &str, auth_token: Option<&str>) -> Option<String> {
+pub(crate) fn build_auth_header(auth_type: &str, auth_token: Option<&str>) -> Option<String> {
     let token = auth_token.filter(|t| !t.is_empty())?;
     let value = match auth_type {
         "bearer" | "Bearer" => format!("Bearer {token}"),
@@ -1372,6 +1377,7 @@ impl RemoteAgentManager {
         }
 
         let delta_batcher = DeltaBatcherHandle::new(runtime.clone());
+        let resume_initialized = resume_session_id.is_some();
 
         Ok(Self {
             runtime,
@@ -1411,6 +1417,8 @@ impl RemoteAgentManager {
                 prompt_expiries: HashMap::new(),
                 prompt_tool_call_ids: HashMap::new(),
                 prompt_patterns: HashMap::new(),
+                session_initialized: resume_initialized,
+                last_sync_seqs: HashMap::new(),
             })),
             ws_sink: Mutex::new(None),
             _reader_handle: Mutex::new(None),
@@ -1491,6 +1499,7 @@ impl RemoteAgentManager {
                     session_id = %session_id,
                     "Resuming persisted OpenCode session"
                 );
+                self.state.write().await.session_initialized = true;
                 // Re-register the client-side fs MCP on resume. The previous
                 // process's `LocalFsMcpServer` is gone (its loopback/LAN port
                 // was process-scoped), but the resumed OpenCode session may
@@ -1574,6 +1583,7 @@ impl RemoteAgentManager {
                 // in-progress session; on reconnect it catches any spawned
                 // during the gap. Best-effort and deduped by the registry.
                 this.backfill_child_sessions().await;
+                let _ = this.backfill_sync_history().await;
 
                 let exit = run_event_reader(&this, &client, &event_url, auth.as_deref(), &conversation_id).await;
                 // If the pass reached `Connected`, reset the backoff so the next
@@ -1713,6 +1723,25 @@ impl RemoteAgentManager {
             Some(t) => t,
             None => return,
         };
+
+        // M20: track sync mirror sequences for reconnect backfill.
+        if event_type == "sync" {
+            if let Some(sync) = raw.get("syncEvent") {
+                if let (Some(agg), Some(seq)) = (
+                    sync.get("aggregateID").and_then(|v| v.as_str()),
+                    sync.get("seq").and_then(|v| v.as_u64()),
+                ) {
+                    self.state
+                        .write()
+                        .await
+                        .last_sync_seqs
+                        .entry(agg.to_string())
+                        .and_modify(|s| *s = (*s).max(seq))
+                        .or_insert(seq);
+                }
+            }
+            return;
+        }
 
         let props = match raw.get("properties") {
             Some(p) => p,
@@ -3395,17 +3424,20 @@ impl RemoteAgentManager {
     /// The server emits `message.removed`, which our SSE handler reconciles into
     /// the local store.
     pub async fn opencode_delete_message(&self, message_id: &str) -> Result<(), AppError> {
+        self.opencode_wait_for_idle().await?;
         let session_id = self.require_opencode_session().await?;
         let base_url = normalize_base_url(&self.remote_config.url);
-        let url = format!("{base_url}/session/{session_id}/message/{message_id}");
+        let url = self.with_request_context(&format!("{base_url}/session/{session_id}/message/{message_id}"));
         self.opencode_delete(&url, "message").await
     }
 
     /// M07: delete a single part (`DELETE /session/{id}/message/{messageID}/part/{partID}`).
     pub async fn opencode_delete_message_part(&self, message_id: &str, part_id: &str) -> Result<(), AppError> {
+        self.opencode_wait_for_idle().await?;
         let session_id = self.require_opencode_session().await?;
         let base_url = normalize_base_url(&self.remote_config.url);
-        let url = format!("{base_url}/session/{session_id}/message/{message_id}/part/{part_id}");
+        let url =
+            self.with_request_context(&format!("{base_url}/session/{session_id}/message/{message_id}/part/{part_id}"));
         self.opencode_delete(&url, "part").await
     }
 
@@ -3441,12 +3473,13 @@ impl RemoteAgentManager {
         part_id: &str,
         new_text: &str,
     ) -> Result<(), AppError> {
+        self.opencode_wait_for_idle().await?;
         let session_id = self.require_opencode_session().await?;
         let base_url = normalize_base_url(&self.remote_config.url);
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
 
         // 1. Fetch the message to obtain the full part object.
-        let get_url = format!("{base_url}/session/{session_id}/message/{message_id}");
+        let get_url = self.with_request_context(&format!("{base_url}/session/{session_id}/message/{message_id}"));
         let mut get_req = self.http_client.get(&get_url).timeout(Duration::from_secs(15));
         if let Some(ref h) = auth_header {
             get_req = get_req.header(AUTHORIZATION, h.as_str());
@@ -3480,7 +3513,9 @@ impl RemoteAgentManager {
         target["text"] = json!(new_text);
 
         // 3. PATCH the full part back.
-        let patch_url = format!("{base_url}/session/{session_id}/message/{message_id}/part/{part_id}");
+        let patch_url = self.with_request_context(&format!(
+            "{base_url}/session/{session_id}/message/{message_id}/part/{part_id}"
+        ));
         let mut patch_req = self
             .http_client
             .patch(&patch_url)
@@ -3515,7 +3550,7 @@ impl RemoteAgentManager {
     ) -> Result<Value, AppError> {
         let session_id = self.require_opencode_session().await?;
         let base_url = normalize_base_url(&self.remote_config.url);
-        let url = format!("{base_url}/session/{session_id}{subpath}");
+        let url = self.with_request_context(&format!("{base_url}/session/{session_id}{subpath}"));
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
 
         let mut req = self
@@ -3559,6 +3594,7 @@ impl RemoteAgentManager {
     /// fork), we omit `messageID` entirely and OpenCode copies the whole
     /// transcript.
     pub async fn opencode_fork(&self, message_id: Option<&str>) -> Result<String, AppError> {
+        self.opencode_wait_for_idle().await?;
         let fork_at = match message_id.filter(|m| m.starts_with("msg")) {
             Some(m) => self.opencode_message_after(m).await?,
             None => None,
@@ -3590,6 +3626,7 @@ impl RemoteAgentManager {
 
     /// M02: revert the session to a message (and optionally a specific part).
     pub async fn opencode_revert(&self, message_id: &str, part_id: Option<&str>) -> Result<(), AppError> {
+        self.opencode_wait_for_idle().await?;
         let mut body = json!({ "messageID": message_id });
         if let Some(pid) = part_id.filter(|p| p.starts_with("prt")) {
             body["partID"] = json!(pid);
@@ -3647,6 +3684,7 @@ impl RemoteAgentManager {
             auth_header.as_deref(),
             &session_id,
             instructions,
+            self.v2_location(),
         )
         .await
         {
@@ -3670,7 +3708,14 @@ impl RemoteAgentManager {
         let session_id = self.require_opencode_session().await?;
         let base_url = normalize_base_url(&self.remote_config.url);
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
-        super::opencode_v2::v2_get_context(&self.http_client, &base_url, auth_header.as_deref(), &session_id).await
+        super::opencode_v2::v2_get_context(
+            &self.http_client,
+            &base_url,
+            auth_header.as_deref(),
+            &session_id,
+            self.v2_location(),
+        )
+        .await
     }
 
     /// M22 Phase 2: V2 prompt path. Sends via `POST /api/session/{id}/prompt`
@@ -3694,6 +3739,7 @@ impl RemoteAgentManager {
             &session_id,
             content,
             Some("immediate"),
+            self.v2_location(),
         )
         .await
         .map(|_| ())
@@ -3716,6 +3762,7 @@ impl RemoteAgentManager {
             &session_id,
             limit,
             cursor,
+            self.v2_location(),
         )
         .await
     }
@@ -3745,7 +3792,13 @@ impl RemoteAgentManager {
         }
         let base_url = normalize_base_url(&self.remote_config.url);
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
-        super::opencode_v2::fetch_v2_models(&self.http_client, &base_url, auth_header.as_deref()).await
+        super::opencode_v2::fetch_v2_models(
+            &self.http_client,
+            &base_url,
+            auth_header.as_deref(),
+            self.v2_location(),
+        )
+        .await
     }
 
     /// M22 Phase 1: fetch V2 provider list from the server. Returns raw JSON.
@@ -3757,7 +3810,82 @@ impl RemoteAgentManager {
         }
         let base_url = normalize_base_url(&self.remote_config.url);
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
-        super::opencode_v2::fetch_v2_providers(&self.http_client, &base_url, auth_header.as_deref()).await
+        super::opencode_v2::fetch_v2_providers(
+            &self.http_client,
+            &base_url,
+            auth_header.as_deref(),
+            self.v2_location(),
+        )
+        .await
+    }
+
+    /// M13: remote workspace path metadata (`GET /path`).
+    pub async fn opencode_fetch_path(&self) -> Result<Value, AppError> {
+        super::opencode_fs::fetch_path(
+            &self.http_client,
+            &self.remote_config,
+            self.runtime.workspace(),
+        )
+        .await
+    }
+
+    /// M13: list files on the remote server (`GET /file`).
+    pub async fn opencode_list_files(&self, path: &str) -> Result<Value, AppError> {
+        super::opencode_fs::list_files(
+            &self.http_client,
+            &self.remote_config,
+            self.runtime.workspace(),
+            path,
+        )
+        .await
+    }
+
+    /// M13: read remote file content (`POST /file/content`).
+    pub async fn opencode_read_file(&self, path: &str) -> Result<Value, AppError> {
+        super::opencode_fs::read_file_content(
+            &self.http_client,
+            &self.remote_config,
+            self.runtime.workspace(),
+            path,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// M13: find files by name on the remote server (`GET /find/file`).
+    pub async fn opencode_find_files(&self, query: &str, limit: Option<u32>) -> Result<Value, AppError> {
+        super::opencode_fs::find_files(
+            &self.http_client,
+            &self.remote_config,
+            self.runtime.workspace(),
+            query,
+            limit,
+        )
+        .await
+    }
+
+    /// M13: grep on the remote server (`GET /find`).
+    pub async fn opencode_find_text(&self, pattern: &str, limit: Option<u32>) -> Result<Value, AppError> {
+        super::opencode_fs::find_text(
+            &self.http_client,
+            &self.remote_config,
+            self.runtime.workspace(),
+            pattern,
+            limit,
+        )
+        .await
+    }
+
+    /// M13: symbol search on the remote server (`GET /find/symbol`).
+    pub async fn opencode_find_symbols(&self, query: &str) -> Result<Value, AppError> {
+        super::opencode_fs::find_symbols(
+            &self.http_client,
+            &self.remote_config,
+            self.runtime.workspace(),
+            query,
+        )
+        .await
     }
 
     /// M03: create a shareable link for the session. Returns the share URL.
@@ -3913,7 +4041,7 @@ impl RemoteAgentManager {
         body: Option<Value>,
     ) -> Result<Value, AppError> {
         let base_url = normalize_base_url(&self.remote_config.url);
-        let url = format!("{base_url}{path}");
+        let url = self.with_request_context(&format!("{base_url}{path}"));
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
 
         let mut req = self.http_client.request(method, &url).timeout(Duration::from_secs(15));
@@ -3943,7 +4071,7 @@ impl RemoteAgentManager {
     }
 
     async fn opencode_create_session(&self, base_url: &str) -> Result<String, AppError> {
-        let url = format!("{base_url}/session");
+        let url = self.with_request_context(&format!("{base_url}/session"));
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
 
         // C04 tool-host mode. In the default "local" mode we inject the
@@ -4015,6 +4143,229 @@ impl RemoteAgentManager {
             .and_then(|v| v.as_str())
             .map(String::from)
             .ok_or_else(|| AppError::Internal(format!("OpenCode create session response missing id: {body}")))
+    }
+
+    /// Append `?directory=` when server-tools mode scopes requests to the remote tree.
+    fn with_request_context(&self, url: &str) -> String {
+        super::opencode_context::append_v1_directory(url, &self.remote_config, self.runtime.workspace())
+    }
+
+    /// Append V2 `location[directory]=` when server-tools mode is active.
+    fn v2_location(&self) -> super::opencode_v2::V2Location<'_> {
+        if is_server_tool_host(&self.remote_config) {
+            Some((&self.remote_config, self.runtime.workspace()))
+        } else {
+            None
+        }
+    }
+
+    /// True when file/VCS/config operations should target the remote OpenCode tree.
+    pub fn uses_server_tool_host(&self) -> bool {
+        is_server_tool_host(&self.remote_config)
+    }
+
+    /// C03: seed model/agent on a fresh session via `POST /session/{id}/init`.
+    /// Best-effort: 404 on older servers is ignored.
+    async fn opencode_init_session(&self, base_url: &str, session_id: &str) -> Result<(), AppError> {
+        {
+            let state = self.state.read().await;
+            if state.session_initialized {
+                return Ok(());
+            }
+        }
+
+        let (model, agent) = {
+            let state = self.state.read().await;
+            (state.desired_model.clone(), state.desired_agent.clone())
+        };
+
+        let mut body = json!({});
+        if let Some(ref m) = model {
+            if let Some(id) = m.get("id").or_else(|| m.get("modelID")) {
+                body["model"] = json!(id);
+            }
+            if let Some(p) = m.get("providerID").and_then(|v| v.as_str()) {
+                body["provider"] = json!(p);
+            }
+        }
+        if let Some(ref a) = agent {
+            body["agent"] = json!(a);
+        }
+
+        let url = self.with_request_context(&format!("{base_url}/session/{session_id}/init"));
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        let mut req = self
+            .http_client
+            .post(&url)
+            .json(&body)
+            .timeout(Duration::from_secs(15));
+        if let Some(ref h) = auth_header {
+            req = req.header(AUTHORIZATION, h.as_str());
+        }
+
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 204 => {
+                self.state.write().await.session_initialized = true;
+                Ok(())
+            }
+            Ok(resp) if resp.status().as_u16() == 404 => {
+                debug!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    "OpenCode session init not supported (404); continuing without init"
+                );
+                self.state.write().await.session_initialized = true;
+                Ok(())
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body_text = resp.text().await.unwrap_or_default();
+                warn!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    status = %status,
+                    body = %body_text,
+                    "OpenCode session init returned non-success; continuing"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                warn!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    error = %e,
+                    "OpenCode session init request failed; continuing"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Wait for the session agent loop to become idle before mutating operations.
+    async fn opencode_wait_for_idle(&self) -> Result<(), AppError> {
+        if !is_opencode_protocol(&self.remote_config.protocol) {
+            return Ok(());
+        }
+        let session_id = match self.state.read().await.opencode_session_id.clone() {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+        let _ = super::opencode_v2::v2_wait(
+            &self.http_client,
+            &base_url,
+            auth_header.as_deref(),
+            &session_id,
+            self.v2_location(),
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Ensure an OpenCode session exists and is initialized (C03).
+    async fn ensure_opencode_session(&self) -> Result<String, AppError> {
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let mut session_just_created = false;
+        let session_id = {
+            let state = self.state.read().await;
+            if state.opencode_session_id.is_none() {
+                drop(state);
+                let id = self.opencode_create_session(&base_url).await?;
+                let mut state = self.state.write().await;
+                state.opencode_session_id = Some(id.clone());
+                session_just_created = true;
+                id
+            } else {
+                state.opencode_session_id.clone().unwrap()
+            }
+        };
+        if session_just_created {
+            self.persist_session_key_now(&session_id).await;
+            self.opencode_init_session(&base_url, &session_id).await?;
+        }
+        Ok(session_id)
+    }
+
+    /// M20: replay sync events missed during an SSE gap (best-effort).
+    async fn backfill_sync_history(&self) -> Result<(), AppError> {
+        let since = { self.state.read().await.last_sync_seqs.clone() };
+        if since.is_empty() {
+            return Ok(());
+        }
+        let events = match self.fetch_sync_history(&since).await {
+            Ok(e) => e,
+            Err(e) => {
+                debug!(error = %e, "sync/history backfill skipped");
+                return Ok(());
+            }
+        };
+        let mut state = self.state.write().await;
+        for ev in events {
+            state
+                .last_sync_seqs
+                .entry(ev.aggregate_id)
+                .and_modify(|seq| *seq = (*seq).max(ev.seq))
+                .or_insert(ev.seq);
+        }
+        Ok(())
+    }
+
+    /// Send a slash command via the server-native `POST /session/{id}/command`.
+    async fn opencode_send_command(&self, command_line: &str) -> Result<(), AppError> {
+        let base_url = normalize_base_url(&self.remote_config.url);
+        let conversation_id = self.runtime.conversation_id().to_string();
+        opencode_mcp::acquire_turn(&base_url, &conversation_id).await;
+
+        let result = async {
+            if !is_server_tool_host(&self.remote_config) {
+                let auth_header =
+                    build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+                self.ensure_local_fs_mcp(&base_url, auth_header.as_deref()).await;
+            }
+
+            let mut session_just_created = false;
+            let session_id = {
+                let mut state = self.state.write().await;
+                if state.opencode_session_id.is_none() {
+                    let id = self.opencode_create_session(&base_url).await?;
+                    state.opencode_session_id = Some(id);
+                    session_just_created = true;
+                }
+                state.opencode_session_id.clone().unwrap()
+            };
+
+            if session_just_created {
+                self.persist_session_key_now(&session_id).await;
+                self.opencode_init_session(&base_url, &session_id).await?;
+            }
+
+            let (agent, model) = {
+                let state = self.state.read().await;
+                (state.desired_agent.clone(), state.desired_model.clone())
+            };
+            let model_str = model.and_then(|m| {
+                m.get("id")
+                    .or_else(|| m.get("modelID"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            });
+
+            let url = self.with_request_context(&format!("{base_url}/session/{session_id}/command"));
+            let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+            opencode_commands::execute_server_command(
+                &self.http_client,
+                &url,
+                auth_header.as_deref(),
+                command_line,
+                agent.as_deref(),
+                model_str.as_deref(),
+            )
+            .await
+        }
+        .await;
+
+        if result.is_err() {
+            opencode_mcp::release_turn(&base_url, &conversation_id).await;
+        }
+        result
     }
 
     /// Send a message via OpenCode HTTP prompt_async.
@@ -4113,6 +4464,7 @@ impl RemoteAgentManager {
         // never blocks the prompt (the completion-path persist still runs).
         if session_just_created {
             self.persist_session_key_now(&session_id).await;
+            self.opencode_init_session(&base_url, &session_id).await?;
         }
         let context_prefix = if session_just_created {
             self.build_context_transcript_prefix().await
@@ -4120,7 +4472,7 @@ impl RemoteAgentManager {
             None
         };
 
-        let url = format!("{base_url}/session/{session_id}/prompt_async");
+        let url = self.with_request_context(&format!("{base_url}/session/{session_id}/prompt_async"));
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
 
         // Resolve slash-command expansion. The per-command `agent`/`model`
@@ -4153,6 +4505,8 @@ impl RemoteAgentManager {
             }
         };
 
+        let has_model_override = override_model.is_some();
+        let has_agent_override = override_agent.is_some();
         let (model, agent) = {
             let state = self.state.read().await;
             (
@@ -4239,19 +4593,27 @@ impl RemoteAgentManager {
         if let Some(hint) = system_hint {
             body["system"] = json!(hint);
         }
+        let omit_wire_model_agent = {
+            let state = self.state.read().await;
+            state.session_initialized && !has_model_override && !has_agent_override
+        };
         if let Some(ref m) = model {
-            if let Some(id) = m.get("id") {
-                body["model"] = json!({
-                    "providerID": m.get("providerID").and_then(|v| v.as_str()).unwrap_or("opencode-go"),
-                    "modelID": id,
-                    "variant": m.get("variant").and_then(|v| v.as_str()).unwrap_or("default"),
-                });
-            } else {
-                body["model"] = m.clone();
+            if !omit_wire_model_agent {
+                if let Some(id) = m.get("id") {
+                    body["model"] = json!({
+                        "providerID": m.get("providerID").and_then(|v| v.as_str()).unwrap_or("opencode-go"),
+                        "modelID": id,
+                        "variant": m.get("variant").and_then(|v| v.as_str()).unwrap_or("default"),
+                    });
+                } else {
+                    body["model"] = m.clone();
+                }
             }
         }
         if let Some(ref a) = agent {
-            body["agent"] = json!(a);
+            if !omit_wire_model_agent {
+                body["agent"] = json!(a);
+            }
         }
         // M10: pass selected server-side skills into the prompt body so the
         // model can load the matching SKILL.md content. OpenCode's
@@ -4467,6 +4829,13 @@ impl RemoteAgentManager {
             "providerID": provider_id,
             "variant": "default"
         }));
+        state.session_initialized = false;
+        let session_id = state.opencode_session_id.clone();
+        drop(state);
+        if let Some(session_id) = session_id {
+            let base_url = normalize_base_url(&self.remote_config.url);
+            let _ = self.opencode_init_session(&base_url, &session_id).await;
+        }
         Ok(())
     }
 
@@ -4517,6 +4886,11 @@ impl RemoteAgentManager {
         {
             let mut state = self.state.write().await;
             state.desired_agent = Some(normalized.to_owned());
+            state.session_initialized = false;
+        }
+        if let Some(session_id) = self.state.read().await.opencode_session_id.clone() {
+            let base_url = normalize_base_url(&self.remote_config.url);
+            let _ = self.opencode_init_session(&base_url, &session_id).await;
         }
         // Mirror the same UI sync path the SSE handler uses so the selector
         // updates immediately instead of waiting for the next prompt round-trip.
@@ -4563,7 +4937,7 @@ impl RemoteAgentManager {
         // `/opencode/v2-models` route for a future V2-aware model-card UI.
         let mut req = self
             .http_client
-            .get(format!("{base_url}/provider"))
+            .get(self.with_request_context(&format!("{base_url}/provider")))
             .timeout(Duration::from_secs(10));
         if let Some(ref h) = auth_header {
             req = req.header(AUTHORIZATION, h.as_str());
@@ -4667,42 +5041,28 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             if is_first {
                 self.emit_model_info().await;
             }
-            // D1 fix — narrow V1 fallback for overrides only.
-            //
-            // The V2 `Prompt` schema is `{ text, files?, agents?, references? }`
-            // and the V2 server strips per-prompt `model` / `agent` / `skills`
-            // fields. The V2 server's declared switch endpoints
-            // (`/api/session/:id/switch-agent`, `/api/session/:id/switch-model`)
-            // have no HTTP handler implementation in `handlers/v2/session.ts`
-            // and the V2 service-layer methods are placeholders that only
-            // publish events, so they cannot apply a per-prompt override
-            // before the next prompt. Therefore:
-            //
-            //   - Standard prompt (no override, no slash command): use the
-            //     modern V2 prompt path. This is the default.
-            //   - Prompt with a session-level model or agent override
-            //     (`state.desired_model` / `state.desired_agent`, set via
-            //     `set_model()` / `set_mode()`): fall back to V1, which is
-            //     the only path that currently honors per-prompt model/agent
-            //     fields in the request body.
-            //   - Slash command (`content` starts with `/`): fall back to V1
-            //     because the V1 dispatcher expands the command and may
-            //     produce per-command overrides; V2 has no equivalent
-            //     expansion.
-            //   - Skills-only injection is NOT a reason to fall back to V1.
-            //     When the V2 path is taken with skills requested, a warning
-            //     is logged so the absence of skill injection is visible in
-            //     traces (the UI-visible state must not imply the skill was
-            //     applied when the server will strip it).
-            let (model_override, agent_override, is_slash_command) = {
-                let state = self.state.read().await;
-                (
-                    state.desired_model.is_some(),
-                    state.desired_agent.is_some(),
-                    data.content.starts_with('/'),
-                )
-            };
-            if model_override || agent_override || is_slash_command {
+            // Dispatch policy (C03 + M17 slash + skills):
+            //   - Known slash commands → `POST /session/{id}/command` (server expansion)
+            //   - Skills, model/agent overrides, unknown slash → V1 `prompt_async`
+            //   - Plain text after session init → V2 `prompt` (model/agent seeded via init)
+            let is_slash_command = data.content.starts_with('/');
+            let needs_v1 = !data.inject_skills.is_empty() || is_slash_command;
+
+            if is_slash_command {
+                if let Some((name, args)) = opencode_commands::parse_invocation(&data.content) {
+                    let cmds = self.ensure_opencode_commands().await;
+                    if cmds.iter().any(|c| c.name == name) {
+                        let cmd_line = if args.is_empty() {
+                            format!("/{name}")
+                        } else {
+                            format!("/{name} {args}")
+                        };
+                        return self.opencode_send_command(&cmd_line).await;
+                    }
+                }
+            }
+
+            if needs_v1 || is_slash_command {
                 self.opencode_send(
                     &data.content,
                     data.opencode_message_id.as_deref(),
@@ -4710,15 +5070,7 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
                 )
                 .await
             } else {
-                if !data.inject_skills.is_empty() {
-                    warn!(
-                        conversation_id = %self.runtime.conversation_id(),
-                        "OpenCode V2 prompt path does not support per-prompt skill injection; \
-                         the V2 server strips prompt.skills. Requested skills will not be applied \
-                         for this turn. Route skills through the V1 path or session-level \
-                         configuration if injection is required."
-                    );
-                }
+                self.ensure_opencode_session().await?;
                 self.opencode_send_v2(&data.content).await
             }
         } else if is_first {

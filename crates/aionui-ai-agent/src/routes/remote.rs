@@ -50,6 +50,20 @@ pub fn remote_agent_routes(state: RemoteAgentRouterState) -> Router {
             "/api/conversations/{id}/backfill-remote-history",
             post(backfill_remote_history),
         )
+        .route("/api/remote-agents/{id}/providers", get(fetch_provider_catalog))
+        .route("/api/remote-agents/{id}/providers/{providerId}/auth", post(set_provider_auth))
+        .route(
+            "/api/remote-agents/{id}/providers/{providerId}/auth",
+            axum::routing::delete(delete_provider_auth),
+        )
+        .route(
+            "/api/remote-agents/{id}/providers/{providerId}/oauth/start",
+            post(start_provider_oauth),
+        )
+        .route(
+            "/api/remote-agents/{id}/providers/{providerId}/oauth/complete",
+            post(complete_provider_oauth),
+        )
         .with_state(state)
 }
 
@@ -250,6 +264,71 @@ async fn backfill_remote_history(
     }
 
     mark_loaded_and_respond(&state, &conversation_id, &mut extra, inserted).await
+}
+
+#[derive(serde::Deserialize)]
+struct ProviderAuthRequest {
+    api_key: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ProviderOAuthCompleteRequest {
+    code: String,
+}
+
+async fn fetch_provider_catalog(
+    State(state): State<RemoteAgentRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.fetch_provider_catalog(&id).await?)))
+}
+
+async fn set_provider_auth(
+    State(state): State<RemoteAgentRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path((id, provider_id)): Path<(String, String)>,
+    body: Result<Json<ProviderAuthRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    state
+        .service
+        .set_provider_credentials(&id, &provider_id, &req.api_key)
+        .await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+async fn delete_provider_auth(
+    State(state): State<RemoteAgentRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path((id, provider_id)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state.service.delete_provider_credentials(&id, &provider_id).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+async fn start_provider_oauth(
+    State(state): State<RemoteAgentRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path((id, provider_id)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state.service.start_provider_oauth(&id, &provider_id).await?,
+    )))
+}
+
+async fn complete_provider_oauth(
+    State(state): State<RemoteAgentRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path((id, provider_id)): Path<(String, String)>,
+    body: Result<Json<ProviderOAuthCompleteRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    state
+        .service
+        .complete_provider_oauth(&id, &provider_id, &req.code)
+        .await?;
+    Ok(Json(ApiResponse::success()))
 }
 
 /// Flip `extra.history_loaded` to true, persist, broadcast a
