@@ -51,6 +51,7 @@ pub fn remote_agent_routes(state: RemoteAgentRouterState) -> Router {
             post(backfill_remote_history),
         )
         .route("/api/remote-agents/{id}/providers", get(fetch_provider_catalog))
+        .route("/api/remote-agents/{id}/providers/auth", get(fetch_provider_auth_methods))
         .route("/api/remote-agents/{id}/providers/{providerId}/auth", post(set_provider_auth))
         .route(
             "/api/remote-agents/{id}/providers/{providerId}/auth",
@@ -268,12 +269,33 @@ async fn backfill_remote_history(
 
 #[derive(serde::Deserialize)]
 struct ProviderAuthRequest {
-    api_key: String,
+    #[serde(default)]
+    api_key: Option<String>,
+    /// Full OpenCode `Auth` union body (`api` | `oauth` | `wellknown`, §8).
+    #[serde(default)]
+    auth: Option<serde_json::Value>,
+    /// WellKnown shorthand fields.
+    #[serde(default)]
+    wellknown_key: Option<String>,
+    #[serde(default)]
+    wellknown_token: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ProviderOAuthStartRequest {
+    /// Index into `GET /provider/auth` methods array (Context7 SDK).
+    #[serde(default)]
+    method: Option<u32>,
+    #[serde(default)]
+    inputs: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(serde::Deserialize)]
 struct ProviderOAuthCompleteRequest {
-    code: String,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    method: Option<u32>,
 }
 
 async fn fetch_provider_catalog(
@@ -284,6 +306,14 @@ async fn fetch_provider_catalog(
     Ok(Json(ApiResponse::ok(state.service.fetch_provider_catalog(&id).await?)))
 }
 
+async fn fetch_provider_auth_methods(
+    State(state): State<RemoteAgentRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.fetch_provider_auth_methods(&id).await?)))
+}
+
 async fn set_provider_auth(
     State(state): State<RemoteAgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
@@ -291,10 +321,26 @@ async fn set_provider_auth(
     body: Result<Json<ProviderAuthRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state
-        .service
-        .set_provider_credentials(&id, &provider_id, &req.api_key)
-        .await?;
+    if let Some(auth) = req.auth {
+        state
+            .service
+            .set_provider_auth_payload(&id, &provider_id, auth)
+            .await?;
+    } else if let (Some(key), Some(token)) = (req.wellknown_key, req.wellknown_token) {
+        state
+            .service
+            .set_provider_wellknown(&id, &provider_id, &key, &token)
+            .await?;
+    } else if let Some(api_key) = req.api_key.filter(|k| !k.trim().is_empty()) {
+        state
+            .service
+            .set_provider_credentials(&id, &provider_id, &api_key)
+            .await?;
+    } else {
+        return Err(AppError::BadRequest(
+            "Provide api_key, wellknown_key+wellknown_token, or auth payload".into(),
+        ));
+    }
     Ok(Json(ApiResponse::success()))
 }
 
@@ -311,9 +357,14 @@ async fn start_provider_oauth(
     State(state): State<RemoteAgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Path((id, provider_id)): Path<(String, String)>,
+    body: Result<Json<ProviderOAuthStartRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
     Ok(Json(ApiResponse::ok(
-        state.service.start_provider_oauth(&id, &provider_id).await?,
+        state
+            .service
+            .start_provider_oauth(&id, &provider_id, req.method.unwrap_or(0), req.inputs)
+            .await?,
     )))
 }
 
@@ -326,7 +377,7 @@ async fn complete_provider_oauth(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     state
         .service
-        .complete_provider_oauth(&id, &provider_id, &req.code)
+        .complete_provider_oauth(&id, &provider_id, req.method.unwrap_or(0), req.code.as_deref())
         .await?;
     Ok(Json(ApiResponse::success()))
 }

@@ -482,13 +482,19 @@ impl RemoteAgentService {
         .await
     }
 
-    /// M12: list OpenCode providers with auth state for the settings UI.
+    /// M12: list OpenCode providers with auth state for the settings UI (`GET /provider`, §9).
     pub async fn fetch_provider_catalog(&self, remote_agent_id: &str) -> Result<serde_json::Value, AppError> {
         let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
         crate::manager::remote::opencode_provider_auth::list_providers(&client, &cfg).await
     }
 
-    /// M12: set provider API credentials on the remote OpenCode server.
+    /// M12: auth methods per provider (`GET /provider/auth`, §8).
+    pub async fn fetch_provider_auth_methods(&self, remote_agent_id: &str) -> Result<serde_json::Value, AppError> {
+        let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
+        crate::manager::remote::opencode_provider_auth::list_provider_auth_methods(&client, &cfg).await
+    }
+
+    /// M12: set provider API credentials (`PUT /auth/{id}` with `ApiAuth`, §8).
     pub async fn set_provider_credentials(
         &self,
         remote_agent_id: &str,
@@ -497,6 +503,30 @@ impl RemoteAgentService {
     ) -> Result<(), AppError> {
         let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
         crate::manager::remote::opencode_provider_auth::set_api_key(&client, &cfg, provider_id, api_key).await
+    }
+
+    /// M12: set arbitrary provider auth payload (`PUT /auth/{id}`, §8 `Auth` union).
+    pub async fn set_provider_auth_payload(
+        &self,
+        remote_agent_id: &str,
+        provider_id: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), AppError> {
+        let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
+        crate::manager::remote::opencode_provider_auth::set_provider_auth(&client, &cfg, provider_id, payload).await
+    }
+
+    /// M12: set WellKnown credentials (`PUT /auth/{id}` with `WellKnownAuth`, §8).
+    pub async fn set_provider_wellknown(
+        &self,
+        remote_agent_id: &str,
+        provider_id: &str,
+        key: &str,
+        token: &str,
+    ) -> Result<(), AppError> {
+        let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
+        crate::manager::remote::opencode_provider_auth::set_wellknown_auth(&client, &cfg, provider_id, key, token)
+            .await
     }
 
     /// M12: clear provider credentials on the remote OpenCode server.
@@ -509,25 +539,42 @@ impl RemoteAgentService {
         crate::manager::remote::opencode_provider_auth::delete_provider_auth(&client, &cfg, provider_id).await
     }
 
-    /// M12: start provider OAuth — returns authorize URL payload from server.
+    /// M12: start provider OAuth — returns `ProviderAuthAuthorization` (§8).
     pub async fn start_provider_oauth(
         &self,
         remote_agent_id: &str,
         provider_id: &str,
+        method_index: u32,
+        inputs: Option<std::collections::HashMap<String, String>>,
     ) -> Result<serde_json::Value, AppError> {
         let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
-        crate::manager::remote::opencode_provider_auth::start_provider_oauth(&client, &cfg, provider_id).await
+        crate::manager::remote::opencode_provider_auth::start_provider_oauth(
+            &client,
+            &cfg,
+            provider_id,
+            method_index,
+            inputs.as_ref(),
+        )
+        .await
     }
 
-    /// M12: complete provider OAuth with authorization code.
+    /// M12: complete provider OAuth (`POST .../oauth/callback`, §8).
     pub async fn complete_provider_oauth(
         &self,
         remote_agent_id: &str,
         provider_id: &str,
-        code: &str,
+        method_index: u32,
+        code: Option<&str>,
     ) -> Result<(), AppError> {
         let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
-        crate::manager::remote::opencode_provider_auth::complete_provider_oauth(&client, &cfg, provider_id, code).await
+        crate::manager::remote::opencode_provider_auth::complete_provider_oauth(
+            &client,
+            &cfg,
+            provider_id,
+            method_index,
+            code,
+        )
+        .await
     }
 
     // ── Private helpers ──────────────────────────────────────────
