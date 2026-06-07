@@ -284,19 +284,23 @@ pub fn build_file_state(services: &AppServices) -> FileRouterState {
     let watch_service = Arc::new(FileWatchService::new(broadcaster).expect("file watch service initialization"));
     let snapshot_service = Arc::new(SnapshotService::new());
 
-    let tool_repo = Arc::new(aionui_db::SqliteOpencodeToolSnapshotRepository::new(services.database.pool().clone()));
-    aionui_ai_agent::manager::remote::local_fs_mcp::snapshot_deps::set(
-        aionui_ai_agent::manager::remote::local_fs_mcp::snapshot_deps::SnapshotDeps {
-            snapshot_service: snapshot_service.clone(),
-            tool_snapshot_repo: tool_repo.clone(),
-        }
-    );
-    aionui_conversation::snapshot_deps::set(
-        aionui_conversation::snapshot_deps::SnapshotDeps {
+    // Per-tool-call auto-commit ledger is opt-in; desktop GitService owns SCM UI.
+    let tool_snapshot_disabled = std::env::var_os("AIONUI_DISABLE_TOOL_SNAPSHOT")
+        .is_some_and(|v| v == "1" || v == "true" || v == "TRUE");
+    if !tool_snapshot_disabled {
+        let tool_repo =
+            Arc::new(aionui_db::SqliteOpencodeToolSnapshotRepository::new(services.database.pool().clone()));
+        aionui_ai_agent::manager::remote::local_fs_mcp::snapshot_deps::set(
+            aionui_ai_agent::manager::remote::local_fs_mcp::snapshot_deps::SnapshotDeps {
+                snapshot_service: snapshot_service.clone(),
+                tool_snapshot_repo: tool_repo.clone(),
+            },
+        );
+        aionui_conversation::snapshot_deps::set(aionui_conversation::snapshot_deps::SnapshotDeps {
             snapshot_service: snapshot_service.clone(),
             tool_snapshot_repo: tool_repo,
-        }
-    );
+        });
+    }
 
     FileRouterState {
         file_service,

@@ -3404,14 +3404,24 @@ impl RemoteAgentManager {
         // not-yet-wired production deploys all degrade to the pre-14.3
         // behavior (mutating tools still work, no snapshot is committed,
         // no ledger row is written).
-        let snapshot_hook = crate::manager::remote::local_fs_mcp::snapshot_deps_get().map(|deps| {
-            SnapshotHook::new(
-                deps.snapshot_service,
-                deps.tool_snapshot_repo,
-                conversation_id.clone(),
-                PathBuf::from(&workspace),
-            )
-        });
+        //
+        // Desktop-owned Git (VS Code SCM style) is the sole diff surface;
+        // set `AIONUI_DISABLE_TOOL_SNAPSHOT=1` to disable auto-commits on
+        // the user's real repo (no per-tool-call ledger commits).
+        let snapshot_hook = if std::env::var_os("AIONUI_DISABLE_TOOL_SNAPSHOT")
+            .is_some_and(|v| v == "1" || v == "true" || v == "TRUE")
+        {
+            None
+        } else {
+            crate::manager::remote::local_fs_mcp::snapshot_deps_get().map(|deps| {
+                SnapshotHook::new(
+                    deps.snapshot_service,
+                    deps.tool_snapshot_repo,
+                    conversation_id.clone(),
+                    PathBuf::from(&workspace),
+                )
+            })
+        };
 
         match opencode_mcp::start_and_register(
             &self.http_client,
