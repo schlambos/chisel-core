@@ -5,7 +5,22 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: &str = "2024-11-05";
+pub const PROTOCOL_VERSION_LATEST: &str = "2025-03-26";
+pub const PROTOCOL_VERSION_MIN: &str = "2024-11-05";
+/// Alias kept for callers that still import the pre-negotiation name.
+pub const PROTOCOL_VERSION: &str = PROTOCOL_VERSION_LATEST;
+
+/// Pick the highest mutually supported MCP protocol version for `initialize`.
+pub fn negotiate_protocol_version(client_version: Option<&str>) -> &'static str {
+    match client_version {
+        None => PROTOCOL_VERSION_LATEST,
+        Some("2025-03-26") => PROTOCOL_VERSION_LATEST,
+        Some("2024-11-05") => PROTOCOL_VERSION_MIN,
+        Some(v) if v >= PROTOCOL_VERSION_LATEST => PROTOCOL_VERSION_LATEST,
+        Some(v) if v >= PROTOCOL_VERSION_MIN => PROTOCOL_VERSION_MIN,
+        Some(_) => PROTOCOL_VERSION_MIN,
+    }
+}
 pub const SERVER_NAME: &str = "aionui-local-fs";
 pub const SERVER_VERSION: &str = "0.1.0";
 

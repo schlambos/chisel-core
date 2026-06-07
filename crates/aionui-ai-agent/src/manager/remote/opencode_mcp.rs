@@ -56,6 +56,11 @@ use super::reachability::{Plan, current_route_ip, plan};
 /// One slot per OpenCode instance — see module docs for the why.
 pub const MCP_NAME: &str = "aionui-local-fs";
 
+/// OpenCode MCP tool-call timeout registered in [`register_mcp`].
+pub const MCP_TOOL_TIMEOUT_MS: u64 = 300_000;
+/// Shell approver must resolve before OpenCode's MCP client gives up.
+pub const SHELL_APPROVAL_WAIT_MS: u64 = MCP_TOOL_TIMEOUT_MS - 60_000;
+
 /// Env var the user can set to override the auto-resolved LAN URL —
 /// useful for containerized setups, multi-homed hosts, or when the user
 /// has a pre-existing tunnel they prefer to use.
@@ -762,9 +767,10 @@ async fn register_mcp(
             },
             // Generous so a `run_shell` call isn't abandoned while it waits
             // for the user to approve the command (the approval blocks the
-            // MCP request). The fast filesystem tools return well within this
-            // either way, so the larger ceiling costs them nothing.
-            "timeout": 300000,
+            // MCP request). Chisl's approver resolves before this ceiling
+            // via [`SHELL_APPROVAL_WAIT_MS`]; filesystem tools return well
+            // within either bound.
+            "timeout": MCP_TOOL_TIMEOUT_MS,
         },
     });
 
@@ -871,6 +877,12 @@ async fn force_disconnect_unlocked(http_client: &reqwest::Client, base_url: &str
             );
         }
     }
+}
+
+/// Test-only visibility into slot ownership (integration tests are separate binaries).
+#[doc(hidden)]
+pub fn owns_slot_for_test(base_url: &str, conversation_id: &str, port: u16) -> bool {
+    owns_slot(base_url, conversation_id, port)
 }
 
 #[cfg(test)]

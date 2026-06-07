@@ -21,6 +21,17 @@ use async_trait::async_trait;
 /// test run, short enough that a hung command doesn't wedge the session.
 const SHELL_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Env var to override the shell execution timeout in seconds (tests only).
+const SHELL_TIMEOUT_ENV: &str = "AIONUI_LOCAL_SHELL_TIMEOUT_SECS";
+
+fn shell_timeout() -> Duration {
+    std::env::var(SHELL_TIMEOUT_ENV)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(SHELL_TIMEOUT)
+}
+
 /// Cap on the combined stdout+stderr returned to the model, so a chatty
 /// command can't blow up the context window or the MCP response.
 const MAX_SHELL_OUTPUT: usize = 1024 * 1024; // 1 MiB
@@ -34,20 +45,17 @@ pub const SHELL_OVERRIDE_ENV: &str = "AIONUI_LOCAL_SHELL";
 pub enum ShellApproval {
     Allow,
     Reject,
+    /// User did not respond before the approver wait deadline.
+    TimedOut,
 }
 
 /// Per-request session context captured from incoming MCP headers.
 ///
-/// OpenCode injects `X-OpenCode-Session-Id` (and, for sub-agent invocations,
-/// `X-OpenCode-Parent-Session-Id`) on every tool-call request it forwards to a
-/// client-advertised MCP server. The MCP server threads this context into the
-/// approver / elicitation handler so the resulting UI prompt can be routed to
-/// the right nested sub-agent transcript rather than surfacing at the parent
-/// level.
-///
-/// Both fields are `None` when OpenCode is older than the header extension or
-/// when the call did not carry session attribution; in that case the host
-/// surfaces the prompt at conversation level with a "Sub-agent unknown" label.
+/// OpenCode 1.15.x does **not** forward per-call session headers to remote MCP
+/// servers today — only static `headers` from connect-time config are sent
+/// (`packages/opencode/src/mcp/index.ts`). Chisl therefore falls back to
+/// conversation-level session attribution in [`super::agent::RemoteShellApprover`]
+/// when these fields are `None`.
 #[derive(Debug, Clone, Default)]
 pub struct McpRequestContext {
     pub session_id: Option<String>,
@@ -199,26 +207,55 @@ pub fn shell_hint() -> String {
 pub async fn run_shell(root: &Path, command: &str) -> (String, bool) {
     let spec = resolve_shell();
 
+    let timeout = shell_timeout();
     let mut cmd = tokio::process::Command::new(&spec.program);
     cmd.arg(spec.arg)
         .arg(command)
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
-    let output = match tokio::time::timeout(SHELL_TIMEOUT, cmd.output()).await {
-        Err(_) => {
-            return (format!("command timed out after {}s", SHELL_TIMEOUT.as_secs()), true);
-        }
-        Ok(Err(e)) => return (format!("failed to launch shell ({}): {e}", spec.program), true),
-        Ok(Ok(output)) => output,
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return (format!("failed to launch shell ({}): {e}", spec.program), true),
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let exit = output
-        .status
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stdout_pipe {
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut pipe, &mut buf).await;
+        }
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stderr_pipe {
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut pipe, &mut buf).await;
+        }
+        buf
+    });
+
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return (format!("command timed out after {}s", timeout.as_secs()), true);
+        }
+        Ok(Err(e)) => return (format!("failed to wait on shell: {e}"), true),
+        Ok(Ok(status)) => status,
+    };
+
+    let stdout_bytes = stdout_task.await.unwrap_or_default();
+    let stderr_bytes = stderr_task.await.unwrap_or_default();
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    let exit = status
         .code()
         .map(|c| c.to_string())
         .unwrap_or_else(|| "terminated by signal".to_string());
@@ -248,7 +285,7 @@ pub async fn run_shell(root: &Path, command: &str) -> (String, bool) {
         report.push_str("\n…[output truncated]");
     }
 
-    (report, !output.status.success())
+    (report, !status.success())
 }
 
 #[cfg(test)]
@@ -299,5 +336,20 @@ mod tests {
         assert_eq!(basename("/bin/zsh"), "zsh");
         assert_eq!(basename(r"C:\Windows\System32\cmd.exe"), "cmd.exe");
         assert_eq!(basename("bash"), "bash");
+    }
+
+    #[tokio::test]
+    async fn run_shell_kills_hung_command_on_timeout() {
+        // Override to 1s so the test stays fast (see SHELL_TIMEOUT_ENV).
+        unsafe { std::env::set_var(SHELL_TIMEOUT_ENV, "1") };
+        let dir = TempDir::new().unwrap();
+        #[cfg(not(windows))]
+        let hang_cmd = "sleep 30";
+        #[cfg(windows)]
+        let hang_cmd = "timeout /t 30 /nobreak";
+        let (out, err) = run_shell(dir.path(), hang_cmd).await;
+        assert!(err, "hung command must time out: {out}");
+        assert!(out.contains("timed out"), "expected timeout message: {out}");
+        unsafe { std::env::remove_var(SHELL_TIMEOUT_ENV) };
     }
 }

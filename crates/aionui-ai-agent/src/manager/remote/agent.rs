@@ -551,6 +551,11 @@ const QUESTION_DEDUP_CAP: usize = 1024;
 /// next state-touch synthesizes a `denied_timeout` reject so a parked tool
 /// call fails closed. Configurable later by the P1.2b rule engine.
 const DEFAULT_PROMPT_TIMEOUT_MS: TimestampMs = 60_000;
+/// Must finish before OpenCode's MCP tool timeout (see `opencode_mcp::MCP_TOOL_TIMEOUT_MS`).
+#[cfg(test)]
+const SHELL_APPROVAL_WAIT_MS: TimestampMs = 100;
+#[cfg(not(test))]
+const SHELL_APPROVAL_WAIT_MS: TimestampMs = super::opencode_mcp::SHELL_APPROVAL_WAIT_MS as TimestampMs;
 /// 80% of the timeout — the SSE reader emits a `permission_warning` log line
 /// at this threshold so production traces show the warning even if no UI is
 /// attached. Mirrors OpenCode's own 80%/100% warning shape.
@@ -777,6 +782,9 @@ async fn run_event_reader(
                     if let Ok(parsed) = serde_json::from_str::<Value>(data) {
                         let inner = unwrap_event(parsed);
                         match inner.get("type").and_then(|v| v.as_str()) {
+                            Some("server.connected") if saw_connected => {
+                                this.replay_pending_confirmations("sse_reconnect").await;
+                            }
                             Some("server.connected") if !saw_connected => {
                                 saw_connected = true;
                                 let mut state = this.state.write().await;
@@ -1070,6 +1078,23 @@ struct RemoteShellApprover {
     state: Arc<RwLock<RemoteState>>,
 }
 
+/// When OpenCode does not forward session headers, infer sub-agent routing
+/// from the child-session registry: exactly one in-progress child → route
+/// the prompt into that nested transcript.
+fn infer_parent_for_active_subagent(state: &RemoteState) -> Option<String> {
+    let mut in_progress = Vec::new();
+    for child in state.child_sessions.iter() {
+        if child.status.is_none() {
+            in_progress.push(child.child_session_id.clone());
+        }
+    }
+    if in_progress.len() == 1 {
+        Some(in_progress[0].clone())
+    } else {
+        None
+    }
+}
+
 #[async_trait::async_trait]
 impl ShellApprover for RemoteShellApprover {
     async fn approve_shell(&self, command: &str, cwd: &str) -> ShellApproval {
@@ -1096,6 +1121,26 @@ impl ShellApprover for RemoteShellApprover {
         // approvals apart from OpenCode's `per_…` permission ids.
         let call_id = format!("shell-{}", Uuid::new_v4());
         let (tx, rx) = oneshot::channel();
+
+        let (session_id, parent_session_id, attribution_fallback) = {
+            let state = self.state.read().await;
+            let mut session_id = context
+                .session_id
+                .clone()
+                .or_else(|| state.opencode_session_id.clone());
+            let mut parent_session_id = context.parent_session_id.clone();
+            let mut attribution_fallback = false;
+            if context.session_id.is_none() {
+                attribution_fallback = true;
+                if parent_session_id.is_none()
+                    && let Some(child_id) = infer_parent_for_active_subagent(&state)
+                {
+                    parent_session_id = Some(child_id.clone());
+                    session_id = Some(child_id);
+                }
+            }
+            (session_id, parent_session_id, attribution_fallback)
+        };
 
         let confirmation = Confirmation {
             id: call_id.clone(),
@@ -1128,14 +1173,8 @@ impl ShellApprover for RemoteShellApprover {
                     params: None,
                 },
             ],
-            // Stamp the originating OpenCode session id (and its parent, for
-            // sub-agent calls) so the renderer attaches the prompt to the
-            // right nested transcript instead of bubbling it up at the
-            // conversation level. Both `None` for older OpenCode without the
-            // header extension — the prompt then surfaces at conversation
-            // level as before.
-            session_id: context.session_id.clone(),
-            parent_session_id: context.parent_session_id.clone(),
+            session_id,
+            parent_session_id,
         };
 
         {
@@ -1148,8 +1187,9 @@ impl ShellApprover for RemoteShellApprover {
         info!(
             conversation_id = %self.runtime.conversation_id(),
             %call_id,
-            session_id = ?context.session_id,
-            parent_session_id = ?context.parent_session_id,
+            session_id = ?confirmation.session_id,
+            parent_session_id = ?confirmation.parent_session_id,
+            attribution_fallback,
             "awaiting user approval for a local shell command"
         );
         self.runtime
@@ -1159,13 +1199,26 @@ impl ShellApprover for RemoteShellApprover {
 
         // Park until the UI replies via `confirm()`. A dropped sender
         // (cancel/kill clears the map) closes the channel → fail closed.
-        match rx.await {
-            Ok(decision) => decision,
-            Err(_) => {
+        // Bounded so OpenCode's MCP client timeout (300s) is never hit first.
+        match tokio::time::timeout(Duration::from_millis(SHELL_APPROVAL_WAIT_MS as u64), rx).await {
+            Ok(Ok(decision)) => decision,
+            Ok(Err(_)) => {
                 let mut state = self.state.write().await;
                 state.pending_shell_approvals.remove(&call_id);
                 state.confirmations.retain(|c| c.call_id != call_id);
                 ShellApproval::Reject
+            }
+            Err(_) => {
+                let mut state = self.state.write().await;
+                state.pending_shell_approvals.remove(&call_id);
+                state.confirmations.retain(|c| c.call_id != call_id);
+                warn!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    %call_id,
+                    wait_ms = SHELL_APPROVAL_WAIT_MS,
+                    "shell approval timed out waiting for user"
+                );
+                ShellApproval::TimedOut
             }
         }
     }
@@ -5825,6 +5878,30 @@ impl RemoteAgentManager {
     ///
     /// `reason` is logged to make it obvious in production traces why a wave
     /// of rejects fired (`"cancel"` vs `"new_prompt"`).
+    /// Re-emit unanswered confirmations after an SSE reconnect so UI cards
+    /// reappear for parked shell approvers / elicitations.
+    async fn replay_pending_confirmations(&self, reason: &'static str) {
+        let confirmations: Vec<Confirmation> = {
+            let state = self.state.read().await;
+            state.confirmations.clone()
+        };
+        if confirmations.is_empty() {
+            return;
+        }
+        info!(
+            conversation_id = %self.runtime.conversation_id(),
+            count = confirmations.len(),
+            reason,
+            "re-emitting pending confirmations after SSE reconnect"
+        );
+        for conf in confirmations {
+            self.runtime
+                .emit(AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(
+                    conf,
+                )));
+        }
+    }
+
     pub async fn reject_pending_confirmations(&self, reason: &'static str) {
         // Snapshot the work we need to do, then drop the write guard so the
         // OpenCode-permission HTTP replies below don't run while holding it.
@@ -6708,6 +6785,78 @@ mod tests {
             session_id: None,
             parent_session_id: None,
         }
+    }
+
+    #[cfg(test)]
+    impl RemoteAgentManager {
+        pub async fn test_replay_pending_confirmations(&self, reason: &'static str) {
+            self.replay_pending_confirmations(reason).await;
+        }
+
+        pub fn test_shell_approver(&self) -> Arc<dyn ShellApprover> {
+            Arc::new(RemoteShellApprover {
+                runtime: self.runtime.clone(),
+                state: self.state.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_pending_confirmations_re_emits_acp_events() {
+        let agent = opencode_test_agent().await;
+        let mut rx = agent.runtime.subscribe();
+        {
+            let mut state = agent.state.write().await;
+            state.confirmations.push(fake_confirmation("shell-replay"));
+        }
+        agent.test_replay_pending_confirmations("test").await;
+        assert!(
+            drain_events(&mut rx)
+                .iter()
+                .any(|e| matches!(e, AgentStreamEvent::AcpPermission(_))),
+            "replay must re-emit AcpPermission events"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_approval_fallback_stamps_root_session_id() {
+        let agent = opencode_test_agent().await;
+        {
+            let mut state = agent.state.write().await;
+            state.opencode_session_id = Some("root-sess".to_string());
+        }
+        let approver = agent.test_shell_approver();
+        let decision = tokio::spawn(async move {
+            approver
+                .approve_shell_with_context("echo hi", "/tmp", &McpRequestContext::default())
+                .await
+        });
+        // Let the confirmation land, then reject to unblock the waiter.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        {
+            let state = agent.state.read().await;
+            let conf = state.confirmations.iter().find(|c| c.action.as_deref() == Some("run_shell"));
+            assert!(conf.is_some(), "confirmation must be queued");
+            assert_eq!(conf.unwrap().session_id.as_deref(), Some("root-sess"));
+        }
+        agent.reject_pending_confirmations("test_cleanup").await;
+        assert_eq!(decision.await.unwrap(), ShellApproval::Reject);
+    }
+
+    #[tokio::test]
+    async fn shell_approval_wait_times_out_and_clears_pending() {
+        let agent = opencode_test_agent().await;
+        let approver = agent.test_shell_approver();
+        let wait = tokio::spawn(async move {
+            approver
+                .approve_shell_with_context("echo slow", "/tmp", &McpRequestContext::default())
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let state = agent.state.read().await;
+        assert!(state.pending_shell_approvals.is_empty());
+        assert!(state.confirmations.is_empty());
+        assert_eq!(wait.await.unwrap(), ShellApproval::TimedOut);
     }
 
     #[tokio::test]

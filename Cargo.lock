@@ -357,6 +357,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "which",
+ "wiremock",
 ]
 
 [[package]]

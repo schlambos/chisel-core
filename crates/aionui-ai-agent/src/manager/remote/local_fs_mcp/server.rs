@@ -24,16 +24,16 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use super::protocol::{
-    INTERNAL_ERROR, INVALID_PARAMS, JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PROTOCOL_VERSION, SERVER_NAME,
-    SERVER_VERSION,
+    INTERNAL_ERROR, INVALID_PARAMS, JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, SERVER_NAME, SERVER_VERSION,
+    negotiate_protocol_version,
 };
 use super::shell::{ElicitationHandler, McpRequestContext, ShellApprover};
-use super::tools::{SnapshotHook, all_tool_descriptors, dispatch};
+use super::tools::{SnapshotHook, ToolAnnotations, dispatch, tool_descriptors_for_state};
 
-/// Header names OpenCode injects on tool-call forwarding so the MCP server can
-/// attribute the call back to the originating session. Names match the
-/// canonical case the OpenCode runtime uses; HTTP header lookup is
-/// case-insensitive so both flavours work.
+/// Header names Chisl expects on per-call MCP tool forwarding for session
+/// attribution. OpenCode 1.15.x does not send these on remote MCP HTTP
+/// requests today (static connect-time headers only); [`super::agent`]
+/// falls back to conversation-level session ids when they are absent.
 const HEADER_SESSION_ID: &str = "x-opencode-session-id";
 const HEADER_PARENT_SESSION_ID: &str = "x-opencode-parent-session-id";
 
@@ -307,14 +307,22 @@ async fn handle_rpc(
     }
 
     let response = match method {
-        "initialize" => JsonRpcResponse::success(
-            id,
-            json!({
-                "capabilities": { "tools": {} },
-                "protocolVersion": PROTOCOL_VERSION,
-                "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION }
-            }),
-        ),
+        "initialize" => {
+            let client_version = req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("protocolVersion"))
+                .and_then(Value::as_str);
+            let negotiated = negotiate_protocol_version(client_version);
+            JsonRpcResponse::success(
+                id,
+                json!({
+                    "capabilities": { "tools": {} },
+                    "protocolVersion": negotiated,
+                    "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION }
+                }),
+            )
+        }
         "notifications/initialized" | "notifications/cancelled" => {
             return (
                 StatusCode::NO_CONTENT,
@@ -322,15 +330,9 @@ async fn handle_rpc(
             );
         }
         "tools/list" => {
-            let tools: Vec<Value> = all_tool_descriptors()
+            let tools: Vec<Value> = tool_descriptors_for_state(state.approver.is_some())
                 .iter()
-                .map(|d| {
-                    json!({
-                        "name": d.name,
-                        "description": d.description,
-                        "inputSchema": d.input_schema,
-                    })
-                })
+                .map(tool_descriptor_to_json)
                 .collect();
             JsonRpcResponse::success(id, json!({ "tools": tools }))
         }
@@ -419,6 +421,24 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 fn json_response(resp: JsonRpcResponse) -> Json<Value> {
     Json(serde_json::to_value(resp).unwrap_or(Value::Null))
+}
+
+fn tool_descriptor_to_json(d: &super::tools::ToolDescriptor) -> Value {
+    json!({
+        "name": d.name,
+        "description": d.description,
+        "inputSchema": d.input_schema,
+        "annotations": annotations_to_json(&d.annotations),
+    })
+}
+
+fn annotations_to_json(a: &ToolAnnotations) -> Value {
+    json!({
+        "readOnlyHint": a.read_only_hint,
+        "destructiveHint": a.destructive_hint,
+        "idempotentHint": a.idempotent_hint,
+        "openWorldHint": a.open_world_hint,
+    })
 }
 
 /// Stringify a JSON-RPC `id` for use as a stable per-call identifier (the
@@ -554,5 +574,106 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 401);
+    }
+
+    async fn boot_with_approver(approver: Option<std::sync::Arc<dyn ShellApprover>>) -> (TempDir, LocalFsMcpServer, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let token = "test-token-xyz".to_string();
+        let server = LocalFsMcpServer::start(
+            dir.path().to_path_buf(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            token.clone(),
+            approver,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let url = server.local_url();
+        (dir, server, url)
+    }
+
+    async fn tools_list_names(url: &str, token: &str) -> Vec<String> {
+        let client = Client::new();
+        let resp = client
+            .post(url)
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&json!({"jsonrpc": "2.0", "id": 10, "method": "tools/list"}))
+            .send()
+            .await
+            .unwrap();
+        let v: Value = resp.json().await.unwrap();
+        v["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn tools_list_omits_run_shell_without_approver() {
+        let (_dir, server, url) = boot().await;
+        let names = tools_list_names(&url, server.auth_token()).await;
+        assert!(!names.iter().any(|n| n == "run_shell"));
+        assert!(names.iter().any(|n| n == "read_file"));
+    }
+
+    #[tokio::test]
+    async fn tools_list_includes_run_shell_with_approver() {
+        use crate::manager::remote::local_fs_mcp::ShellApproval;
+        struct FixedApprover;
+        #[async_trait::async_trait]
+        impl ShellApprover for FixedApprover {
+            async fn approve_shell(&self, _command: &str, _cwd: &str) -> ShellApproval {
+                ShellApproval::Allow
+            }
+        }
+        let approver: std::sync::Arc<dyn ShellApprover> = std::sync::Arc::new(FixedApprover);
+        let (_dir, server, url) = boot_with_approver(Some(approver)).await;
+        let names = tools_list_names(&url, server.auth_token()).await;
+        assert!(names.iter().any(|n| n == "run_shell"));
+    }
+
+    #[tokio::test]
+    async fn initialize_negotiates_protocol_version() {
+        let (_dir, _server, url) = boot().await;
+        let client = Client::new();
+        for (client_ver, expected) in [
+            ("2024-11-05", "2024-11-05"),
+            ("2025-03-26", "2025-03-26"),
+        ] {
+            let resp = client
+                .post(&url)
+                .json(&json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": { "protocolVersion": client_ver }
+                }))
+                .send()
+                .await
+                .unwrap();
+            let v: Value = resp.json().await.unwrap();
+            assert_eq!(v["result"]["protocolVersion"], expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn tools_list_includes_annotations() {
+        let (_dir, server, url) = boot().await;
+        let client = Client::new();
+        let resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", server.auth_token()))
+            .json(&json!({"jsonrpc": "2.0", "id": 11, "method": "tools/list"}))
+            .send()
+            .await
+            .unwrap();
+        let v: Value = resp.json().await.unwrap();
+        let tools = v["result"]["tools"].as_array().unwrap();
+        let read_file = tools.iter().find(|t| t["name"] == "read_file").unwrap();
+        assert_eq!(read_file["annotations"]["readOnlyHint"], true);
+        assert_eq!(read_file["annotations"]["destructiveHint"], false);
+        assert_eq!(read_file["annotations"]["idempotentHint"], true);
+        assert_eq!(read_file["annotations"]["openWorldHint"], false);
     }
 }

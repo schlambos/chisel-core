@@ -58,11 +58,49 @@ const MAX_GREP_FILES: usize = 5000;
 const MAX_GREP_MATCHES: usize = 500;
 const MAX_LIST_ENTRIES: usize = 1000;
 
+/// MCP tool annotation hints (camelCase on the wire).
+#[derive(Debug, Clone, Copy)]
+pub struct ToolAnnotations {
+    pub read_only_hint: bool,
+    pub destructive_hint: bool,
+    pub idempotent_hint: bool,
+    pub open_world_hint: bool,
+}
+
+const READ_ONLY_ANNOTATIONS: ToolAnnotations = ToolAnnotations {
+    read_only_hint: true,
+    destructive_hint: false,
+    idempotent_hint: true,
+    open_world_hint: false,
+};
+const MUTATING_ANNOTATIONS: ToolAnnotations = ToolAnnotations {
+    read_only_hint: false,
+    destructive_hint: true,
+    idempotent_hint: true,
+    open_world_hint: false,
+};
+const SHELL_ANNOTATIONS: ToolAnnotations = ToolAnnotations {
+    read_only_hint: false,
+    destructive_hint: true,
+    idempotent_hint: false,
+    open_world_hint: true,
+};
+
 /// One MCP tool descriptor (advertised in `tools/list`).
 pub struct ToolDescriptor {
     pub name: &'static str,
     pub description: &'static str,
     pub input_schema: Value,
+    pub annotations: ToolAnnotations,
+}
+
+/// Tools advertised in `tools/list`, optionally omitting `run_shell` when no
+/// approver is wired (fail-closed at dispatch time either way).
+pub fn tool_descriptors_for_state(has_approver: bool) -> Vec<ToolDescriptor> {
+    all_tool_descriptors()
+        .into_iter()
+        .filter(|d| d.name != "run_shell" || has_approver)
+        .collect()
 }
 
 pub fn all_tool_descriptors() -> Vec<ToolDescriptor> {
@@ -81,6 +119,7 @@ If you're unsure whether a path exists, call list_dir first — never tell the u
                 },
                 "required": ["path"]
             }),
+            annotations: READ_ONLY_ANNOTATIONS,
         },
         ToolDescriptor {
             name: "write_file",
@@ -96,6 +135,7 @@ Use this instead of any built-in write tools — the project lives on the user's
                 },
                 "required": ["path", "content"]
             }),
+            annotations: MUTATING_ANNOTATIONS,
         },
         ToolDescriptor {
             name: "list_dir",
@@ -110,6 +150,7 @@ Re-list after any write/delete/rename if subsequent decisions depend on the new 
                     "path": { "type": "string", "default": "", "description": "\"\" or \".\" for the project root, otherwise a relative subdirectory (e.g. \"src\"). Do not prepend the workspace's absolute path." }
                 }
             }),
+            annotations: READ_ONLY_ANNOTATIONS,
         },
         ToolDescriptor {
             name: "grep_dir",
@@ -125,6 +166,7 @@ Do NOT prepend the workspace's absolute path that appears in session context.",
                 },
                 "required": ["pattern"]
             }),
+            annotations: READ_ONLY_ANNOTATIONS,
         },
         ToolDescriptor {
             name: "delete_file",
@@ -135,6 +177,7 @@ Do NOT prepend the workspace's absolute path that appears in session context.",
                 "properties": { "path": { "type": "string", "description": "Relative path inside the project root. Do not prepend the workspace's absolute path." } },
                 "required": ["path"]
             }),
+            annotations: MUTATING_ANNOTATIONS,
         },
         ToolDescriptor {
             name: "rename",
@@ -148,6 +191,7 @@ Do NOT prepend the workspace's absolute path that appears in session context.",
                 },
                 "required": ["from", "to"]
             }),
+            annotations: MUTATING_ANNOTATIONS,
         },
         ToolDescriptor {
             name: "run_shell",
@@ -163,6 +207,7 @@ IMPORTANT: every call requires the user to approve the exact command before it r
                 },
                 "required": ["command"]
             }),
+            annotations: SHELL_ANNOTATIONS,
         },
     ]
 }
@@ -578,6 +623,7 @@ async fn run_shell(
     match approver.approve_shell_with_context(command, &cwd, context).await {
         ShellApproval::Allow => shell::run_shell(root, command).await,
         ShellApproval::Reject => ("command was rejected by the user".to_string(), true),
+        ShellApproval::TimedOut => ("shell approval timed out waiting for user".to_string(), true),
     }
 }
 
