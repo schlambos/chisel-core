@@ -214,11 +214,12 @@ struct RemoteState {
     /// "Patterns: *.go, src/*" as a chip row instead of a single line in
     /// the description blob.
     prompt_patterns: HashMap<String, Vec<String>>,
-    /// C03: whether `POST /session/{id}/init` succeeded for the current
-    /// server-side session. Resumed sessions are treated as initialized.
-    session_initialized: bool,
     /// M20: last known sync sequence per aggregate id for reconnect backfill.
     last_sync_seqs: HashMap<String, u64>,
+    /// Whether V2 `POST /api/session/{id}/prompt` is known to work on this server.
+    /// Default `false` (V1 is the reliable path). Set `true` only after a
+    /// successful connect probe; cleared on 503/404/501 with fallback to V1.
+    v2_prompt_available: bool,
 }
 
 /// Configuration for connecting to a remote agent.
@@ -1377,7 +1378,6 @@ impl RemoteAgentManager {
         }
 
         let delta_batcher = DeltaBatcherHandle::new(runtime.clone());
-        let resume_initialized = resume_session_id.is_some();
 
         Ok(Self {
             runtime,
@@ -1417,8 +1417,8 @@ impl RemoteAgentManager {
                 prompt_expiries: HashMap::new(),
                 prompt_tool_call_ids: HashMap::new(),
                 prompt_patterns: HashMap::new(),
-                session_initialized: resume_initialized,
                 last_sync_seqs: HashMap::new(),
+                v2_prompt_available: false,
             })),
             ws_sink: Mutex::new(None),
             _reader_handle: Mutex::new(None),
@@ -1476,6 +1476,8 @@ impl RemoteAgentManager {
             "Connected to OpenCode server"
         );
 
+        self.probe_v2_prompt_availability(&base_url, auth_header.as_deref()).await;
+
         // Validate a resumed session id (seeded from persisted
         // `conversation.extra.sessionKey`) before reuse. OpenCode persists
         // sessions on disk, so the id usually survives our restart — but it
@@ -1499,7 +1501,6 @@ impl RemoteAgentManager {
                     session_id = %session_id,
                     "Resuming persisted OpenCode session"
                 );
-                self.state.write().await.session_initialized = true;
                 // Re-register the client-side fs MCP on resume. The previous
                 // process's `LocalFsMcpServer` is gone (its loopback/LAN port
                 // was process-scoped), but the resumed OpenCode session may
@@ -4164,78 +4165,79 @@ impl RemoteAgentManager {
         is_server_tool_host(&self.remote_config)
     }
 
-    /// C03: seed model/agent on a fresh session via `POST /session/{id}/init`.
-    /// Best-effort: 404 on older servers is ignored.
-    async fn opencode_init_session(&self, base_url: &str, session_id: &str) -> Result<(), AppError> {
-        {
-            let state = self.state.read().await;
-            if state.session_initialized {
-                return Ok(());
-            }
+    /// Probe whether the V2 session API is reachable. The result is logged for
+    /// diagnostics; V1 remains the default send path because `GET /api/model`
+    /// succeeding does not imply `POST /api/session/{id}/prompt` is enabled.
+    /// Set `AIONUI_OPENCODE_V2_PROMPT=1` to opt into V2 after a successful probe.
+    async fn probe_v2_prompt_availability(&self, base_url: &str, auth_header: Option<&str>) {
+        let models_ok = super::opencode_v2::fetch_v2_models(
+            &self.http_client,
+            base_url,
+            auth_header,
+            self.v2_location(),
+        )
+        .await
+        .is_ok();
+        let force_v2 = std::env::var("AIONUI_OPENCODE_V2_PROMPT")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        let available = models_ok && force_v2;
+        self.state.write().await.v2_prompt_available = available;
+        if available {
+            debug!(
+                conversation_id = %self.runtime.conversation_id(),
+                "OpenCode V2 prompt enabled (AIONUI_OPENCODE_V2_PROMPT=1); V1 fallback on 503/404/501"
+            );
+        } else if models_ok {
+            debug!(
+                conversation_id = %self.runtime.conversation_id(),
+                "OpenCode V2 models API reachable; V1 prompt_async remains default (set AIONUI_OPENCODE_V2_PROMPT=1 to opt in)"
+            );
+        } else {
+            debug!(
+                conversation_id = %self.runtime.conversation_id(),
+                "OpenCode V2 API unavailable; using V1 prompt_async for all sends"
+            );
         }
+    }
 
-        let (model, agent) = {
-            let state = self.state.read().await;
-            (state.desired_model.clone(), state.desired_agent.clone())
-        };
+    fn is_v2_prompt_unavailable(err: &AppError) -> bool {
+        match err {
+            AppError::BadGateway(msg) => {
+                msg.contains("503")
+                    || msg.contains("404")
+                    || msg.contains("501")
+                    || msg.contains("not available")
+            }
+            _ => false,
+        }
+    }
 
-        let mut body = json!({});
-        if let Some(ref m) = model {
-            if let Some(id) = m.get("id").or_else(|| m.get("modelID")) {
-                body["model"] = json!(id);
-            }
-            if let Some(p) = m.get("providerID").and_then(|v| v.as_str()) {
-                body["provider"] = json!(p);
-            }
-        }
-        if let Some(ref a) = agent {
-            body["agent"] = json!(a);
-        }
-
-        let url = self.with_request_context(&format!("{base_url}/session/{session_id}/init"));
-        let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
-        let mut req = self
-            .http_client
-            .post(&url)
-            .json(&body)
-            .timeout(Duration::from_secs(15));
-        if let Some(ref h) = auth_header {
-            req = req.header(AUTHORIZATION, h.as_str());
-        }
-
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 204 => {
-                self.state.write().await.session_initialized = true;
-                Ok(())
-            }
-            Ok(resp) if resp.status().as_u16() == 404 => {
-                debug!(
-                    conversation_id = %self.runtime.conversation_id(),
-                    "OpenCode session init not supported (404); continuing without init"
-                );
-                self.state.write().await.session_initialized = true;
-                Ok(())
-            }
-            Ok(resp) => {
-                let status = resp.status();
-                let body_text = resp.text().await.unwrap_or_default();
-                warn!(
-                    conversation_id = %self.runtime.conversation_id(),
-                    status = %status,
-                    body = %body_text,
-                    "OpenCode session init returned non-success; continuing"
-                );
-                Ok(())
-            }
-            Err(e) => {
-                warn!(
-                    conversation_id = %self.runtime.conversation_id(),
-                    error = %e,
-                    "OpenCode session init request failed; continuing"
-                );
-                Ok(())
+    /// Dispatch a user prompt. V1 `prompt_async` is the reliable default; V2 is
+    /// attempted only when the connect probe succeeded, with automatic fallback.
+    async fn dispatch_opencode_prompt(
+        &self,
+        content: &str,
+        opencode_message_id: Option<&str>,
+        inject_skills: &[String],
+    ) -> Result<(), AppError> {
+        let try_v2 = self.state.read().await.v2_prompt_available;
+        if try_v2 {
+            self.ensure_opencode_session().await?;
+            match self.opencode_send_v2(content).await {
+                Ok(()) => return Ok(()),
+                Err(e) if Self::is_v2_prompt_unavailable(&e) => {
+                    warn!(
+                        conversation_id = %self.runtime.conversation_id(),
+                        error = %e,
+                        "OpenCode V2 prompt unavailable; falling back to V1 prompt_async"
+                    );
+                    self.state.write().await.v2_prompt_available = false;
+                }
+                Err(e) => return Err(e),
             }
         }
+        self.opencode_send(content, opencode_message_id, inject_skills)
+            .await
     }
 
     /// Wait for the session agent loop to become idle before mutating operations.
@@ -4279,7 +4281,6 @@ impl RemoteAgentManager {
         };
         if session_just_created {
             self.persist_session_key_now(&session_id).await;
-            self.opencode_init_session(&base_url, &session_id).await?;
         }
         Ok(session_id)
     }
@@ -4334,7 +4335,6 @@ impl RemoteAgentManager {
 
             if session_just_created {
                 self.persist_session_key_now(&session_id).await;
-                self.opencode_init_session(&base_url, &session_id).await?;
             }
 
             let (agent, model) = {
@@ -4464,7 +4464,6 @@ impl RemoteAgentManager {
         // never blocks the prompt (the completion-path persist still runs).
         if session_just_created {
             self.persist_session_key_now(&session_id).await;
-            self.opencode_init_session(&base_url, &session_id).await?;
         }
         let context_prefix = if session_just_created {
             self.build_context_transcript_prefix().await
@@ -4505,8 +4504,6 @@ impl RemoteAgentManager {
             }
         };
 
-        let has_model_override = override_model.is_some();
-        let has_agent_override = override_agent.is_some();
         let (model, agent) = {
             let state = self.state.read().await;
             (
@@ -4593,27 +4590,24 @@ impl RemoteAgentManager {
         if let Some(hint) = system_hint {
             body["system"] = json!(hint);
         }
-        let omit_wire_model_agent = {
-            let state = self.state.read().await;
-            state.session_initialized && !has_model_override && !has_agent_override
-        };
         if let Some(ref m) = model {
-            if !omit_wire_model_agent {
-                if let Some(id) = m.get("id") {
-                    body["model"] = json!({
-                        "providerID": m.get("providerID").and_then(|v| v.as_str()).unwrap_or("opencode-go"),
-                        "modelID": id,
-                        "variant": m.get("variant").and_then(|v| v.as_str()).unwrap_or("default"),
-                    });
-                } else {
-                    body["model"] = m.clone();
-                }
+            if let Some(model_id) = m
+                .get("modelID")
+                .and_then(|v| v.as_str())
+                .or_else(|| m.get("id").and_then(|v| v.as_str()))
+            {
+                let provider_id = m
+                    .get("providerID")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("opencode-go");
+                body["model"] = json!({
+                    "providerID": provider_id,
+                    "modelID": model_id,
+                });
             }
         }
         if let Some(ref a) = agent {
-            if !omit_wire_model_agent {
-                body["agent"] = json!(a);
-            }
+            body["agent"] = json!(a);
         }
         // M10: pass selected server-side skills into the prompt body so the
         // model can load the matching SKILL.md content. OpenCode's
@@ -4829,13 +4823,6 @@ impl RemoteAgentManager {
             "providerID": provider_id,
             "variant": "default"
         }));
-        state.session_initialized = false;
-        let session_id = state.opencode_session_id.clone();
-        drop(state);
-        if let Some(session_id) = session_id {
-            let base_url = normalize_base_url(&self.remote_config.url);
-            let _ = self.opencode_init_session(&base_url, &session_id).await;
-        }
         Ok(())
     }
 
@@ -4886,11 +4873,6 @@ impl RemoteAgentManager {
         {
             let mut state = self.state.write().await;
             state.desired_agent = Some(normalized.to_owned());
-            state.session_initialized = false;
-        }
-        if let Some(session_id) = self.state.read().await.opencode_session_id.clone() {
-            let base_url = normalize_base_url(&self.remote_config.url);
-            let _ = self.opencode_init_session(&base_url, &session_id).await;
         }
         // Mirror the same UI sync path the SSE handler uses so the selector
         // updates immediately instead of waiting for the next prompt round-trip.
@@ -4956,33 +4938,7 @@ impl RemoteAgentManager {
             Err(_) => return Ok(Vec::new()),
         };
 
-        let mut entries = Vec::new();
-        if let Some(all) = body.get("all").and_then(|v| v.as_array()) {
-            // Only include models from connected (authenticated) providers.
-            let connected: std::collections::HashSet<&str> = body
-                .get("connected")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-                .unwrap_or_default();
-
-            for provider in all {
-                let provider_id = match provider.get("id").and_then(|v| v.as_str()) {
-                    Some(id) if connected.contains(id) => id,
-                    _ => continue,
-                };
-                if let Some(models) = provider.get("models").and_then(|v| v.as_object()) {
-                    for (model_id, model) in models {
-                        let label = model.get("name").and_then(|v| v.as_str()).unwrap_or(model_id);
-                        // Encode as "providerID::modelID" so set_model can split it correctly.
-                        entries.push(aionui_api_types::ModelInfoEntry {
-                            id: format!("{provider_id}::{model_id}"),
-                            label: format!("[{provider_id}] {label}"),
-                        });
-                    }
-                }
-            }
-        }
-        Ok(entries)
+        Ok(opencode_models::parse_provider_model_entries(&body))
     }
 }
 
@@ -5041,10 +4997,11 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             if is_first {
                 self.emit_model_info().await;
             }
-            // Dispatch policy (C03 + M17 slash + skills):
+            // Dispatch policy (M17 slash + skills):
             //   - Known slash commands → `POST /session/{id}/command` (server expansion)
-            //   - Skills, model/agent overrides, unknown slash → V1 `prompt_async`
-            //   - Plain text after session init → V2 `prompt` (model/agent seeded via init)
+            //   - Skills, unknown slash → V1 `prompt_async`
+            //   - Plain text → V1 `prompt_async` by default; V2 only when probed
+            //     available, with automatic fallback to V1 on 503/404/501
             let is_slash_command = data.content.starts_with('/');
             let needs_v1 = !data.inject_skills.is_empty() || is_slash_command;
 
@@ -5070,8 +5027,12 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
                 )
                 .await
             } else {
-                self.ensure_opencode_session().await?;
-                self.opencode_send_v2(&data.content).await
+                self.dispatch_opencode_prompt(
+                    &data.content,
+                    data.opencode_message_id.as_deref(),
+                    &data.inject_skills,
+                )
+                .await
             }
         } else if is_first {
             let payload = json!({

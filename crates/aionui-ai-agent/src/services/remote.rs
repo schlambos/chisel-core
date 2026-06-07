@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aionui_api_types::{
-    CreateRemoteAgentRequest, HandshakeResponse, ModelInfoEntry, ModelInfoPayload, RemoteAgentListItem,
+    CreateRemoteAgentRequest, HandshakeResponse, ModelInfoPayload, RemoteAgentListItem,
     RemoteAgentResponse, RemoteSessionInfo, RemoteSkillInfo, TestRemoteAgentConnectionRequest,
     UpdateRemoteAgentRequest,
 };
@@ -907,34 +907,25 @@ async fn fetch_opencode_model_info(
         })
         .unwrap_or_default();
 
-    let mut available_models: Vec<ModelInfoEntry> = Vec::new();
+    let available_models = crate::manager::remote::opencode_models::parse_provider_model_entries(&body);
     let mut current_model_id: Option<String> = None;
     let mut current_model_label: Option<String> = None;
 
     if let Some(all) = body.get("all").and_then(|v| v.as_array()) {
         for provider in all {
             let provider_id = match provider.get("id").and_then(|v| v.as_str()) {
-                // Only surface models from connected (authenticated) providers
-                // when the response includes a `connected` list.  If the list
-                // is empty (older OpenCode builds), fall through and include
-                // everything.
                 Some(id) if connected.is_empty() || connected.contains(id) => id,
                 _ => continue,
             };
             let provider_default = defaults.get(provider_id).copied();
             if let Some(models) = provider.get("models").and_then(|v| v.as_object()) {
                 for (model_id, model) in models {
-                    let label = model.get("name").and_then(|v| v.as_str()).unwrap_or(model_id);
-                    let qualified_id = format!("{provider_id}::{model_id}");
-                    let qualified_label = format!("[{provider_id}] {label}");
                     if current_model_id.is_none() && provider_default == Some(model_id.as_str()) {
-                        current_model_id = Some(qualified_id.clone());
-                        current_model_label = Some(qualified_label.clone());
+                        let qualified_id = format!("{provider_id}::{model_id}");
+                        let label = model.get("name").and_then(|v| v.as_str()).unwrap_or(model_id);
+                        current_model_id = Some(qualified_id);
+                        current_model_label = Some(format!("[{provider_id}] {label}"));
                     }
-                    available_models.push(ModelInfoEntry {
-                        id: qualified_id,
-                        label: qualified_label,
-                    });
                 }
             }
         }
