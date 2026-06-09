@@ -726,6 +726,7 @@ dependencies = [
 name = "aionui-opencode-conformance"
 version = "0.1.11"
 dependencies = [
+ "aionui-ai-agent",
  "anyhow",
  "serde",
  "serde_json",

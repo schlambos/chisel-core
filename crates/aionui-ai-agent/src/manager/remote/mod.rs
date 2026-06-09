@@ -8,6 +8,7 @@ pub mod opencode_delta_batcher;
 pub mod opencode_log_forwarder;
 pub mod opencode_mcp;
 pub mod opencode_models;
+pub mod opencode_payloads;
 pub mod opencode_question;
 pub mod opencode_stream;
 pub mod opencode_sync;

@@ -44,6 +44,7 @@
 //!   radio choices and a Reject sentinel is appended.
 
 use aionui_common::{Confirmation, ConfirmationOption};
+#[allow(unused_imports)] // `json!` is referenced from the inline tests below
 use serde_json::{Value, json};
 
 /// Synthetic option value used to reject a question from the Approvals card.
@@ -304,9 +305,13 @@ pub fn build_question_confirmations(req: &ParsedQuestionRequest) -> Vec<Confirma
 }
 
 /// `(url, body)` for `POST /question/{requestID}/reply`.
-pub fn build_question_reply_request(base_url: &str, request_id: &str, answers: &[Vec<String>]) -> (String, Value) {
+pub fn build_question_reply_request(
+    base_url: &str,
+    request_id: &str,
+    answers: &[Vec<String>],
+) -> (String, super::opencode_payloads::OpencodeQuestionReply) {
     let url = format!("{base_url}/question/{request_id}/reply");
-    let body = json!({ "answers": answers });
+    let body = super::opencode_payloads::OpencodeQuestionReply { answers: answers.to_vec() };
     (url, body)
 }
 
@@ -522,7 +527,7 @@ mod tests {
         let answers = vec![vec!["Postgres".to_string()]];
         let (url, body) = build_question_reply_request("http://h:4096", "que_abc", &answers);
         assert_eq!(url, "http://h:4096/question/que_abc/reply");
-        assert_eq!(body, json!({ "answers": [["Postgres"]] }));
+        assert_eq!(serde_json::to_value(&body).unwrap(), json!({ "answers": [["Postgres"]] }));
     }
 
     #[test]

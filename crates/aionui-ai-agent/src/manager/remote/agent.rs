@@ -739,7 +739,14 @@ async fn run_event_reader(
     };
 
     let mut stream = resp.bytes_stream();
-    let mut buffer = String::new();
+    // Byte buffer: we scan for the `\n\n` / `\r\n\r\n` SSE frame boundary at
+    // the byte level and only decode the *completed* frame as UTF-8. Decoding
+    // each chunk eagerly with `String::from_utf8_lossy` would corrupt any
+    // multibyte character that straddles a chunk boundary (e.g. a 3-byte CJK
+    // codepoint split across two TCP segments) — `from_utf8_lossy` would emit
+    // U+FFFD for the truncated half and we'd feed the dispatcher an event
+    // body whose JSON keys/values are subtly wrong.
+    let mut buffer: Vec<u8> = Vec::new();
     let mut saw_connected = false;
 
     loop {
@@ -766,14 +773,51 @@ async fn run_event_reader(
             }
         };
 
-        let text = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&text);
+        buffer.extend_from_slice(&chunk);
 
-        while let Some(pos) = buffer.find("\n\n") {
-            let event_text = buffer[..pos].to_string();
-            buffer = buffer[pos + 2..].to_string();
+        // Drain every complete frame currently in the buffer. The outer `loop`
+        // re-enters on the next chunk; the inner `while` drains multiple
+        // back-to-back frames in a single chunk.
+        while let Some(boundary_pos) = sse_frame_boundary(&buffer) {
+            // The boundary itself is either `\n\n` (2 bytes) or `\r\n\r\n`
+            // (4 bytes). Detect which we matched so we consume the right
+            // amount and normalise CRLF-delimited frames to LF before the
+            // downstream `lines()` iterator sees them.
+            let boundary_len = if buffer.get(boundary_pos..boundary_pos + 4) == Some(b"\r\n\r\n") {
+                4
+            } else {
+                2
+            };
+            // `drain(..).collect()` takes ownership of the frame (including
+            // the trailing boundary bytes) and leaves only the unconsumed
+            // suffix in `buffer`. We then slice off the boundary tail so the
+            // decoder sees exactly one SSE event's worth of bytes. The
+            // owned `Vec<u8>` sidesteps the borrow conflict of holding
+            // `&buffer[..pos]` and mutating `buffer` in the same statement.
+            let mut frame_bytes: Vec<u8> = buffer.drain(..boundary_pos + boundary_len).collect();
+            frame_bytes.truncate(boundary_pos);
 
-            for line in event_text.lines() {
+            // The frame is now guaranteed to be a complete UTF-8 sequence
+            // (chunk-boundary splits can no longer happen), so decode
+            // strictly. A malformed frame is logged and dropped — we never
+            // lossy-decode because that would silently corrupt event JSON.
+            let frame_text = match std::str::from_utf8(&frame_bytes) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(
+                        conversation_id = %conversation_id,
+                        error = %e,
+                        "OpenCode SSE frame is not valid UTF-8; dropping"
+                    );
+                    continue;
+                }
+            };
+            // Normalise CRLF → LF so a CRLF-delimited frame produces the same
+            // line shape as an LF-delimited one. Cheap: each `\r` becomes `\n`
+            // only when it precedes one.
+            let frame_text = normalise_sse_crlf(frame_text);
+
+            for line in frame_text.lines() {
                 if let Some(data) = line.strip_prefix("data: ") {
                     // Peek the event type for lifecycle handling before the full
                     // dispatch. Cheap parse; the dispatcher re-parses but this
@@ -801,6 +845,60 @@ async fn run_event_reader(
             }
         }
     }
+}
+
+/// Return the byte index where the first SSE frame boundary begins in `buf`.
+///
+/// SSE uses a blank line (`\n\n`) to separate events on the wire; the spec
+/// permits but does not require CRLF line endings, so we accept either
+/// `\n\n` or `\r\n\r\n` as a frame boundary — the earlier of the two wins.
+/// Returns `None` when `buf` holds no complete frame yet, in which case the
+/// caller should keep buffering and try again on the next chunk.
+fn sse_frame_boundary(buf: &[u8]) -> Option<usize> {
+    let lf = find_subsequence(buf, b"\n\n");
+    let crlf = find_subsequence(buf, b"\r\n\r\n");
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+/// Naïve `slice.windows(needle.len()).position(|w| w == needle)` — stdlib
+/// has no built-in `memmem` until 1.86 stabilises, and adding a `memchr`
+/// dep just for two calls per frame is not worth it.
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Replace `\r\n` with `\n` in `s`. Operates on the already-decoded
+/// `&str` so the downstream `lines()` iterator sees a single line-ending
+/// shape regardless of whether the server used LF or CRLF.
+fn normalise_sse_crlf(s: &str) -> String {
+    if !s.contains('\r') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            // Drop a CR only when it is immediately followed by an LF; the LF
+            // itself is emitted by the next iteration. A bare CR (not followed
+            // by LF) is preserved — it might be a payload byte and is harmless
+            // to the `lines()` iterator below.
+            let next_is_lf = chars.as_str().as_bytes().first() == Some(&b'\n');
+            if !next_is_lf {
+                out.push('\r');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Decide which SSE path to subscribe to (`/global/event` vs legacy `/event`).
@@ -985,10 +1083,14 @@ pub(crate) fn parse_opencode_skills(body: &Value) -> Vec<RemoteSkillInfo> {
 /// `decision` must already be a wire-canonical value: `once` | `always` |
 /// `reject`. (Chisl-internal `allow_dir` / `allow_session` are mapped to
 /// `once` by the caller before reaching here.)
-fn build_permission_reply_request(base_url: &str, request_id: &str, decision: &str) -> (String, Value) {
+fn build_permission_reply_request(
+    base_url: &str,
+    request_id: &str,
+    decision: &str,
+) -> (String, super::opencode_payloads::OpencodePermissionReply) {
     (
         format!("{base_url}/permission/{request_id}/reply"),
-        json!({ "reply": decision }),
+        super::opencode_payloads::OpencodePermissionReply::new(decision),
     )
 }
 
@@ -1124,10 +1226,7 @@ impl ShellApprover for RemoteShellApprover {
 
         let (session_id, parent_session_id, attribution_fallback) = {
             let state = self.state.read().await;
-            let mut session_id = context
-                .session_id
-                .clone()
-                .or_else(|| state.opencode_session_id.clone());
+            let mut session_id = context.session_id.clone().or_else(|| state.opencode_session_id.clone());
             let mut parent_session_id = context.parent_session_id.clone();
             let mut attribution_fallback = false;
             if context.session_id.is_none() {
@@ -1529,7 +1628,8 @@ impl RemoteAgentManager {
             "Connected to OpenCode server"
         );
 
-        self.probe_v2_prompt_availability(&base_url, auth_header.as_deref()).await;
+        self.probe_v2_prompt_availability(&base_url, auth_header.as_deref())
+            .await;
 
         // Validate a resumed session id (seeded from persisted
         // `conversation.extra.sessionKey`) before reuse. OpenCode persists
@@ -3500,8 +3600,9 @@ impl RemoteAgentManager {
         self.opencode_wait_for_idle().await?;
         let session_id = self.require_opencode_session().await?;
         let base_url = normalize_base_url(&self.remote_config.url);
-        let url =
-            self.with_request_context(&format!("{base_url}/session/{session_id}/message/{message_id}/part/{part_id}"));
+        let url = self.with_request_context(&format!(
+            "{base_url}/session/{session_id}/message/{message_id}/part/{part_id}"
+        ));
         self.opencode_delete(&url, "part").await
     }
 
@@ -3663,12 +3764,11 @@ impl RemoteAgentManager {
             Some(m) => self.opencode_message_after(m).await?,
             None => None,
         };
-        let body = fork_at
-            .as_deref()
-            .map(|m| json!({ "messageID": m }))
-            .unwrap_or_else(|| json!({}));
+        let body = super::opencode_payloads::OpencodeForkRequest {
+            message_id: fork_at,
+        };
         let resp = self
-            .opencode_session_request(reqwest::Method::POST, "/fork", Some(body), 30)
+            .opencode_session_request(reqwest::Method::POST, "/fork", Some(serde_json::to_value(&body).unwrap()), 30)
             .await?;
         resp.get("id")
             .and_then(|v| v.as_str())
@@ -3691,11 +3791,11 @@ impl RemoteAgentManager {
     /// M02: revert the session to a message (and optionally a specific part).
     pub async fn opencode_revert(&self, message_id: &str, part_id: Option<&str>) -> Result<(), AppError> {
         self.opencode_wait_for_idle().await?;
-        let mut body = json!({ "messageID": message_id });
-        if let Some(pid) = part_id.filter(|p| p.starts_with("prt")) {
-            body["partID"] = json!(pid);
-        }
-        self.opencode_session_request(reqwest::Method::POST, "/revert", Some(body), 30)
+        let body = super::opencode_payloads::OpencodeRevertRequest {
+            message_id: message_id.to_string(),
+            part_id: part_id.filter(|p| p.starts_with("prt")).map(String::from),
+        };
+        self.opencode_session_request(reqwest::Method::POST, "/revert", Some(serde_json::to_value(&body).unwrap()), 30)
             .await
             .map(|_| ())
     }
@@ -3724,10 +3824,15 @@ impl RemoteAgentManager {
                 .ok_or_else(|| AppError::BadRequest("Current model id is unavailable".into()))?;
             (provider.to_string(), model.to_string())
         };
-        let body = json!({ "providerID": provider_id, "modelID": model_id });
-        self.opencode_session_request(reqwest::Method::POST, "/summarize", Some(body), 60)
-            .await
-            .map(|_| ())
+        let body = super::opencode_payloads::OpencodeSummarizeRequest { provider_id, model_id };
+        self.opencode_session_request(
+            reqwest::Method::POST,
+            "/summarize",
+            Some(serde_json::to_value(&body).unwrap()),
+            60,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// M22 Phase 3: V2 compact the session. Tries V2 `/api/session/{id}/compact`
@@ -3856,13 +3961,8 @@ impl RemoteAgentManager {
         }
         let base_url = normalize_base_url(&self.remote_config.url);
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
-        super::opencode_v2::fetch_v2_models(
-            &self.http_client,
-            &base_url,
-            auth_header.as_deref(),
-            self.v2_location(),
-        )
-        .await
+        super::opencode_v2::fetch_v2_models(&self.http_client, &base_url, auth_header.as_deref(), self.v2_location())
+            .await
     }
 
     /// M22 Phase 1: fetch V2 provider list from the server. Returns raw JSON.
@@ -3874,34 +3974,18 @@ impl RemoteAgentManager {
         }
         let base_url = normalize_base_url(&self.remote_config.url);
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
-        super::opencode_v2::fetch_v2_providers(
-            &self.http_client,
-            &base_url,
-            auth_header.as_deref(),
-            self.v2_location(),
-        )
-        .await
+        super::opencode_v2::fetch_v2_providers(&self.http_client, &base_url, auth_header.as_deref(), self.v2_location())
+            .await
     }
 
     /// M13: remote workspace path metadata (`GET /path`).
     pub async fn opencode_fetch_path(&self) -> Result<Value, AppError> {
-        super::opencode_fs::fetch_path(
-            &self.http_client,
-            &self.remote_config,
-            self.runtime.workspace(),
-        )
-        .await
+        super::opencode_fs::fetch_path(&self.http_client, &self.remote_config, self.runtime.workspace()).await
     }
 
     /// M13: list files on the remote server (`GET /file`).
     pub async fn opencode_list_files(&self, path: &str) -> Result<Value, AppError> {
-        super::opencode_fs::list_files(
-            &self.http_client,
-            &self.remote_config,
-            self.runtime.workspace(),
-            path,
-        )
-        .await
+        super::opencode_fs::list_files(&self.http_client, &self.remote_config, self.runtime.workspace(), path).await
     }
 
     /// M13: read remote file content (`POST /file/content`).
@@ -3943,13 +4027,7 @@ impl RemoteAgentManager {
 
     /// M13: symbol search on the remote server (`GET /find/symbol`).
     pub async fn opencode_find_symbols(&self, query: &str) -> Result<Value, AppError> {
-        super::opencode_fs::find_symbols(
-            &self.http_client,
-            &self.remote_config,
-            self.runtime.workspace(),
-            query,
-        )
-        .await
+        super::opencode_fs::find_symbols(&self.http_client, &self.remote_config, self.runtime.workspace(), query).await
     }
 
     /// M03: create a shareable link for the session. Returns the share URL.
@@ -4154,7 +4232,7 @@ impl RemoteAgentManager {
             );
             // Omit `permission` entirely so the server applies its own defaults
             // and emits permission prompts for sensitive operations.
-            json!({})
+            super::opencode_payloads::OpencodeSessionCreate::default()
         } else {
             // Register the client-side fs MCP with the remote OpenCode before
             // creating the session, so any tool the agent emits on its first
@@ -4163,15 +4241,7 @@ impl RemoteAgentManager {
             // function, just without client-side fs (matching prior behavior).
             self.ensure_local_fs_mcp(base_url, auth_header.as_deref()).await;
 
-            json!({
-                "permission": [
-                    { "permission": "bash",  "pattern": "*", "action": "deny" },
-                    { "permission": "read",  "pattern": "*", "action": "deny" },
-                    { "permission": "edit",  "pattern": "*", "action": "deny" },
-                    { "permission": "glob",  "pattern": "*", "action": "deny" },
-                    { "permission": "grep",  "pattern": "*", "action": "deny" }
-                ]
-            })
+            super::opencode_payloads::OpencodeSessionCreate::deny_builtin_tools()
         };
 
         let mut req = self
@@ -4233,16 +4303,12 @@ impl RemoteAgentManager {
     /// succeeding does not imply `POST /api/session/{id}/prompt` is enabled.
     /// Set `AIONUI_OPENCODE_V2_PROMPT=1` to opt into V2 after a successful probe.
     async fn probe_v2_prompt_availability(&self, base_url: &str, auth_header: Option<&str>) {
-        let models_ok = super::opencode_v2::fetch_v2_models(
-            &self.http_client,
-            base_url,
-            auth_header,
-            self.v2_location(),
-        )
-        .await
-        .is_ok();
-        let force_v2 = std::env::var("AIONUI_OPENCODE_V2_PROMPT")
-            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        let models_ok =
+            super::opencode_v2::fetch_v2_models(&self.http_client, base_url, auth_header, self.v2_location())
+                .await
+                .is_ok();
+        let force_v2 =
+            std::env::var("AIONUI_OPENCODE_V2_PROMPT").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
         let available = models_ok && force_v2;
         self.state.write().await.v2_prompt_available = available;
         if available {
@@ -4266,10 +4332,7 @@ impl RemoteAgentManager {
     fn is_v2_prompt_unavailable(err: &AppError) -> bool {
         match err {
             AppError::BadGateway(msg) => {
-                msg.contains("503")
-                    || msg.contains("404")
-                    || msg.contains("501")
-                    || msg.contains("not available")
+                msg.contains("503") || msg.contains("404") || msg.contains("501") || msg.contains("not available")
             }
             _ => false,
         }
@@ -4299,8 +4362,7 @@ impl RemoteAgentManager {
                 Err(e) => return Err(e),
             }
         }
-        self.opencode_send(content, opencode_message_id, inject_skills)
-            .await
+        self.opencode_send(content, opencode_message_id, inject_skills).await
     }
 
     /// Wait for the session agent loop to become idle before mutating operations.
@@ -4412,7 +4474,8 @@ impl RemoteAgentManager {
             });
 
             let url = self.with_request_context(&format!("{base_url}/session/{session_id}/command"));
-            let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
+            let auth_header =
+                build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
             opencode_commands::execute_server_command(
                 &self.http_client,
                 &url,
@@ -4574,16 +4637,18 @@ impl RemoteAgentManager {
                     .map(|m| {
                         // Per-command model override: encode as the same
                         // shape `set_model` produces so the body builder
-                        // below handles it uniformly.
+                        // below handles it uniformly. We use the typed
+                        // `DesiredModel` so the on-the-wire shape is the
+                        // same canonical `{modelID, providerID, variant}`
+                        // the rest of the codebase uses.
                         let (provider_id, model_id) = m
                             .split_once("::")
                             .map(|(p, m)| (p.to_string(), m.to_string()))
                             .unwrap_or_else(|| ("opencode-go".to_string(), m));
-                        json!({
-                            "providerID": provider_id,
-                            "id": model_id,
-                            "variant": "default",
-                        })
+                        serde_json::to_value(super::opencode_payloads::DesiredModel::new(
+                            provider_id, model_id,
+                        ))
+                        .unwrap()
                     })
                     .or_else(|| state.desired_model.clone()),
                 override_agent.or_else(|| state.desired_agent.clone()),
@@ -4637,9 +4702,7 @@ impl RemoteAgentManager {
             Some(prefix) if !prefix.is_empty() => format!("{prefix}\n\n{content}"),
             _ => content.to_string(),
         };
-        let mut body = json!({
-            "parts": [{"type": "text", "text": prompt_text}],
-        });
+        let mut body = super::opencode_payloads::OpencodePromptRequest::text(prompt_text);
         // M07: when the caller owns the OpenCode message id (`^msg…`), send it
         // so the user message is addressable for later edit/delete. ONLY valid
         // on a freshly created session — sending `body.messageID` on a session
@@ -4648,10 +4711,10 @@ impl RemoteAgentManager {
         // generated, emitting only `session.status busy → idle`). This was the
         // root of the "2nd message returns nothing" bug.
         if session_just_created && let Some(mid) = opencode_message_id.filter(|m| m.starts_with("msg")) {
-            body["messageID"] = json!(mid);
+            body.message_id = Some(mid.to_string());
         }
         if let Some(hint) = system_hint {
-            body["system"] = json!(hint);
+            body.system = Some(hint);
         }
         if let Some(ref m) = model {
             if let Some(model_id) = m
@@ -4659,26 +4722,22 @@ impl RemoteAgentManager {
                 .and_then(|v| v.as_str())
                 .or_else(|| m.get("id").and_then(|v| v.as_str()))
             {
-                let provider_id = m
-                    .get("providerID")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("opencode-go");
-                body["model"] = json!({
-                    "providerID": provider_id,
-                    "modelID": model_id,
+                let provider_id = m.get("providerID").and_then(|v| v.as_str()).unwrap_or("opencode-go");
+                body.model = Some(super::opencode_payloads::PromptModel {
+                    provider_id: provider_id.to_string(),
+                    model_id: model_id.to_string(),
                 });
             }
         }
         if let Some(ref a) = agent {
-            body["agent"] = json!(a);
+            body.agent = Some(a.clone());
         }
         // M10: pass selected server-side skills into the prompt body so the
         // model can load the matching SKILL.md content. OpenCode's
         // `prompt_async` accepts `skills: string[]` (skill names matching the
-        // `GET /skill` catalog). Empty array omitted to avoid wire noise.
-        if !inject_skills.is_empty() {
-            body["skills"] = json!(inject_skills);
-        }
+        // `GET /skill` catalog). Empty array omitted to avoid wire noise —
+        // `OpencodePromptRequest` skips serializing an empty `skills` vec.
+        body.skills = inject_skills.to_vec();
 
         // Surface the silent failure mode where the system hint instructs the
         // model to use `aionui-local-fs_*` tools but no local fs MCP is
@@ -4881,11 +4940,11 @@ impl RemoteAgentManager {
             (existing_provider, model_id.to_string())
         };
         let mut state = self.state.write().await;
-        state.desired_model = Some(json!({
-            "modelID": actual_model_id,
-            "providerID": provider_id,
-            "variant": "default"
-        }));
+        state.desired_model = Some(serde_json::to_value(super::opencode_payloads::DesiredModel::new(
+            provider_id,
+            actual_model_id,
+        ))
+        .unwrap());
         Ok(())
     }
 
@@ -5083,19 +5142,11 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             }
 
             if needs_v1 || is_slash_command {
-                self.opencode_send(
-                    &data.content,
-                    data.opencode_message_id.as_deref(),
-                    &data.inject_skills,
-                )
-                .await
+                self.opencode_send(&data.content, data.opencode_message_id.as_deref(), &data.inject_skills)
+                    .await
             } else {
-                self.dispatch_opencode_prompt(
-                    &data.content,
-                    data.opencode_message_id.as_deref(),
-                    &data.inject_skills,
-                )
-                .await
+                self.dispatch_opencode_prompt(&data.content, data.opencode_message_id.as_deref(), &data.inject_skills)
+                    .await
             }
         } else if is_first {
             let payload = json!({
@@ -6284,12 +6335,13 @@ mod tests {
         // 1.15.11: POST /permission/{id}/reply with body { "reply": <decision> }.
         let (url, body) = build_permission_reply_request("http://127.0.0.1:4096", "per_abc", "once");
         assert_eq!(url, "http://127.0.0.1:4096/permission/per_abc/reply");
-        assert_eq!(body, json!({ "reply": "once" }));
+        assert_eq!(serde_json::to_value(&body).unwrap(), json!({ "reply": "once" }));
 
         let (_, body) = build_permission_reply_request("http://h", "per_x", "reject");
-        assert_eq!(body, json!({ "reply": "reject" }));
+        assert_eq!(serde_json::to_value(&body).unwrap(), json!({ "reply": "reject" }));
         // The body must NOT use the deprecated session-scoped `response` field.
-        assert!(body.get("response").is_none());
+        let body_v = serde_json::to_value(&body).unwrap();
+        assert!(body_v.get("response").is_none());
     }
 
     #[tokio::test]
@@ -6845,7 +6897,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         {
             let state = agent.state.read().await;
-            let conf = state.confirmations.iter().find(|c| c.action.as_deref() == Some("run_shell"));
+            let conf = state
+                .confirmations
+                .iter()
+                .find(|c| c.action.as_deref() == Some("run_shell"));
             assert!(conf.is_some(), "confirmation must be queued");
             assert_eq!(conf.unwrap().session_id.as_deref(), Some("root-sess"));
         }
@@ -7319,6 +7374,135 @@ mod tests {
         assert!(!c.description.contains("ghp_"));
     }
 
+    // ── SSE byte-level frame boundary (regression: chunk-straddle corruption)
+    //
+    // The previous implementation lossy-decoded every chunk with
+    // `String::from_utf8_lossy` before scanning for `\n\n`. A multibyte
+    // character split across two chunks (e.g. a 3-byte CJK codepoint whose
+    // first byte ends chunk N and whose remaining 2 bytes start chunk N+1)
+    // produced a U+FFFD on the boundary — corrupting the JSON event the
+    // dispatcher then tried to parse. These tests pin the byte-level scan
+    // path so a future refactor can't quietly reintroduce the lossy decode.
+
+    #[test]
+    fn sse_frame_boundary_finds_lf_separator() {
+        // "data: hello\n\n" is 13 bytes; the first `\n` is at index 11.
+        let buf = b"data: hello\n\n";
+        assert_eq!(sse_frame_boundary(buf), Some(11));
+    }
+
+    #[test]
+    fn sse_frame_boundary_finds_crlf_separator() {
+        // "data: hello\r\n\r\n" is 15 bytes; the first `\r` is at index 11.
+        let buf = b"data: hello\r\n\r\n";
+        assert_eq!(sse_frame_boundary(buf), Some(11));
+    }
+
+    #[test]
+    fn sse_frame_boundary_picks_earlier_of_mixed_separators() {
+        // A CRLF block then an LF-only block — the first boundary wins.
+        // "data: a\r\n\r\n" is 11 bytes; the `\r` of the CRLF block is at 7.
+        let buf = b"data: a\r\n\r\ndata: b\n\n";
+        assert_eq!(sse_frame_boundary(buf), Some(7));
+    }
+
+    #[test]
+    fn sse_frame_boundary_returns_none_when_incomplete() {
+        // No separator yet — caller should keep buffering.
+        assert_eq!(sse_frame_boundary(b"data: hello\n"), None);
+        assert_eq!(sse_frame_boundary(b"data: hello\r\n"), None);
+        assert_eq!(sse_frame_boundary(b""), None);
+    }
+
+    #[test]
+    fn sse_frame_boundary_does_not_match_lone_crlf() {
+        // `\r\n` alone is a line ending, not a frame separator. Only
+        // the blank-line patterns `\n\n` and `\r\n\r\n` are boundaries.
+        assert_eq!(sse_frame_boundary(b"data: x\r\n"), None);
+    }
+
+    /// The whole point of the byte-level scan: a multibyte UTF-8 codepoint
+    /// split across two bytes that, if lossy-decoded, would produce U+FFFD
+    /// on each side of the chunk seam. With byte-level scanning the
+    /// separator is found at the same position regardless of where the
+    /// codepoint falls relative to the boundary.
+    #[test]
+    fn sse_frame_boundary_is_unaffected_by_multibyte_chars_near_separator() {
+        // "日" is the 3-byte sequence E6 97 A5. The buffer is:
+        //   0..12   "data: {\"k\":\""            (12 ASCII bytes)
+        //   12..15  E6 97 A5                     (日)
+        //   15..17  "\"}"                        (2 ASCII bytes)
+        //   17..19  "\n\n"                       (2 LF bytes)
+        // The frame boundary is the first `\n` at index 17.
+        let buf = b"data: {\"k\":\"\xe6\x97\xa5\"}\n\n";
+        assert_eq!(sse_frame_boundary(buf), Some(17));
+    }
+
+    #[test]
+    fn normalise_sse_crlf_passes_through_lf_only_input() {
+        let s = "data: hello\n\n";
+        assert_eq!(normalise_sse_crlf(s), s);
+    }
+
+    #[test]
+    fn normalise_sse_crlf_strips_cr_before_lf() {
+        assert_eq!(normalise_sse_crlf("data: a\r\n\r\n"), "data: a\n\n");
+        assert_eq!(normalise_sse_crlf("a\r\nb"), "a\nb");
+    }
+
+    #[test]
+    fn normalise_sse_crlf_preserves_bare_cr() {
+        // A CR not followed by LF is preserved — might be a payload byte.
+        assert_eq!(normalise_sse_crlf("a\rb"), "a\rb");
+        // Trailing CR is also preserved.
+        assert_eq!(normalise_sse_crlf("a\r"), "a\r");
+    }
+
+    /// End-to-end repro of the original bug: simulate the old
+    /// `from_utf8_lossy` behaviour on a chunk-split CJK codepoint and show
+    /// the JSON gets corrupted, then prove the new byte-level path keeps
+    /// it intact.
+    #[test]
+    fn chunk_straddled_cjk_codepoint_does_not_corrupt_event() {
+        // Event body: data: {"k":"日"}\n\n  (19 bytes total).
+        //   0..12  "data: {\"k\":\""  (12 ASCII bytes)
+        //   12..15 E6 97 A5          (日, 3 UTF-8 bytes)
+        //   15..19 "\"}\n\n"          (4 bytes)
+        let full = "data: {\"k\":\"\u{65e5}\"}\n\n";
+        let full_bytes = full.as_bytes();
+        assert_eq!(full_bytes.len(), 19);
+
+        // Split between byte 13 and 14 — i.e. mid-codepoint. chunk_a now
+        // ends with the leading 0xE6 of 日 (incomplete 3-byte sequence)
+        // and chunk_b starts with the trailing 0x97 0xA5 (continuation
+        // bytes that are invalid as a start byte).
+        let split = 13;
+        let chunk_a = &full_bytes[..split];
+        let chunk_b = &full_bytes[split..];
+
+        // Simulate the OLD path: lossy decode each chunk, concatenate.
+        let old = format!(
+            "{}{}",
+            String::from_utf8_lossy(chunk_a),
+            String::from_utf8_lossy(chunk_b)
+        );
+        // The old path MUST corrupt the event (this is the bug we're fixing).
+        assert!(
+            old.contains('\u{fffd}'),
+            "expected the lossy path to emit U+FFFD on the chunk split, got: {old:?}"
+        );
+
+        // Simulate the NEW path: byte-level scan, then strict decode.
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(chunk_a);
+        buf.extend_from_slice(chunk_b);
+        let pos = sse_frame_boundary(&buf).expect("boundary present");
+        let frame = std::str::from_utf8(&buf[..pos]).expect("strict decode succeeds");
+        let frame = normalise_sse_crlf(frame);
+        // The new path keeps the event intact: the JSON body round-trips.
+        assert_eq!(frame, "data: {\"k\":\"\u{65e5}\"}");
+    }
+
     #[test]
     fn permission_reply_uses_canonical_endpoint_still_passes() {
         // Regression guard: the existing P0-canonical endpoint test stays
@@ -7327,8 +7511,9 @@ mod tests {
         // canonical `{ "reply": <decision> }` contract.
         let (url, body) = build_permission_reply_request("http://127.0.0.1:4096", "per_abc", "once");
         assert_eq!(url, "http://127.0.0.1:4096/permission/per_abc/reply");
-        assert_eq!(body, json!({ "reply": "once" }));
+        assert_eq!(serde_json::to_value(&body).unwrap(), json!({ "reply": "once" }));
         // The body must NOT use the deprecated session-scoped `response` field.
-        assert!(body.get("response").is_none());
+        let body_v = serde_json::to_value(&body).unwrap();
+        assert!(body_v.get("response").is_none());
     }
 }

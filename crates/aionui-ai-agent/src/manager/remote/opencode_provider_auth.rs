@@ -16,9 +16,12 @@ use std::time::Duration;
 
 use aionui_common::AppError;
 use reqwest::header::AUTHORIZATION;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::agent::{RemoteAgentConfig, build_auth_header, normalize_base_url};
+use super::opencode_payloads::{
+    OpencodeAuthBody, OpencodeOAuthAuthorizeRequest, OpencodeOAuthCallbackRequest,
+};
 
 async fn parse_json(resp: reqwest::Response, label: &str) -> Result<Value, AppError> {
     if !resp.status().is_success() {
@@ -102,11 +105,11 @@ pub async fn start_provider_oauth(
 ) -> Result<Value, AppError> {
     let base_url = normalize_base_url(&cfg.url);
     let url = provider_url(&base_url, &format!("/provider/{provider_id}/oauth/authorize"));
-    let mut body = json!({ "method": method_index });
-    if let Some(inp) = inputs.filter(|m| !m.is_empty()) {
-        body["inputs"] = serde_json::to_value(inp)
-            .map_err(|e| AppError::Internal(format!("OAuth inputs serialization failed: {e}")))?;
-    }
+    let inputs_owned: Option<HashMap<String, String>> = inputs.filter(|m| !m.is_empty()).cloned();
+    let body = OpencodeOAuthAuthorizeRequest {
+        method: method_index,
+        inputs: inputs_owned,
+    };
 
     let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(15));
     if let Some(ref h) = auth(cfg) {
@@ -144,10 +147,10 @@ pub async fn complete_provider_oauth(
 ) -> Result<(), AppError> {
     let base_url = normalize_base_url(&cfg.url);
     let url = provider_url(&base_url, &format!("/provider/{provider_id}/oauth/callback"));
-    let mut body = json!({ "method": method_index });
-    if let Some(c) = code.filter(|s| !s.is_empty()) {
-        body["code"] = json!(c);
-    }
+    let body = OpencodeOAuthCallbackRequest {
+        method: method_index,
+        code: code.filter(|s| !s.is_empty()).map(String::from),
+    };
 
     let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(30));
     if let Some(ref h) = auth(cfg) {
@@ -220,13 +223,9 @@ pub async fn set_api_key(
     provider_id: &str,
     api_key: &str,
 ) -> Result<(), AppError> {
-    set_provider_auth(
-        http_client,
-        cfg,
-        provider_id,
-        json!({ "type": "api", "key": api_key }),
-    )
-    .await
+    let body = serde_json::to_value(OpencodeAuthBody::api(api_key))
+        .map_err(|e| AppError::Internal(format!("OpenCode auth body serialization failed: {e}")))?;
+    set_provider_auth(http_client, cfg, provider_id, body).await
 }
 
 /// Convenience: `{ type: "wellknown", key, token }` credentials (§8 `WellKnownAuth`).
@@ -237,11 +236,7 @@ pub async fn set_wellknown_auth(
     key: &str,
     token: &str,
 ) -> Result<(), AppError> {
-    set_provider_auth(
-        http_client,
-        cfg,
-        provider_id,
-        json!({ "type": "wellknown", "key": key, "token": token }),
-    )
-    .await
+    let body = serde_json::to_value(OpencodeAuthBody::wellknown(key, token))
+        .map_err(|e| AppError::Internal(format!("OpenCode auth body serialization failed: {e}")))?;
+    set_provider_auth(http_client, cfg, provider_id, body).await
 }

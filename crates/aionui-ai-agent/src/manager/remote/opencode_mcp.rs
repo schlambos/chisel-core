@@ -43,7 +43,6 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use reqwest::header::AUTHORIZATION;
-use serde_json::json;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -751,28 +750,12 @@ async fn register_mcp(
     url: &str,
     token: &str,
 ) -> Result<(), String> {
-    let payload = json!({
-        "name": name,
-        "config": {
-            // OpenCode's "remote" transport (HTTP/SSE). Kept as-is because
-            // it is known-good against the deployed server version; a
-            // future switch to streamable "http" should be gated on a
-            // capability check.
-            "type": "remote",
-            "url": url,
-            "enabled": true,
-            "oauth": false,
-            "headers": {
-                "Authorization": format!("Bearer {token}"),
-            },
-            // Generous so a `run_shell` call isn't abandoned while it waits
-            // for the user to approve the command (the approval blocks the
-            // MCP request). Chisl's approver resolves before this ceiling
-            // via [`SHELL_APPROVAL_WAIT_MS`]; filesystem tools return well
-            // within either bound.
-            "timeout": MCP_TOOL_TIMEOUT_MS,
-        },
-    });
+    // Typed body — `OpencodeMcpAddRequest` pins the wire shape (transport
+    // "remote", bearer header, generous timeout for approval-blocked shells).
+    let payload = super::opencode_payloads::OpencodeMcpAddRequest {
+        name: name.to_string(),
+        config: super::opencode_payloads::OpencodeMcpRemoteConfig::remote(url, token, MCP_TOOL_TIMEOUT_MS),
+    };
 
     let mut req = http_client
         .post(format!("{base_url}/mcp"))

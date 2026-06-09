@@ -157,13 +157,11 @@ pub async fn execute_server_command(
     use aionui_common::AppError;
     use reqwest::header::AUTHORIZATION;
 
-    let mut body = serde_json::json!({ "command": command_line });
-    if let Some(a) = agent {
-        body["agent"] = serde_json::json!(a);
-    }
-    if let Some(m) = model {
-        body["model"] = serde_json::json!(m);
-    }
+    let body = super::opencode_payloads::OpencodeCommandRequest {
+        command: command_line.to_string(),
+        agent: agent.map(String::from),
+        model: model.map(String::from),
+    };
     let mut req = http_client
         .post(url)
         .json(&body)

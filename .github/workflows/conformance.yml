@@ -23,6 +23,18 @@ jobs:
         with:
           prefix-key: v1-rust
           workspaces: AionCore
+      - name: Verify SDK pin file is present
+        # The conformance crate's `build.rs` hard-fails the build when the
+        # chisl-root `opencode-sdk-version.json` is missing. We assert it is
+        # present up front so a missing file produces an actionable error
+        # pointing at the SoT contract, not a stack trace from build.rs.
+        run: test -f opencode-sdk-version.json || (echo "::error::Missing chisl-root opencode-sdk-version.json — the single source of truth for the @opencode-ai/sdk pin." && exit 1)
       - name: Run conformance suite
         working-directory: AionCore
         run: cargo test -p aionui-opencode-conformance --all-targets
+      - name: Run AionUi types-sync pin check
+        # Mirrors the Rust `sdk_version_pin_matches_package_json_dev_dependency`
+        # test on the TS side. Exits 2 on drift, which GitHub Actions surfaces
+        # as a failed step. Both sides must pass for a PR to merge.
+        working-directory: AionUi
+        run: node scripts/sync-opencode-types.js --check

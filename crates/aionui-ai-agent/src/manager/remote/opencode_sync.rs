@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use aionui_common::AppError;
 use reqwest::header::AUTHORIZATION;
-use serde_json::{Value, json};
+use serde_json::Value;
+
+use super::opencode_payloads::{OpencodeSyncHistoryRequest, OpencodeSyncStealRequest};
 
 /// A single sync event from `/sync/history`.
 #[derive(Debug, Clone)]
@@ -36,11 +38,7 @@ pub async fn fetch_sync_history(
     since: &std::collections::HashMap<String, u64>,
 ) -> Result<Vec<SyncEvent>, AppError> {
     let url = format!("{base_url}/sync/history");
-    let body: Value = since
-        .iter()
-        .map(|(k, v)| (k.clone(), json!(*v)))
-        .collect::<serde_json::Map<String, Value>>()
-        .into();
+    let body = OpencodeSyncHistoryRequest(since.clone());
 
     let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(15));
     if let Some(h) = auth_header {
@@ -129,7 +127,7 @@ pub async fn steal_session(
     session_id: &str,
 ) -> Result<String, AppError> {
     let url = format!("{base_url}/sync/steal");
-    let body = json!({ "sessionID": session_id });
+    let body = OpencodeSyncStealRequest { session_id: session_id.to_string() };
     let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(15));
     if let Some(h) = auth_header {
         req = req.header(AUTHORIZATION, h);

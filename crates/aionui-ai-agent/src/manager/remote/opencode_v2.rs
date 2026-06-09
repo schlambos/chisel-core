@@ -11,10 +11,12 @@ use std::time::Duration;
 
 use aionui_common::AppError;
 use reqwest::header::AUTHORIZATION;
+#[allow(unused_imports)] // `json!` is used only by the inline tests below
 use serde_json::{Value, json};
 
 use super::agent::RemoteAgentConfig;
 use super::opencode_context::append_v2_location;
+use super::opencode_payloads::{OpencodeV2CompactRequest, OpencodeV2PromptRequest, OpencodeV2PromptText};
 
 /// Optional server-tools location scoping for V2 routes.
 pub type V2Location<'a> = Option<(&'a RemoteAgentConfig, &'a str)>;
@@ -84,14 +86,14 @@ pub async fn v2_compact(
     instructions: Option<&str>,
     location: V2Location<'_>,
 ) -> Result<(), AppError> {
-    let body = instructions.map(|s| json!({ "instructions": s })).unwrap_or(json!({}));
+    let body = OpencodeV2CompactRequest { instructions: instructions.map(String::from) };
     let url = v2_session_url(base_url, session_id, "/compact", location);
     v2_session_request(
         http_client,
         &url,
         auth_header,
         reqwest::Method::POST,
-        Some(body),
+        Some(serde_json::to_value(&body).unwrap()),
         120,
     )
     .await
@@ -143,10 +145,15 @@ pub async fn v2_prompt(
     delivery: Option<&str>,
     location: V2Location<'_>,
 ) -> Result<Value, AppError> {
-    let mut body = json!({ "prompt": { "text": prompt_text } });
-    if let Some(d) = delivery {
-        body["delivery"] = json!(d);
-    }
+    let body = OpencodeV2PromptRequest {
+        prompt: OpencodeV2PromptText {
+            text: prompt_text.to_string(),
+            files: Vec::new(),
+            agent: None,
+            reference: None,
+        },
+        delivery: delivery.map(String::from),
+    };
 
     let url = v2_session_url(base_url, session_id, "/prompt", location);
     v2_session_request(
@@ -154,7 +161,7 @@ pub async fn v2_prompt(
         &url,
         auth_header,
         reqwest::Method::POST,
-        Some(body),
+        Some(serde_json::to_value(&body).unwrap()),
         120,
     )
     .await

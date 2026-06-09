@@ -40,13 +40,15 @@ use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 use reqwest::header::AUTHORIZATION;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
+
+use super::opencode_payloads::OpencodeLogEntry;
 
 const QUEUE_CAP: usize = 256;
 const SERVICE_NAME: &str = "aionui";
@@ -86,16 +88,16 @@ pub fn register_forwarder(
     let log_url = format!("{}/log", base_url.trim_end_matches('/'));
     tokio::spawn(async move {
         while let Some(entry) = rx.recv().await {
-            let body = json!({
-                "service": SERVICE_NAME,
-                "level": entry.level,
-                "message": entry.message,
-                "extra": {
+            let body = OpencodeLogEntry {
+                service: SERVICE_NAME.to_string(),
+                level: entry.level.to_string(),
+                message: entry.message.clone(),
+                extra: serde_json::json!({
                     "conversation_id": conversation_id,
                     "target": entry.target,
                     "fields": Value::Object(entry.extra),
-                },
-            });
+                }),
+            };
             let mut req = http_client.post(&log_url).timeout(Duration::from_secs(5));
             if let Some(ref h) = auth_header {
                 req = req.header(AUTHORIZATION, h.as_str());
