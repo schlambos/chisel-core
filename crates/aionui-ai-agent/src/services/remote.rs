@@ -2,8 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aionui_api_types::{
-    CreateRemoteAgentRequest, HandshakeResponse, ModelInfoPayload, RemoteAgentListItem, RemoteAgentResponse,
-    RemoteSessionInfo, RemoteSkillInfo, TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
+    CreateRemoteAgentRequest, HandshakeResponse, ModelInfoPayload, RemoteAgentListItem, RemoteAgentPluginInfoResponse,
+    RemoteAgentPluginStatus, RemoteAgentResponse, RemoteSessionInfo, RemoteSkillInfo, TestRemoteAgentConnectionRequest,
+    UpdateRemoteAgentRequest,
 };
 use aionui_common::{
     AppError, RemoteAgentAuthType, RemoteAgentProtocol, RemoteAgentStatus, decrypt_string, encrypt_string,
@@ -16,6 +17,7 @@ use ed25519_dalek::SigningKey;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use tokio_tungstenite::tungstenite;
 use tracing::warn;
+use uuid::Uuid;
 
 /// Service layer for Remote Agent CRUD and connection management.
 #[derive(Clone)]
@@ -533,6 +535,122 @@ impl RemoteAgentService {
         crate::manager::remote::opencode_provider_auth::delete_provider_auth(&client, &cfg, provider_id).await
     }
 
+    // ── OpenCode bridge plugin ────────────────────────────────────
+
+    /// Get-or-create the per-agent plugin install info. Mints a fresh
+    /// UUID token the first time it's called, then returns the
+    /// persisted token on subsequent calls. The plugin webserver
+    /// singleton is also ensured here so the returned `endpoint_url`
+    /// is one the plugin can actually dial.
+    pub async fn plugin_install_info(&self, id: &str) -> Result<RemoteAgentPluginInfoResponse, AppError> {
+        self.plugin_install_info_impl(id, /*rotate=*/ false).await
+    }
+
+    /// Issue a fresh plugin token, replacing the existing one. The
+    /// plugin webserver (which holds the validator closure) will
+    /// pick up the new token on its next request; in-flight plugin
+    /// sessions with the old token will see 401s and need to
+    /// reconnect. Mirrors `plugin_install_info` for the response
+    /// shape.
+    pub async fn rotate_plugin_token(&self, id: &str) -> Result<RemoteAgentPluginInfoResponse, AppError> {
+        self.plugin_install_info_impl(id, /*rotate=*/ true).await
+    }
+
+    /// Shared body for [`plugin_install_info`] / [`rotate_plugin_token`].
+    /// Loads the row, mints or re-uses the token, ensures the plugin
+    /// webserver is bound, builds the reachability plan + snippets,
+    /// and reads the live status snapshot.
+    async fn plugin_install_info_impl(
+        &self,
+        id: &str,
+        rotate: bool,
+    ) -> Result<RemoteAgentPluginInfoResponse, AppError> {
+        let row = self
+            .repo
+            .find_by_id(id)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::NotFound(format!("Remote agent '{id}' not found")))?;
+
+        // The plugin channel is OpenCode-only today; other protocols
+        // can't use the OpenCode plugin to begin with.
+        if parse_protocol(&row.protocol) != RemoteAgentProtocol::OpenCode {
+            return Err(AppError::BadRequest(
+                "Plugin channel is only supported for OpenCode remote agents".into(),
+            ));
+        }
+
+        // Mint or rotate the token. The DB column is plaintext
+        // (see migration 010) so the plugin webserver can do a
+        // SQL-equality lookup; the token is a locally generated
+        // random UUID, never user-supplied.
+        let mut token = row.plugin_token.clone().unwrap_or_default();
+        if rotate || token.is_empty() {
+            token = Uuid::new_v4().to_string();
+            self.repo.set_plugin_token(id, Some(&token)).await.map_err(db_err)?;
+        }
+
+        // Bring up the plugin webserver if it isn't already running.
+        // The validator closes over the same `repo` this service
+        // uses, so a token rotation we just persisted is immediately
+        // visible to the next inbound request.
+        let plan = crate::manager::remote::reachability::plan(&row.url);
+        let bind_addr = plan.bind_addr();
+        let repo_for_validator: Arc<dyn IRemoteAgentRepository> = self.repo.clone();
+        let validator: Arc<dyn crate::manager::remote::plugin::PluginTokenValidator> =
+            Arc::new(DbPluginTokenValidator {
+                repo: repo_for_validator,
+            });
+        let bound_addr = crate::manager::remote::plugin::ensure_plugin_server(bind_addr, validator)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to start plugin webserver: {e}")))?;
+        let bound_port = bound_addr.port();
+
+        // Build the advertised URL set. The endpoint URL is the
+        // first reachable candidate (same rule the local fs MCP
+        // uses); the renderer can show the full list for
+        // diagnostics.
+        let reachables = plan.reachables(bound_port);
+        let endpoint_url = reachables
+            .first()
+            .map(|r| r.public_url.clone())
+            .unwrap_or_else(|| format!("http://{bound_addr}/"));
+        let candidates: Vec<String> = reachables.into_iter().map(|r| r.public_url).collect();
+
+        // Snippets — single JSON object for the OpenCode config
+        // `plugin` key, and a `KEY=VALUE` env block the user
+        // can paste into the OpenCode process's environment.
+        let config_snippet = serde_json::to_string_pretty(&serde_json::json!({
+            "plugin": ["@chisl/chisl-opencode-plugin"]
+        }))
+        .map_err(|e| AppError::Internal(format!("config snippet serialise: {e}")))?;
+        let env_snippet = format!("AIONCORE_URL={endpoint_url}\nAIONCORE_TOKEN={token}\n");
+
+        // Live status snapshot.
+        let registry = crate::manager::remote::plugin::registry::global();
+        let state = registry.connection_state(id);
+        let connected = registry.connected(id);
+        let audit_count = registry.audit_count(id);
+        let status = RemoteAgentPluginStatus {
+            connected,
+            last_hello_at: state.last_hello_at_ms,
+            plugin_version: state.plugin_version,
+            opencode_version: state.opencode_version,
+            hooks: state.hooks,
+            events_connected: state.events_stream_open,
+            audit_count,
+        };
+
+        Ok(RemoteAgentPluginInfoResponse {
+            endpoint_url,
+            candidates,
+            token,
+            config_snippet,
+            env_snippet,
+            status,
+        })
+    }
+
     /// M12: start provider OAuth — returns `ProviderAuthAuthorization` (§8).
     pub async fn start_provider_oauth(
         &self,
@@ -662,6 +780,26 @@ impl RemoteAgentService {
 }
 
 // ── Validation ──────────────────────────────────────────────────
+
+/// Bridges `IRemoteAgentRepository::find_by_plugin_token` to the
+/// plugin webserver's [`PluginTokenValidator`] trait. Cheap to clone
+/// (just wraps the `Arc<dyn IRemoteAgentRepository>`), so the
+/// singleton plugin server can hold one across the process lifetime.
+struct DbPluginTokenValidator {
+    repo: Arc<dyn IRemoteAgentRepository>,
+}
+
+#[async_trait::async_trait]
+impl crate::manager::remote::plugin::PluginTokenValidator for DbPluginTokenValidator {
+    async fn resolve(&self, token: &str) -> Option<String> {
+        self.repo
+            .find_by_plugin_token(token)
+            .await
+            .ok()
+            .flatten()
+            .map(|row| row.id)
+    }
+}
 
 fn validate_create_request(req: &CreateRemoteAgentRequest) -> Result<(), AppError> {
     if req.name.trim().is_empty() {

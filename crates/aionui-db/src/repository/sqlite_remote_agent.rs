@@ -46,8 +46,9 @@ impl IRemoteAgentRepository for SqliteRemoteAgentRepository {
             "INSERT INTO remote_agents \
                 (id, name, protocol, url, auth_type, auth_token, allow_insecure, \
                  avatar, description, device_id, device_public_key, device_private_key, \
-                 device_token, status, last_connected_at, created_at, updated_at, tool_host) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 device_token, status, last_connected_at, created_at, updated_at, tool_host, \
+                 plugin_token) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(params.name)
@@ -67,6 +68,7 @@ impl IRemoteAgentRepository for SqliteRemoteAgentRepository {
         .bind(now)
         .bind(now)
         .bind(tool_host)
+        .bind(Option::<String>::None)
         .execute(&self.pool)
         .await?;
 
@@ -86,6 +88,7 @@ impl IRemoteAgentRepository for SqliteRemoteAgentRepository {
             device_token: params.device_token.map(String::from),
             status: status.to_string(),
             tool_host: tool_host.to_string(),
+            plugin_token: None,
             last_connected_at: None,
             created_at: now,
             updated_at: now,
@@ -162,6 +165,32 @@ impl IRemoteAgentRepository for SqliteRemoteAgentRepository {
 
         Ok(())
     }
+
+    async fn set_plugin_token(&self, id: &str, token: Option<&str>) -> Result<(), DbError> {
+        let now = aionui_common::now_ms();
+
+        let result = sqlx::query("UPDATE remote_agents SET plugin_token = ?, updated_at = ? WHERE id = ?")
+            .bind(token)
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("Remote agent '{id}' not found")));
+        }
+
+        Ok(())
+    }
+
+    async fn find_by_plugin_token(&self, token: &str) -> Result<Option<RemoteAgentRow>, DbError> {
+        let row = sqlx::query_as::<_, RemoteAgentRow>("SELECT * FROM remote_agents WHERE plugin_token = ? LIMIT 1")
+            .bind(token)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(row)
+    }
 }
 
 /// Merge partial update params into an existing row, returning a new instance.
@@ -184,6 +213,8 @@ fn merge_update(existing: RemoteAgentRow, params: UpdateRemoteAgentParams<'_>) -
         device_token: existing.device_token,
         status: existing.status,
         tool_host: params.tool_host.unwrap_or(&existing.tool_host).to_string(),
+        // Plugin token is owned by set_plugin_token; general updates preserve it.
+        plugin_token: existing.plugin_token,
         last_connected_at: existing.last_connected_at,
         created_at: existing.created_at,
         updated_at: now,
@@ -453,5 +484,82 @@ mod tests {
         let all = repo.list().await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, a2.id);
+    }
+
+    #[tokio::test]
+    async fn fresh_row_has_no_plugin_token() {
+        let (repo, _db) = setup().await;
+        let created = repo.create(sample_params()).await.unwrap();
+        assert!(
+            created.plugin_token.is_none(),
+            "newly created row must not have a token"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_and_find_by_plugin_token_roundtrip() {
+        let (repo, _db) = setup().await;
+        let created = repo.create(sample_params()).await.unwrap();
+
+        let token = "plugin-tok-1234";
+        repo.set_plugin_token(&created.id, Some(token)).await.unwrap();
+
+        let found = repo.find_by_plugin_token(token).await.unwrap();
+        let row = found.expect("find_by_plugin_token must resolve a freshly-set token");
+        assert_eq!(row.id, created.id);
+        assert_eq!(row.plugin_token.as_deref(), Some(token));
+
+        // find_by_id also reflects the new column.
+        let by_id = repo.find_by_id(&created.id).await.unwrap().unwrap();
+        assert_eq!(by_id.plugin_token.as_deref(), Some(token));
+    }
+
+    #[tokio::test]
+    async fn set_plugin_token_none_clears_it() {
+        let (repo, _db) = setup().await;
+        let created = repo.create(sample_params()).await.unwrap();
+        repo.set_plugin_token(&created.id, Some("abc")).await.unwrap();
+        repo.set_plugin_token(&created.id, None).await.unwrap();
+
+        let by_id = repo.find_by_id(&created.id).await.unwrap().unwrap();
+        assert!(by_id.plugin_token.is_none());
+        assert!(repo.find_by_plugin_token("abc").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn set_plugin_token_nonexistent_returns_not_found() {
+        let (repo, _db) = setup().await;
+        let err = repo.set_plugin_token("ra_does_not_exist", Some("x")).await.unwrap_err();
+        assert!(matches!(err, DbError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn find_by_plugin_token_unknown_returns_none() {
+        let (repo, _db) = setup().await;
+        // No row has this token.
+        let found = repo.find_by_plugin_token("never-set").await.unwrap();
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn plugin_token_is_isolated_per_agent() {
+        let (repo, _db) = setup().await;
+        let a1 = repo.create(sample_params()).await.unwrap();
+        let a2 = repo
+            .create(CreateRemoteAgentParams {
+                name: "Second",
+                ..sample_params()
+            })
+            .await
+            .unwrap();
+
+        repo.set_plugin_token(&a1.id, Some("t1")).await.unwrap();
+        repo.set_plugin_token(&a2.id, Some("t2")).await.unwrap();
+
+        // Same lookup must return the right row.
+        let r1 = repo.find_by_plugin_token("t1").await.unwrap().unwrap();
+        let r2 = repo.find_by_plugin_token("t2").await.unwrap().unwrap();
+        assert_eq!(r1.id, a1.id);
+        assert_eq!(r2.id, a2.id);
     }
 }

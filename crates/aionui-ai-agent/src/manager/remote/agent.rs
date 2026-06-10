@@ -32,6 +32,7 @@ use crate::manager::remote::opencode_models;
 use crate::manager::remote::opencode_question;
 use crate::manager::remote::opencode_stream;
 use crate::manager::remote::opencode_tool_call;
+use crate::manager::remote::plugin;
 use crate::manager::remote::subagent::{self, ChildSessionRegistry};
 use crate::protocol::events::{
     AcpPermissionEventData, AcpToolCallSessionUpdateKind, AgentStreamEvent, FinishEventData, OpencodeSubtaskStatus,
@@ -3702,13 +3703,24 @@ impl RemoteAgentManager {
             })
         };
 
+        // OpenCode bridge plugin: register the same shell approver
+        // under the agent's remote id so the plugin's
+        // `/tools/run_shell_streaming` SSE tool can gate commands
+        // through the same confirmation flow the local fs MCP uses.
+        // No-op when the agent row has no `remote_agent_id` (non-
+        // remote conversations never see the plugin).
+        if !self.remote_config.remote_agent_id.is_empty() {
+            plugin::registry::global()
+                .register_shell_approver(&self.remote_config.remote_agent_id, shell_approver.clone());
+        }
+
         match opencode_mcp::start_and_register(
             &self.http_client,
             base_url,
             auth_header,
             &conversation_id,
             &workspace,
-            Some(shell_approver),
+            Some(shell_approver.clone()),
             Some(elicitation_handler),
             snapshot_hook,
         )
@@ -5504,6 +5516,15 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
         if let Ok(mut guard) = self.local_fs_mcp.try_lock()
             && let Some(server) = guard.take()
         {
+            // OpenCode bridge plugin: drop the shell approver
+            // registration now that the conversation is going away.
+            // If a *different* conversation on the same agent row is
+            // still alive it'll have re-registered already (the
+            // registry's `register_shell_approver` is a replace).
+            // No-op for empty `remote_agent_id`.
+            if !self.remote_config.remote_agent_id.is_empty() {
+                plugin::registry::global().unregister_shell_approver(&self.remote_config.remote_agent_id);
+            }
             let http_client = self.http_client.clone();
             let base_url = normalize_base_url(&self.remote_config.url);
             let auth_header =

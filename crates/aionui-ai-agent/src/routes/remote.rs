@@ -24,8 +24,8 @@ use axum::routing::{get, post};
 
 use aionui_api_types::{
     AgentModeOption, ApiResponse, CreateRemoteAgentRequest, HandshakeResponse, ModelInfoPayload,
-    RemoteAgentHealthResponse, RemoteAgentListItem, RemoteAgentResponse, RemoteSessionInfo, RemoteSkillInfo,
-    TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
+    RemoteAgentHealthResponse, RemoteAgentListItem, RemoteAgentPluginInfoResponse, RemoteAgentResponse,
+    RemoteSessionInfo, RemoteSkillInfo, TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
 };
 use aionui_auth::CurrentUser;
 use aionui_common::AppError;
@@ -51,6 +51,8 @@ pub fn remote_agent_routes(state: RemoteAgentRouterState) -> Router {
             post(backfill_remote_history),
         )
         .route("/api/remote-agents/{id}/providers", get(fetch_provider_catalog))
+        .route("/api/remote-agents/{id}/plugin", get(plugin_info))
+        .route("/api/remote-agents/{id}/plugin/rotate-token", post(plugin_rotate_token))
         .route(
             "/api/remote-agents/{id}/providers/auth",
             get(fetch_provider_auth_methods),
@@ -435,4 +437,34 @@ async fn mark_loaded_and_respond(
 struct BackfillResult {
     inserted: usize,
     already_loaded: bool,
+}
+
+// ── OpenCode bridge plugin ─────────────────────────────────────
+
+/// `GET /api/remote-agents/{id}/plugin` — return the install info the
+/// renderer needs to wire the OpenCode plugin (endpoint URL, token,
+/// copy-paste snippets, live status). Mints a token on first call;
+/// subsequent calls return the same token until [`plugin_rotate_token`]
+/// is invoked.
+async fn plugin_info(
+    State(state): State<RemoteAgentRouterState>,
+    Path(id): Path<String>,
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<RemoteAgentPluginInfoResponse>>, AppError> {
+    let info = state.service.plugin_install_info(&id).await?;
+    Ok(Json(ApiResponse::ok(info)))
+}
+
+/// `POST /api/remote-agents/{id}/plugin/rotate-token` — issue a fresh
+/// plugin token, replacing the existing one. Returns the same shape
+/// as `plugin_info` so the renderer can update its UI in one round
+/// trip. Any in-flight plugin connection with the old token sees a
+/// 401 on its next request and must re-read the env to recover.
+async fn plugin_rotate_token(
+    State(state): State<RemoteAgentRouterState>,
+    Path(id): Path<String>,
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<RemoteAgentPluginInfoResponse>>, AppError> {
+    let info = state.service.rotate_plugin_token(&id).await?;
+    Ok(Json(ApiResponse::ok(info)))
 }

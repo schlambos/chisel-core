@@ -167,6 +167,73 @@ pub struct RemoteAgentHealthResponse {
     pub error: Option<String>,
 }
 
+/// Live plugin-channel status snapshot returned alongside
+/// [`RemoteAgentPluginInfoResponse`]. Drives the renderer-side indicator
+/// and is cheap to read (one mutex acquisition against an in-memory
+/// registry) so the renderer can poll it on its existing 5 s cadence
+/// without adding a network round-trip.
+#[derive(Debug, Serialize)]
+pub struct RemoteAgentPluginStatus {
+    /// True iff the plugin's events stream is currently open OR a `hello`
+    /// was recorded within the 60-second grace window. See
+    /// `manager::remote::plugin::PluginConnectionState::is_connected`.
+    pub connected: bool,
+    /// Wall-clock ms timestamp of the most recent `hello`, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_hello_at: Option<u64>,
+    /// Plugin version string from the most recent `hello`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_version: Option<String>,
+    /// OpenCode version string the plugin reported itself running on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opencode_version: Option<String>,
+    /// Hook surface the plugin registered at `hello` (e.g. `tool.before`,
+    /// `session.idle`). Useful for the renderer to surface a
+    /// "Plugin registered N hooks" tooltip.
+    pub hooks: Vec<String>,
+    /// True while the SSE event stream from the plugin is currently
+    /// connected. Distinct from `connected`: a recently-helloed plugin
+    /// with no live stream still counts as connected (grace window).
+    pub events_connected: bool,
+    /// Total entries in the in-memory audit ring buffer.
+    pub audit_count: u64,
+}
+
+/// Response for `GET /api/remote-agents/{id}/plugin` and the body of
+/// `POST /api/remote-agents/{id}/plugin/rotate-token`. Bundles the
+/// connection metadata the operator needs to wire up the OpenCode
+/// plugin — advertised URL, candidate list, auth token, copy-paste
+/// config + env snippets, and live status. The token is returned in
+/// full exactly once per mint/rotate; the renderer is responsible for
+/// surfacing it to the user in a "copy to clipboard" widget.
+#[derive(Debug, Serialize)]
+pub struct RemoteAgentPluginInfoResponse {
+    /// The URL the operator should paste into the plugin's
+    /// `AIONCORE_URL`. Equals the first reachability candidate for the
+    /// host's local IP discovery (loopback for the `AIONUI_LOCAL_FS_MCP_PUBLIC_URL`
+    /// override path).
+    pub endpoint_url: String,
+    /// All candidate URLs the plugin server considered when picking
+    /// `endpoint_url`, in priority order. The renderer can show this as
+    /// a "host" / "interface" list to help the user debug "plugin can't
+    /// reach AionCore" reports.
+    pub candidates: Vec<String>,
+    /// The bearer token the plugin must send in `Authorization: Bearer …`.
+    /// Minted on first call, rotated on the rotate endpoint. Stored
+    /// plaintext in the local SQLite (see migration 010).
+    pub token: String,
+    /// Pretty-printed JSON snippet for the user's `~/.config/opencode/config.json`
+    /// (or the equivalent). Single `{"plugin": ["@chisl/chisl-opencode-plugin"]}`
+    /// entry — the plugin reads `AIONCORE_URL` / `AIONCORE_TOKEN` from the
+    /// environment at load time.
+    pub config_snippet: String,
+    /// Multi-line `KEY=VALUE\nKEY=VALUE` snippet the user can paste into
+    /// their OpenCode process env.
+    pub env_snippet: String,
+    /// Live status snapshot (see [`RemoteAgentPluginStatus`]).
+    pub status: RemoteAgentPluginStatus,
+}
+
 /// Deserialize `Option<Option<T>>`:
 /// - JSON field absent → `None` (keep current value)
 /// - JSON `null` → `Some(None)` (clear the value)

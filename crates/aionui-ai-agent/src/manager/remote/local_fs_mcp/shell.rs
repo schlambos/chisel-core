@@ -132,13 +132,25 @@ pub enum ElicitationOutcome {
 }
 
 /// A resolved native shell invocation: the program plus the flag that makes
-/// it execute a command string.
-struct ShellSpec {
+/// it execute a command string. `pub(crate)` so the plugin webserver's
+/// streaming shell tool can spawn the same native shell the local fs
+/// MCP server uses, without duplicating the OS detection.
+pub(crate) struct ShellSpec {
     program: String,
     arg: &'static str,
     /// Human-readable `os/shell` label for the system hint and the
     /// confirmation dialog (e.g. `macos/zsh`, `windows/cmd.exe`).
     label: String,
+}
+
+impl ShellSpec {
+    /// Program path + the flag that takes a command string (e.g. `-c` for
+    /// `sh`/`zsh`/`bash`, `/C` for `cmd.exe`). Exposed so the plugin
+    /// webserver's streaming shell tool can spawn the same native shell the
+    /// local fs MCP server uses, without duplicating the OS detection.
+    pub(crate) fn parts(&self) -> (&str, &str) {
+        (self.program.as_str(), self.arg)
+    }
 }
 
 /// Strip a path down to its final component, handling both separators so
@@ -149,7 +161,7 @@ fn basename(path: &str) -> &str {
 }
 
 #[cfg(windows)]
-fn resolve_shell() -> ShellSpec {
+pub(crate) fn resolve_shell() -> ShellSpec {
     // Explicit override wins; PowerShell takes `-Command`, cmd.exe takes /C.
     if let Ok(custom) = std::env::var(SHELL_OVERRIDE_ENV).map(|v| v.trim().to_string())
         && !custom.is_empty()
@@ -180,7 +192,7 @@ fn resolve_shell() -> ShellSpec {
 }
 
 #[cfg(not(windows))]
-fn resolve_shell() -> ShellSpec {
+pub(crate) fn resolve_shell() -> ShellSpec {
     let shell = std::env::var(SHELL_OVERRIDE_ENV)
         .ok()
         .filter(|s| !s.trim().is_empty())

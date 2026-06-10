@@ -9,6 +9,14 @@ use serde::{Deserialize, Serialize};
 ///
 /// Sensitive fields (`auth_token`, `device_public_key`, `device_private_key`,
 /// `device_token`) are stored AES-encrypted; callers handle encryption/decryption.
+///
+/// `plugin_token` is intentionally stored as **plaintext** — see migration
+/// 010. The plugin webserver needs to resolve an incoming bearer token to
+/// the owning agent row via SQL equality, which the random-nonce AES-GCM
+/// scheme used for `auth_token` does not support. The token is a locally
+/// generated UUID that only authorises dial-back to the loopback-bound
+/// plugin webserver, so the residual risk of plaintext-on-disk is local
+/// read access to the SQLite file (which is already a full compromise).
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RemoteAgentRow {
     pub id: String,
@@ -38,6 +46,9 @@ pub struct RemoteAgentRow {
     /// inject client-side fs MCP, deny server tools) or "server" (use the
     /// OpenCode server's own tools). Ignored by non-opencode protocols.
     pub tool_host: String,
+    /// Plaintext plugin-channel bearer token (see migration 010). `None`
+    /// means the agent has never asked the service to mint a plugin token.
+    pub plugin_token: Option<String>,
     pub last_connected_at: Option<TimestampMs>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,

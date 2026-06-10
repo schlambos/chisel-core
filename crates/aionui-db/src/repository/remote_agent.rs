@@ -33,6 +33,17 @@ pub trait IRemoteAgentRepository: Send + Sync {
         status: &str,
         last_connected_at: Option<TimestampMs>,
     ) -> Result<(), DbError>;
+
+    /// Set or clear the plugin-channel bearer token (plaintext — see
+    /// migration 010 for the rationale). Returns `DbError::NotFound` if the
+    /// id doesn't exist. `None` clears the token.
+    async fn set_plugin_token(&self, id: &str, token: Option<&str>) -> Result<(), DbError>;
+
+    /// Resolve a plugin-channel bearer token to the owning agent row. The
+    /// token column is stored plaintext specifically so this equality lookup
+    /// works; the AES-GCM `auth_token` column cannot be searched this way.
+    /// Returns `None` if the token is unknown.
+    async fn find_by_plugin_token(&self, token: &str) -> Result<Option<RemoteAgentRow>, DbError>;
 }
 
 /// Parameters for creating a new remote agent.

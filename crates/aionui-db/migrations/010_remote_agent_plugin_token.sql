@@ -1,0 +1,17 @@
+-- Bridge plugin: per-agent plugin channel token.
+--
+-- The first-party OpenCode plugin (`@chisl/chisl-opencode-plugin`) running
+-- on a remote OpenCode instance dials back into AionCore's plugin webserver
+-- to receive lifecycle events and forward hook telemetry. Each agent
+-- workspace needs its own bearer token so the plugin server can identify
+-- which agent a request belongs to.
+--
+-- The token is generated locally (UUID v4) and stored as plaintext in the
+-- user's local SQLite database. This is intentionally a plaintext column
+-- (not encrypted) because the plugin server's token lookup
+-- (`find_by_plugin_token`) needs to do SQL equality, which a
+-- randomly-nonce'd AES-GCM scheme like the `auth_token` column uses
+-- would defeat. The threat model here is the local DB file itself: anyone
+-- with read access to it already owns the box, and the token only ever
+-- authorises dial-back to the loopback-bound plugin webserver.
+ALTER TABLE remote_agents ADD COLUMN plugin_token TEXT;

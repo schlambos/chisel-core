@@ -199,3 +199,190 @@ The conformance crate locks the SSE event surface above; the REST contracts belo
 
 1. **Version handshake.** OpenCode's `GET /global/health` returns `{ healthy, version }`. The SSE handshake (`server.connected`) does **not** include a version. The conformance suite pins against `opencode-ai-sdk-1.15.11` + live 1.15.13; deciding whether to tag the suite with a hard upper-bound version (and what to do when an upstream PR widens the union) is a follow-up. File an upstream request if a stable version field on `server.connected` becomes a release blocker.
 2. **Cost-distinct-from-tokens.** `session.next.step.ended` carries `cost: number` alongside the `tokens` block; the canonical `AssistantMessage` exposes both. No distinct `cost.updated` event is observed in capture-2026-06-02 — Chisl computes the rolling figure from `Session.cost` updates in `session.updated`. If a future server emits a dedicated cost event, add a fixture + handler.
+
+---
+
+## Chisl Plugin Channel (protocol v1)
+
+> **Status:** Plugin Bridge MVP — implementation in `crates/aionui-ai-agent/src/manager/remote/plugin/`.
+> **Last verified:** 2026-06-10 against `@opencode-ai/plugin@1.16.2` (matches `<chisl-root>/opencode-sdk-version.json::version`).
+> **Plugin package:** `@chisl/chisl-opencode-plugin` in `AionUi/packages/opencode-plugin/`.
+> **Wire types:** `manager/remote/plugin/protocol.rs` (Rust) and `packages/opencode-plugin/src/types.ts` (TS) — kept in lock-step.
+
+The plugin channel is the **control-plane companion** to the OpenCode → `local_fs_mcp` dial-back (which remains the data plane). The first-party OpenCode plugin running on the remote machine dials back into AionCore's plugin webserver over HTTP/SSE; the connection direction is therefore **remote → local**, the same direction the `local_fs_mcp` reachability layer already solves. The plugin reuses `manager/remote/reachability/` (ordered candidate IPs, dial-back measurement) — it does not introduce a second reachability solution. The `AIONUI_LOCAL_FS_MCP_PUBLIC_URL` env override (the same knob `local_fs_mcp` honours) wins over auto-discovery for tunnels and containers.
+
+The webserver is a process-wide singleton (`ensure_plugin_server` in `server.rs:204`); the bind address is `0.0.0.0:0` (all interfaces) by default and `127.0.0.1:0` (loopback) only when the `AIONUI_LOCAL_FS_MCP_PUBLIC_URL` override is in effect — there is no network-level access control, so the bearer token is the sole authentication gate. Multiple agents share the same listener and the same port — routing is by token, not by URL. The four routes below all share a single bearer-token middleware (`server.rs:275`) that maps the `Authorization: Bearer …` header back to a `remote_agent_id` via the `PluginTokenValidator` trait; the concrete implementation lives in `services::remote` and is backed by `IRemoteAgentRepository::find_by_plugin_token`, which performs a SQL equality lookup of a ~122-bit random UUIDv4 token. The lookup is not claimed to be constant-time — extracting a ~122-bit secret via timing side-channel is infeasible at this entropy, so a constant-time compare in the request path would add complexity without meaningful protection.
+
+### Endpoints
+
+| Method | Path | Purpose | Handling site |
+| --- | --- | --- | --- |
+| `POST` | `/plugin/hello` | Handshake. Body carries `protocolVersion`, `pluginVersion`, optional `opencodeVersion`, the declared `hooks` list, and the OpenCode-reported `project` (`{ directory, worktree? }`). Records version + hook surface in the per-agent `PluginConnectionState`; bumps `hello_count`; stamps `last_hello_at_ms`. Response is `{ ok: true, protocolVersion }`. A version mismatch is logged and accepted today (best-effort forward-compat); a future bump will switch this to a hard reject. | `server.rs:304` (`handle_hello`) |
+| `GET` | `/plugin/events` | SSE stream the host uses to push messages to the plugin. The first event is always a `ping` (`{"at": <ms>}`); subsequent events carry the host-side SSE event name + opaque JSON `data`. The stream guard flips `events_stream_open` true for the lifetime of the response and back to false on drop (60 s grace window after a recent `hello` keeps the agent in the "connected" UI state). Keep-alive interval is 15 s. | `server.rs:451` (`handle_events`), `server.rs:350` (`PluginEventsStream`) |
+| `POST` | `/plugin/result` | Fire-and-forget hook telemetry. Body is a discriminated union tagged on `kind` (see Wire shapes below). The server classifies the kind, builds a redacted `PluginAuditRecord` (`summary` ≤ 2048 chars; raw `args` / `output` are never recorded), and pushes it into the per-agent audit ring buffer. `PermissionAsk` returns `{ ok: true, status: "ask" }`; the other kinds return `{ ok: true }` with no `status` field. | `server.rs:462` (`handle_result`) |
+| `POST` | `/tools/run_shell_streaming` | SSE stream of a shell command the plugin wants executed locally. Body is `RunShellStreamingRequest` (`command`, optional `cwd`, `sessionId`, optional `callId`, optional `timeoutSecs` — default 120 s, hard-capped at 1 h). The command is gated through the same `ShellApprover` the local fs MCP uses (`ShellApproval::{Allow, Reject, TimedOut}`); on `Allow` the child process is spawned with the same clean-CLI builder. SSE events: `chunk` (`{ stream: "stdout"\|"stderr", data }`), `done` (`{ exitCode, isError, truncated }`), and `error` (`{ message }`). Total streamed bytes are capped at 4 MiB; beyond that, the stream is truncated and the final `done` carries `truncated: true` (the process is still drained so the real exit code is observed). A failed spawn or missing approver emits a synthetic `error` + `done {exitCode: null, isError: true, truncated: false}` pair so the plugin's stream consumer always sees a terminal event. | `server.rs:568` (`handle_run_shell_streaming`), `shell_stream.rs:140` (`run_shell_streaming`) |
+
+### Wire shapes (camelCase JSON)
+
+All payloads are `#[serde(rename_all = "camelCase")]` in Rust and TS-native camelCase; the renderer-facing REST API continues to use snake_case. The shapes below are the source of truth — they are pinned by `manager/remote/plugin/protocol.rs` and mirrored by `packages/opencode-plugin/src/types.ts`.
+
+**`POST /plugin/hello` — request**
+
+```jsonc
+{
+  "protocolVersion": 1,
+  "pluginVersion": "0.1.0",
+  "opencodeVersion": "1.16.2",  // optional
+  "hooks": ["event", "tool.execute.before", "tool.execute.after",
+            "permission.ask", "chat.message",
+            "experimental.chat.system.transform"],
+  "project": {                    // optional; disambiguates the agent row
+                                // when one host serves multiple projects
+    "directory": "/path/to/worktree",
+    "worktree": "feature/foo"    // optional
+  }
+}
+```
+
+**`POST /plugin/hello` — response**
+
+```jsonc
+{ "ok": true, "protocolVersion": 1 }
+```
+
+**`GET /plugin/events` — SSE events**
+
+SSE envelope: `event: <name>\ndata: <json>\n\n`. The first event the server emits is always:
+
+```
+event: ping
+data: {"at": 1700000000000}
+```
+
+The host can push arbitrary event names with opaque JSON `data`; the plugin interprets them per its own schema. Today the only contractually-pushed event is `context.update` (carrying `{ sessionID?: string, system?: string[], note?: string }` — strings are appended to the target bucket, not replaced; `note` is debug-only). Other host pushes ride the same wire format.
+
+**`POST /plugin/result` — request** (discriminated on `kind`, camelCase fields)
+
+```jsonc
+// kind: "toolBefore" — fires before a tool executes
+{
+  "kind": "toolBefore",
+  "tool": "bash",
+  "sessionId": "ses_…",
+  "callId": "call_…",
+  "args": { /* opaque tool args */ }
+}
+
+// kind: "toolAfter" — fires after a tool finishes
+{
+  "kind": "toolAfter",
+  "tool": "bash",
+  "sessionId": "ses_…",
+  "callId": "call_…",
+  "args": { /* opaque tool args */ },
+  "title": "…",                  // optional
+  "outputLen": 1234,             // optional — output length in bytes
+  "outputPreview": "first 2 KiB…",// optional — capped at OUTPUT_PREVIEW_MAX (2048)
+  "metadata": { /* opaque */ }   // optional
+}
+
+// kind: "event" — raw OpenCode event JSON. The plugin already filters
+// to the small set we care about (FORWARDED_EVENT_TYPES:
+// file.watcher.updated, session.idle, message.part.updated), so the
+// host doesn't re-implement the OpenCode event grammar.
+{
+  "kind": "event",
+  "event": { "type": "file.watcher.updated", "properties": { … } }
+}
+
+// kind: "permissionAsk" — MVP policy: respond with status "ask" and let
+// OpenCode's own permission flow take over. A richer policy engine
+// (auto-allow lists, per-tool rules, etc.) is a documented follow-up.
+{
+  "kind": "permissionAsk",
+  "permission": { /* the OpenCode PermissionRequest the plugin is asking about */ }
+}
+```
+
+**`POST /plugin/result` — response**
+
+```jsonc
+// non-permission kinds
+{ "ok": true }
+
+// PermissionAsk — MVP passthrough
+{ "ok": true, "status": "ask" }   // "allow" / "deny" are reserved for future policy
+```
+
+**`POST /tools/run_shell_streaming` — request**
+
+```jsonc
+{
+  "command": "make build",
+  "cwd": "/path/to/workspace",  // optional — overrides the agent's default workspace
+  "sessionId": "ses_…",
+  "callId": "call_…",           // optional — for audit correlation
+  "timeoutSecs": 300            // optional — default 120, hard cap 3600
+}
+```
+
+**`POST /tools/run_shell_streaming` — SSE response**
+
+```
+event: chunk
+data: {"stream": "stdout", "data": "…"}
+
+event: chunk
+data: {"stream": "stderr", "data": "…"}
+
+event: done
+data: {"exitCode": 0, "isError": false, "truncated": false}
+
+// or, on approver reject / spawn failure / timeout:
+event: error
+data: {"message": "shell command rejected by user"}
+
+event: done
+data: {"exitCode": null, "isError": true, "truncated": false}
+```
+
+### Audit ring buffer
+
+Each agent has an in-memory `VecDeque<PluginAuditRecord>` capped at **`AUDIT_RING_CAP = 500`** entries (`registry.rs:35`). On overflow the oldest entry is `pop_front`'d silently. The `PluginAuditRecord` shape is:
+
+```ts
+{
+  kind: string;          // "tool.before" | "tool.after" | "event" |
+                         //  "permission.ask" | "shell.request"
+  tool?: string;         // omitted for non-tool events
+  sessionId?: string;
+  callId?: string;
+  atMs: number;          // wall-clock ms
+  summary: string;       // ≤ 2048 chars; raw args/output NEVER recorded
+}
+```
+
+`record_audit` and `audit_records` are the public accessors. **Production logs do not contain the audit records** — they are a UI-only artifact surfaced through `RemoteAgentPluginStatus.audit_count` and the in-memory snapshot. The `truncate_summary` helper (`server.rs:554`) and `truncate_command_preview` helper (`server.rs:617`, 80-char cap for shell commands) ensure the `summary` field never explodes.
+
+### Permission.ask MVP policy
+
+The `PermissionAsk` variant on `/plugin/result` is the MVP: AionCore responds with `{ ok: true, status: "ask" }` and the OpenCode native permission flow (renderer's Approvals queue) takes over. The status field in the response is currently always `"ask"`; `"allow"` and `"deny"` are reserved wire values for the future policy engine. This is intentionally the lightest correct implementation — see `server.rs:515-529` for the mapping. The plugin's `permission.ask` hook (`packages/opencode-plugin/src/capabilities.ts:152`) only writes `output.status` when the response carries one of the three valid values; on a network error or timeout, the catch leaves `output.status` untouched so OpenCode falls back to its native prompt.
+
+### Connection direction & reachability
+
+The plugin channel is the **opposite direction** from the standard AionCore → remote-OpenCode SSE: the remote plugin dials back into AionCore. The URL the plugin dials is the first reachable candidate from `manager/remote/reachability::plan(&row.url)` — the same machinery that picks the bind address for `local_fs_mcp`. The `AIONUI_LOCAL_FS_MCP_PUBLIC_URL` env var overrides the auto-discovered address for tunnels and containers. The bind address is `127.0.0.1` for the loopback path and the first candidate's interface IP for the LAN path; the webserver is brought up lazily on the first call to `plugin_install_info`.
+
+### Bearer auth
+
+Every plugin-channel route requires `Authorization: Bearer <token>` where `<token>` is the per-agent `plugin_token` column on the `remote_agents` table (see migration 010). Token resolution is constant-time at the validator layer; the middleware does a length pre-check (`token.len() < 8` → 401) so a tiny probing token cannot short-circuit the DB lookup. A failure returns `401 Unauthorized` with body `{ success: false, error: "missing or invalid bearer token", code: "UNAUTHORIZED" }`. There is no rate limiting at the webserver layer today — the renderer is the gate.
+
+Tokens are minted (UUIDv4) on the first call to `GET /api/remote-agents/{id}/plugin` and stored plaintext in SQLite so the validator can do an equality lookup; rotation is via `POST /api/remote-agents/{id}/plugin/rotate-token`, which mints a fresh UUID, persists it, and returns the same response shape. The plugin webserver's validator closure reads the same `IRemoteAgentRepository`, so a freshly persisted token is immediately visible to the next inbound request. In-flight plugin sessions holding the old token see 401s and must re-read the env to recover (the SSE loop reconnects with exponential backoff).
+
+### REST surface for AionUi
+
+| Endpoint | Purpose | Handling site |
+| --- | --- | --- |
+| `GET  /api/remote-agents/{id}/plugin` | Return the install info the renderer needs to wire the OpenCode plugin: `endpoint_url` (first reachability candidate), full `candidates` list, the `token` (returned in full exactly once per mint/rotate), the `config_snippet` (single `{"plugin": ["@chisl/chisl-opencode-plugin"]}` JSON object), the `env_snippet` (`AIONCORE_URL=…\nAIONCORE_TOKEN=…\n`), and a live `status` snapshot (`RemoteAgentPluginStatus`: `connected`, `last_hello_at`, `plugin_version`, `opencode_version`, `hooks`, `events_connected`, `audit_count`). Mints a token on first call; subsequent calls return the same token. | `routes/remote.rs:449` (`plugin_info`); `services/remote.rs:545` (`plugin_install_info`); `api-types/remote_agent.rs:210` |
+| `POST /api/remote-agents/{id}/plugin/rotate-token` | Issue a fresh plugin token, replacing the existing one. Returns the same `RemoteAgentPluginInfoResponse` shape so the renderer can update its UI in one round-trip. | `routes/remote.rs:463` (`plugin_rotate_token`); `services/remote.rs:555` (`rotate_plugin_token`) |
+
+Both routes are mounted under the same `RemoteAgentRouterState` as the rest of the remote-agent REST surface; the renderer is responsible for the CSRF / auth gating that already wraps these endpoints.
