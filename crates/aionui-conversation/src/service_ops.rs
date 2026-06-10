@@ -272,9 +272,7 @@ impl ConversationService {
         query: &str,
         limit: Option<u32>,
     ) -> Result<serde_json::Value, AppError> {
-        self.task(conversation_id)?
-            .remote_find_files(query, limit)
-            .await
+        self.task(conversation_id)?.remote_find_files(query, limit).await
     }
 
     /// M13: text search on the remote OpenCode workspace.
@@ -284,9 +282,7 @@ impl ConversationService {
         pattern: &str,
         limit: Option<u32>,
     ) -> Result<serde_json::Value, AppError> {
-        self.task(conversation_id)?
-            .remote_find_text(pattern, limit)
-            .await
+        self.task(conversation_id)?.remote_find_text(pattern, limit).await
     }
 
     /// M13: symbol search on the remote OpenCode workspace.

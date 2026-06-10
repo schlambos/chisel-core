@@ -68,10 +68,7 @@ fn main() {
         .and_then(|v| v.as_str())
         .expect("opencode-sdk-version.json is missing required `version` field");
     let binary = parsed.get("binary").and_then(|v| v.as_str()).unwrap_or("");
-    let last_verified = parsed
-        .get("lastVerified")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let last_verified = parsed.get("lastVerified").and_then(|v| v.as_str()).unwrap_or("");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("cargo sets OUT_DIR for build scripts"));
     let out_path = out_dir.join(OUT_FILE);
@@ -112,4 +109,3 @@ fn main() {
         );
     }
 }
-

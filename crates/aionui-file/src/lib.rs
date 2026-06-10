@@ -11,11 +11,11 @@ pub mod watch_service;
 pub use path_safety::{has_traversal, validate_path, validate_path_for_write};
 pub use routes::{FileRouterState, file_routes};
 pub use service::FileService;
+pub use snapshot_service::SnapshotService;
 pub use snapshot_service::restore_plan::{
     RestorePathEntry, RestorePathOperation, RestorePlanUnsupportedCoverage, ToolCallRestorePlan,
     build_tool_call_restore_plan, build_tool_call_restore_plan_from_ledger_json, restore_plan_is_actionable,
 };
-pub use snapshot_service::SnapshotService;
 pub use traits::{
     FileServiceRef, FileWatchServiceRef, IFileService, IFileWatchService, ISnapshotService, SnapshotServiceRef,
 };

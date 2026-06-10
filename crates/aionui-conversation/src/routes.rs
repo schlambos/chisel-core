@@ -53,14 +53,8 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
         // workspace git repo directly (no per-conversation `init`) and
         // returns a unified-diff payload or a `mode = "not-git"` signal
         // so the UI can prompt the user to call `/vcs/init`.
-        .route(
-            "/api/conversations/{id}/workspace/vcs",
-            get(get_workspace_vcs),
-        )
-        .route(
-            "/api/conversations/{id}/workspace/vcs/init",
-            post(init_workspace_vcs),
-        )
+        .route("/api/conversations/{id}/workspace/vcs", get(get_workspace_vcs))
+        .route("/api/conversations/{id}/workspace/vcs/init", post(init_workspace_vcs))
         // Confirmation system
         .route("/api/conversations/{id}/confirmations", get(list_confirmations))
         .route("/api/conversations/{id}/confirmations/{callId}/confirm", post(confirm))
@@ -322,10 +316,7 @@ async fn revert_tool_call(
     if req.tool_call_id.trim().is_empty() {
         return Err(AppError::BadRequest("tool_call_id must not be empty".into()));
     }
-    let result = state
-        .service
-        .revert_tool_call(&user.id, &id, &req.tool_call_id)
-        .await?;
+    let result = state.service.revert_tool_call(&user.id, &id, &req.tool_call_id).await?;
     Ok(Json(ApiResponse::ok(result)))
 }
 
@@ -366,8 +357,7 @@ async fn get_workspace_vcs(
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<WorkspaceVcsResponse>>, AppError> {
     let ws = state.service.get_workspace_path(&id).await?;
-    let deps = crate::snapshot_deps::get()
-        .ok_or_else(|| AppError::Internal("Snapshot service not wired".into()))?;
+    let deps = crate::snapshot_deps::get().ok_or_else(|| AppError::Internal("Snapshot service not wired".into()))?;
     let resp = deps.snapshot_service.workspace_vcs_status(&ws).await?;
     Ok(Json(ApiResponse::ok(resp)))
 }
@@ -378,8 +368,7 @@ async fn init_workspace_vcs(
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let ws = state.service.get_workspace_path(&id).await?;
-    let deps = crate::snapshot_deps::get()
-        .ok_or_else(|| AppError::Internal("Snapshot service not wired".into()))?;
+    let deps = crate::snapshot_deps::get().ok_or_else(|| AppError::Internal("Snapshot service not wired".into()))?;
     deps.snapshot_service.workspace_vcs_init(&ws).await?;
     Ok(Json(ApiResponse::ok(())))
 }

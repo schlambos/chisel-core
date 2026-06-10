@@ -463,9 +463,10 @@ pub(super) fn commit_tool_changes(
             let target = head
                 .target()
                 .ok_or_else(|| AppError::Internal("HEAD has no target".into()))?;
-            vec![repo
-                .find_commit(target)
-                .map_err(|e| AppError::Internal(format!("Failed to find HEAD commit: {}", e)))?]
+            vec![
+                repo.find_commit(target)
+                    .map_err(|e| AppError::Internal(format!("Failed to find HEAD commit: {}", e)))?,
+            ]
         }
         Err(_) => Vec::new(),
     };
@@ -526,19 +527,11 @@ pub(super) fn revert_files_from_commit(
                 if abs_path.exists() {
                     if abs_path.is_dir() {
                         std::fs::remove_dir(&abs_path).map_err(|e| {
-                            AppError::Internal(format!(
-                                "Failed to remove directory '{}': {}",
-                                abs_path.display(),
-                                e
-                            ))
+                            AppError::Internal(format!("Failed to remove directory '{}': {}", abs_path.display(), e))
                         })?;
                     } else {
                         std::fs::remove_file(&abs_path).map_err(|e| {
-                            AppError::Internal(format!(
-                                "Failed to remove file '{}': {}",
-                                abs_path.display(),
-                                e
-                            ))
+                            AppError::Internal(format!("Failed to remove file '{}': {}", abs_path.display(), e))
                         })?;
                     }
                 }
@@ -1242,9 +1235,21 @@ mod tests {
         assert!(entry.additions >= 2, "expected >= 2 additions, got {}", entry.additions);
         assert!(entry.deletions >= 1, "expected >= 1 deletion, got {}", entry.deletions);
         // Unified-diff headers must be present for any downstream parser.
-        assert!(entry.patch.contains("--- a/hello.txt"), "patch missing '---' header:\n{}", entry.patch);
-        assert!(entry.patch.contains("+++ b/hello.txt"), "patch missing '+++' header:\n{}", entry.patch);
-        assert!(entry.patch.contains("@@"), "patch missing hunk header:\n{}", entry.patch);
+        assert!(
+            entry.patch.contains("--- a/hello.txt"),
+            "patch missing '---' header:\n{}",
+            entry.patch
+        );
+        assert!(
+            entry.patch.contains("+++ b/hello.txt"),
+            "patch missing '+++' header:\n{}",
+            entry.patch
+        );
+        assert!(
+            entry.patch.contains("@@"),
+            "patch missing hunk header:\n{}",
+            entry.patch
+        );
     }
 
     #[test]

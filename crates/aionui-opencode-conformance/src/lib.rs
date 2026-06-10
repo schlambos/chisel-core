@@ -694,7 +694,10 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn sdk_version_pin_is_populated() {
-        assert!(!OPENCODE_SDK_VERSION.is_empty(), "OPENCODE_SDK_VERSION must be non-empty (build.rs failed silently?)");
+        assert!(
+            !OPENCODE_SDK_VERSION.is_empty(),
+            "OPENCODE_SDK_VERSION must be non-empty (build.rs failed silently?)"
+        );
         assert!(
             OPENCODE_SDK_VERSION.contains('.'),
             "OPENCODE_SDK_VERSION {OPENCODE_SDK_VERSION:?} does not look like a semver"
@@ -721,8 +724,8 @@ mod tests {
         let package_json_path = chisl_root.join("AionUi").join("package.json");
         let raw = std::fs::read_to_string(&package_json_path)
             .unwrap_or_else(|err| panic!("read {}: {err}", package_json_path.display()));
-        let parsed: serde_json::Value = serde_json::from_str(&raw)
-            .unwrap_or_else(|err| panic!("parse {}: {err}", package_json_path.display()));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or_else(|err| panic!("parse {}: {err}", package_json_path.display()));
         let dev = parsed
             .get("devDependencies")
             .and_then(|v| v.get(OPENCODE_SDK_PACKAGE))

@@ -59,7 +59,10 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
         .route("/api/conversations/{id}/opencode/file/content", post(read_remote_file))
         .route("/api/conversations/{id}/opencode/find/files", get(find_remote_files))
         .route("/api/conversations/{id}/opencode/find/text", get(find_remote_text))
-        .route("/api/conversations/{id}/opencode/find/symbols", get(find_remote_symbols))
+        .route(
+            "/api/conversations/{id}/opencode/find/symbols",
+            get(find_remote_symbols),
+        )
         .with_state(state)
 }
 
@@ -483,10 +486,7 @@ async fn find_remote_files(
     Query(query): Query<RemoteFindFilesQuery>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .remote_find_files(&id, &query.query, query.limit)
-            .await?,
+        state.service.remote_find_files(&id, &query.query, query.limit).await?,
     )))
 }
 
@@ -504,10 +504,7 @@ async fn find_remote_text(
     Query(query): Query<RemoteFindTextQuery>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     Ok(Json(ApiResponse::ok(
-        state
-            .service
-            .remote_find_text(&id, &query.pattern, query.limit)
-            .await?,
+        state.service.remote_find_text(&id, &query.pattern, query.limit).await?,
     )))
 }
 

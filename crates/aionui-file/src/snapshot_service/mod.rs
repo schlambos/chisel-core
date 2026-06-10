@@ -87,11 +87,7 @@ impl SnapshotService {
     /// Requires that exactly one workspace is tracked (per-conversation
     /// scoping). Callers that need to scope by workspace key should resolve
     /// the workspace explicitly and use the trait API.
-    pub async fn commit_tool_snapshot(
-        &self,
-        tool_call_id: &str,
-        changed_files: &[String],
-    ) -> Result<String, AppError> {
+    pub async fn commit_tool_snapshot(&self, tool_call_id: &str, changed_files: &[String]) -> Result<String, AppError> {
         let state = get_single_workspace(&self.workspaces)?;
         let tool_call_id = tool_call_id.to_owned();
         let files: Vec<String> = changed_files.to_vec();
@@ -115,11 +111,7 @@ impl SnapshotService {
     /// in the **parent** of `commit_sha`. Files created by that tool call
     /// (not present in the parent tree) are deleted from disk. The rest of
     /// the working tree is left untouched.
-    pub async fn revert_to_tool_snapshot(
-        &self,
-        commit_sha: &str,
-        files_to_revert: &[String],
-    ) -> Result<(), AppError> {
+    pub async fn revert_to_tool_snapshot(&self, commit_sha: &str, files_to_revert: &[String]) -> Result<(), AppError> {
         let state = get_single_workspace(&self.workspaces)?;
         let commit_sha = commit_sha.to_owned();
         let files: Vec<String> = files_to_revert.to_vec();
@@ -214,11 +206,7 @@ impl SnapshotService {
             }
 
             let repo = Repository::open(&canonical).map_err(|e| {
-                AppError::Internal(format!(
-                    "Failed to open git repo at {}: {}",
-                    canonical.display(),
-                    e
-                ))
+                AppError::Internal(format!("Failed to open git repo at {}: {}", canonical.display(), e))
             })?;
 
             let entries = helpers::workspace_diff(&repo)?;
@@ -552,15 +540,8 @@ mod tests {
             let sig = Signature::now("seed", "seed@test").unwrap();
             let head_oid = repo.head().unwrap().target().unwrap();
             let parent = repo.find_commit(head_oid).unwrap();
-            repo.commit(
-                Some("HEAD"),
-                &sig,
-                &sig,
-                "add unrelated",
-                &tree,
-                &[&parent],
-            )
-            .unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "add unrelated", &tree, &[&parent])
+                .unwrap();
         }
 
         let svc = SnapshotService::new();

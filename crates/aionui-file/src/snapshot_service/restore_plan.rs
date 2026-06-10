@@ -70,25 +70,16 @@ impl RestorePlanUnsupportedCoverage {
     }
 }
 
-fn parse_commit<'a>(
-    repo: &'a Repository,
-    commit_sha: &str,
-) -> Result<Commit<'a>, (Vec<String>, Vec<String>)> {
+fn parse_commit<'a>(repo: &'a Repository, commit_sha: &str) -> Result<Commit<'a>, (Vec<String>, Vec<String>)> {
     let oid = match git2::Oid::from_str(commit_sha) {
         Ok(o) => o,
         Err(e) => {
-            return Err((
-                vec![format!("invalid commit SHA '{commit_sha}': {e}")],
-                Vec::new(),
-            ));
+            return Err((vec![format!("invalid commit SHA '{commit_sha}': {e}")], Vec::new()));
         }
     };
     match repo.find_commit(oid) {
         Ok(c) => Ok(c),
-        Err(e) => Err((
-            vec![format!("commit not found '{commit_sha}': {e}")],
-            Vec::new(),
-        )),
+        Err(e) => Err((vec![format!("commit not found '{commit_sha}': {e}")], Vec::new())),
     }
 }
 
@@ -284,15 +275,10 @@ mod tests {
         let tree_oid = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_oid).unwrap();
         let sig = Signature::now("seed", "seed@test").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "seed", &tree, &[])
-            .unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "seed", &tree, &[]).unwrap();
     }
 
-    fn tool_commit(
-        repo: &Repository,
-        tool_call_id: &str,
-        files: &[&str],
-    ) -> String {
+    fn tool_commit(repo: &Repository, tool_call_id: &str, files: &[&str]) -> String {
         super::super::helpers::commit_tool_changes(
             repo,
             tool_call_id,
@@ -373,8 +359,7 @@ mod tests {
             let tree_oid = index.write_tree().unwrap();
             let tree = repo.find_tree(tree_oid).unwrap();
             let sig = Signature::now("seed", "seed@test").unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, "seed", &tree, &[])
-                .unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "seed", &tree, &[]).unwrap();
         }
         std::fs::write(tmp.path().join("bin.dat"), [9u8, 8, 7, 6]).unwrap();
         let repo = Repository::open(tmp.path()).unwrap();

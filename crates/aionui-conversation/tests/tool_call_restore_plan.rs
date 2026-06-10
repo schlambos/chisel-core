@@ -319,7 +319,11 @@ async fn restore_plan_round_trip_returns_read_only_preview() {
     assert!(entry.prior_content_restorable, "Modify should expose parent content");
     assert!(!entry.preview_blocked, "text file must not be preview-blocked");
     assert!(entry.source_commit_sha.is_some(), "parent commit must be reported");
-    assert!(detail.warnings.is_empty(), "no warnings expected: {:?}", detail.warnings);
+    assert!(
+        detail.warnings.is_empty(),
+        "no warnings expected: {:?}",
+        detail.warnings
+    );
     assert!(detail.errors.is_empty(), "no errors expected: {:?}", detail.errors);
 
     // Read-only invariant: the file must still hold the post-tool

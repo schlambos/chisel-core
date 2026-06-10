@@ -1085,16 +1085,8 @@ impl ConversationService {
         //    b) process-global registry (production path —
         //       `aionui-app::services` calls `snapshot_deps::set` at startup)
         //    c) neither → 500-style "service not configured"
-        let per_service_svc = self
-            .snapshot_service
-            .read()
-            .ok()
-            .and_then(|g| g.clone());
-        let per_service_repo = self
-            .tool_snapshot_repo
-            .read()
-            .ok()
-            .and_then(|g| g.clone());
+        let per_service_svc = self.snapshot_service.read().ok().and_then(|g| g.clone());
+        let per_service_repo = self.tool_snapshot_repo.read().ok().and_then(|g| g.clone());
         let global = crate::snapshot_deps::get();
         let snapshot_service = per_service_svc
             .or_else(|| global.as_ref().map(|d| d.snapshot_service.clone()))
