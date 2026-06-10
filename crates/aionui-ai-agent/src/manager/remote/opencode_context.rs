@@ -35,11 +35,24 @@ pub fn server_directory(cfg: &RemoteAgentConfig, workspace: &str) -> Option<Stri
 
 /// Append V1 `directory` query param when server-tools mode is active.
 pub fn append_v1_directory(url: &str, cfg: &RemoteAgentConfig, workspace: &str) -> String {
-    let Some(dir) = server_directory(cfg, workspace) else {
-        return url.to_string();
-    };
-    let sep = if url.contains('?') { '&' } else { '?' };
-    format!("{url}{sep}directory={}", encode_query_value(&dir))
+    append_v1_directory_value(url, server_directory(cfg, workspace).as_deref())
+}
+
+/// Append a pre-computed V1 `directory` query param. No-op when `directory`
+/// is `None` or empty. Callers that resolve the directory once up-front
+/// (e.g. before moving into a detached `tokio::spawn` where `&self` is
+/// unavailable) use this instead of re-deriving it from config — see the
+/// permission/question reply paths in `agent.rs`, which MUST be scoped to
+/// the same per-directory OpenCode app instance as the session that raised
+/// them or the reply 404s with `PermissionNotFoundError`.
+pub fn append_v1_directory_value(url: &str, directory: Option<&str>) -> String {
+    match directory {
+        Some(dir) if !dir.trim().is_empty() => {
+            let sep = if url.contains('?') { '&' } else { '?' };
+            format!("{url}{sep}directory={}", encode_query_value(dir))
+        }
+        _ => url.to_string(),
+    }
 }
 
 /// Append V2 `location[directory]` query param when server-tools mode is active.
@@ -48,10 +61,7 @@ pub fn append_v2_location(url: &str, cfg: &RemoteAgentConfig, workspace: &str) -
         return url.to_string();
     };
     let sep = if url.contains('?') { '&' } else { '?' };
-    format!(
-        "{url}{sep}location[directory]={}",
-        encode_query_value(&dir)
-    )
+    format!("{url}{sep}location[directory]={}", encode_query_value(&dir))
 }
 
 #[cfg(test)]

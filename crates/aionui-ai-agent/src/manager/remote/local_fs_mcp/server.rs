@@ -576,7 +576,9 @@ mod tests {
         assert_eq!(resp.status(), 401);
     }
 
-    async fn boot_with_approver(approver: Option<std::sync::Arc<dyn ShellApprover>>) -> (TempDir, LocalFsMcpServer, String) {
+    async fn boot_with_approver(
+        approver: Option<std::sync::Arc<dyn ShellApprover>>,
+    ) -> (TempDir, LocalFsMcpServer, String) {
         let dir = tempfile::tempdir().unwrap();
         let token = "test-token-xyz".to_string();
         let server = LocalFsMcpServer::start(
@@ -639,10 +641,7 @@ mod tests {
     async fn initialize_negotiates_protocol_version() {
         let (_dir, _server, url) = boot().await;
         let client = Client::new();
-        for (client_ver, expected) in [
-            ("2024-11-05", "2024-11-05"),
-            ("2025-03-26", "2025-03-26"),
-        ] {
+        for (client_ver, expected) in [("2024-11-05", "2024-11-05"), ("2025-03-26", "2025-03-26")] {
             let resp = client
                 .post(&url)
                 .json(&json!({

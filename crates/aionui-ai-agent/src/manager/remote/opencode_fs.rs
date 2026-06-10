@@ -32,7 +32,10 @@ fn authed_post_json(
     body: Value,
     timeout_secs: u64,
 ) -> reqwest::RequestBuilder {
-    let mut req = http_client.post(url).json(&body).timeout(Duration::from_secs(timeout_secs));
+    let mut req = http_client
+        .post(url)
+        .json(&body)
+        .timeout(Duration::from_secs(timeout_secs));
     if let Some(h) = auth_header {
         req = req.header(AUTHORIZATION, h);
     }
@@ -85,7 +88,10 @@ pub async fn list_files(
     let auth = build_auth_header(&cfg.auth_type, cfg.auth_token.as_deref());
     let mut url = append_v1_directory(&format!("{base_url}/file"), cfg, workspace);
     let sep = if url.contains('?') { '&' } else { '?' };
-    url.push_str(&format!("{sep}path={}", super::opencode_context::encode_query_value(path)));
+    url.push_str(&format!(
+        "{sep}path={}",
+        super::opencode_context::encode_query_value(path)
+    ));
     let resp = authed_get(http_client, &url, auth.as_deref(), 30)
         .send()
         .await

@@ -127,7 +127,9 @@ pub async fn steal_session(
     session_id: &str,
 ) -> Result<String, AppError> {
     let url = format!("{base_url}/sync/steal");
-    let body = OpencodeSyncStealRequest { session_id: session_id.to_string() };
+    let body = OpencodeSyncStealRequest {
+        session_id: session_id.to_string(),
+    };
     let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(15));
     if let Some(h) = auth_header {
         req = req.header(AUTHORIZATION, h);

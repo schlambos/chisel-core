@@ -2,9 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aionui_api_types::{
-    CreateRemoteAgentRequest, HandshakeResponse, ModelInfoPayload, RemoteAgentListItem,
-    RemoteAgentResponse, RemoteSessionInfo, RemoteSkillInfo, TestRemoteAgentConnectionRequest,
-    UpdateRemoteAgentRequest,
+    CreateRemoteAgentRequest, HandshakeResponse, ModelInfoPayload, RemoteAgentListItem, RemoteAgentResponse,
+    RemoteSessionInfo, RemoteSkillInfo, TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
 };
 use aionui_common::{
     AppError, RemoteAgentAuthType, RemoteAgentProtocol, RemoteAgentStatus, decrypt_string, encrypt_string,
@@ -525,16 +524,11 @@ impl RemoteAgentService {
         token: &str,
     ) -> Result<(), AppError> {
         let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
-        crate::manager::remote::opencode_provider_auth::set_wellknown_auth(&client, &cfg, provider_id, key, token)
-            .await
+        crate::manager::remote::opencode_provider_auth::set_wellknown_auth(&client, &cfg, provider_id, key, token).await
     }
 
     /// M12: clear provider credentials on the remote OpenCode server.
-    pub async fn delete_provider_credentials(
-        &self,
-        remote_agent_id: &str,
-        provider_id: &str,
-    ) -> Result<(), AppError> {
+    pub async fn delete_provider_credentials(&self, remote_agent_id: &str, provider_id: &str) -> Result<(), AppError> {
         let (client, cfg) = self.opencode_client_config(remote_agent_id).await?;
         crate::manager::remote::opencode_provider_auth::delete_provider_auth(&client, &cfg, provider_id).await
     }
@@ -739,6 +733,56 @@ async fn test_websocket_connection(url: &str) -> Result<(), AppError> {
     }
 }
 
+/// Stable machine-readable code for a connect failure, embedded in the
+/// error message as a `[code:<x>]` prefix that the renderer parses to
+/// show an actionable, localized message (Bet A5).
+///
+/// The classifier is pure-text: reqwest/hyper errors carry the DNS / TLS /
+/// IO detail in the `source()` chain rather than `Display`, so callers
+/// pass the flattened chain (see [`error_chain_text`]) rather than the
+/// top-level `Display`. The order of branches matters — DNS / TLS markers
+/// are checked first so a `dns error: ... self-signed certificate` chain
+/// classifies as DNS, not TLS, matching the user-visible root cause.
+pub(crate) fn connect_error_code_from_text(detail: &str) -> &'static str {
+    let d = detail.to_ascii_lowercase();
+    if d.contains("dns error")
+        || d.contains("failed to lookup address")
+        || d.contains("name or service not known")
+        || d.contains("nodename nor servname")
+        || d.contains("no such host")
+    {
+        "dns_failure"
+    } else if d.contains("certificate")
+        || d.contains("self-signed")
+        || d.contains("self signed")
+        || d.contains("unknownissuer")
+        || d.contains("tls")
+        || d.contains("ssl")
+    {
+        "tls_failure"
+    } else if d.contains("connection refused") {
+        "connection_refused"
+    } else if d.contains("timed out") || d.contains("timeout") {
+        "timeout"
+    } else {
+        "unreachable"
+    }
+}
+
+/// Flatten an error and its full `source()` chain into one string —
+/// reqwest's Display often hides the io/dns/tls detail in the chain.
+fn error_chain_text(e: &(dyn std::error::Error + 'static)) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = write!(out, "{e}");
+    let mut current = e.source();
+    while let Some(cause) = current {
+        let _ = write!(out, " | {cause}");
+        current = cause.source();
+    }
+    out
+}
+
 async fn test_opencode_health(
     url: &str,
     auth_type: RemoteAgentAuthType,
@@ -751,30 +795,57 @@ async fn test_opencode_health(
         .danger_accept_invalid_certs(allow_insecure)
         .build()
         .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))?;
-    let response = client
+    let response = match client
         .get(format!("{base_url}/global/health"))
         .headers(build_opencode_auth_headers(auth_type, auth_token)?)
         .send()
         .await
-        .map_err(|e| AppError::BadGateway(format!("OpenCode health check failed: {e}")))?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let chain = error_chain_text(&e);
+            let code = if e.is_timeout() {
+                "timeout"
+            } else {
+                connect_error_code_from_text(&chain)
+            };
+            return Err(AppError::BadGateway(format!(
+                "[code:{code}] OpenCode health check failed: {chain}"
+            )));
+        }
+    };
 
     if !response.status().is_success() {
+        let status = response.status();
+        let code = match status.as_u16() {
+            401 | 403 => "auth_failure",
+            404 => "not_opencode",
+            _ => "server_error",
+        };
+        let suffix = if code == "not_opencode" {
+            " (endpoint does not look like an OpenCode server: /global/health missing)"
+        } else {
+            ""
+        };
         return Err(AppError::BadGateway(format!(
-            "OpenCode health check failed: {}",
-            response.status()
+            "[code:{code}] OpenCode health check failed: {status}{suffix}"
         )));
     }
 
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| AppError::BadGateway(format!("OpenCode health response was not JSON: {e}")))?;
+    let body: serde_json::Value = match response.json().await {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(AppError::BadGateway(
+                "[code:not_opencode] OpenCode health check failed: endpoint did not return OpenCode health JSON".into(),
+            ));
+        }
+    };
     if body.get("healthy").and_then(|v| v.as_bool()) == Some(true) {
         return Ok(());
     }
 
     Err(AppError::BadGateway(
-        "OpenCode health endpoint returned unhealthy status".into(),
+        "[code:server_error] OpenCode health check failed: server reports unhealthy".into(),
     ))
 }
 
@@ -1926,5 +1997,261 @@ mod tests {
         let rows = super::convert_opencode_messages("conv_1", &array);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "prt_real");
+    }
+
+    // ── Bet A5: connect-failure classifier (services/remote.rs) ──────────
+    //
+    // The classifier is pure-text and must remain backward compatible
+    // with reqwest/hyper error text. Pin the markers the renderer will
+    // parse, including the DNS-vs-TLS ordering quirk (DNS branch must be
+    // checked first so a `dns error: ... self-signed ...` chain reports
+    // the DNS root cause).
+    #[test]
+    fn connect_error_code_dns_markers() {
+        assert_eq!(
+            super::connect_error_code_from_text("dns error: failed to lookup address information"),
+            "dns_failure"
+        );
+        assert_eq!(
+            super::connect_error_code_from_text("failed to lookup address information: Name or service not known"),
+            "dns_failure"
+        );
+        assert_eq!(
+            super::connect_error_code_from_text("nodename nor servname provided, or not known"),
+            "dns_failure"
+        );
+        assert_eq!(
+            super::connect_error_code_from_text("no such host is known"),
+            "dns_failure"
+        );
+    }
+
+    #[test]
+    fn connect_error_code_tls_markers() {
+        assert_eq!(
+            super::connect_error_code_from_text("invalid peer certificate: UnknownIssuer"),
+            "tls_failure"
+        );
+        assert_eq!(
+            super::connect_error_code_from_text("self-signed certificate in certificate chain"),
+            "tls_failure"
+        );
+        assert_eq!(
+            super::connect_error_code_from_text("self signed certificate in certificate chain"),
+            "tls_failure"
+        );
+        // Bare `tls` and `ssl` substrings still classify as TLS.
+        assert_eq!(
+            super::connect_error_code_from_text("transport layer security handshake failure (TLS)"),
+            "tls_failure"
+        );
+        assert_eq!(
+            super::connect_error_code_from_text("ssl handshake failed"),
+            "tls_failure"
+        );
+    }
+
+    #[test]
+    fn connect_error_code_connection_refused() {
+        assert_eq!(
+            super::connect_error_code_from_text("connection refused (os error 61)"),
+            "connection_refused"
+        );
+    }
+
+    #[test]
+    fn connect_error_code_timeout_markers() {
+        assert_eq!(super::connect_error_code_from_text("operation timed out"), "timeout");
+        assert_eq!(
+            super::connect_error_code_from_text("request timeout after 10s"),
+            "timeout"
+        );
+    }
+
+    #[test]
+    fn connect_error_code_unknown_falls_through_to_unreachable() {
+        assert_eq!(super::connect_error_code_from_text(""), "unreachable");
+        assert_eq!(
+            super::connect_error_code_from_text("network is unreachable"),
+            "unreachable"
+        );
+    }
+
+    // ── Bet A5: wiremock + live-failure integration tests ─────────────────
+    //
+    // The classifier above is pure. The tests below assert the *full
+    // path*: `test_opencode_health` must build the `[code:<x>]` prefix
+    // the renderer parses.
+
+    #[tokio::test]
+    async fn health_401_is_classified_as_auth_failure() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/global/health"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let err = super::test_opencode_health(&server.uri(), RemoteAgentAuthType::None, None, false)
+            .await
+            .expect_err("401 must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("[code:auth_failure]"),
+            "expected auth_failure code, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_404_is_classified_as_not_opencode() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/global/health"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = super::test_opencode_health(&server.uri(), RemoteAgentAuthType::None, None, false)
+            .await
+            .expect_err("404 must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("[code:not_opencode]"),
+            "expected not_opencode code, got: {msg}"
+        );
+        assert!(
+            msg.contains("/global/health"),
+            "not_opencode message must mention the missing endpoint, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_403_is_classified_as_auth_failure() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/global/health"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let err = super::test_opencode_health(&server.uri(), RemoteAgentAuthType::None, None, false)
+            .await
+            .expect_err("403 must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("[code:auth_failure]"),
+            "expected auth_failure code, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_500_is_classified_as_server_error() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/global/health"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let err = super::test_opencode_health(&server.uri(), RemoteAgentAuthType::None, None, false)
+            .await
+            .expect_err("500 must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("[code:server_error]"),
+            "expected server_error code, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_non_json_body_is_classified_as_not_opencode() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/global/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        let err = super::test_opencode_health(&server.uri(), RemoteAgentAuthType::None, None, false)
+            .await
+            .expect_err("non-JSON must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("[code:not_opencode]"),
+            "expected not_opencode code, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_healthy_false_is_classified_as_server_error() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/global/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "healthy": false })))
+            .mount(&server)
+            .await;
+
+        let err = super::test_opencode_health(&server.uri(), RemoteAgentAuthType::None, None, false)
+            .await
+            .expect_err("healthy:false must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("[code:server_error]"),
+            "expected server_error code, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_connection_refused_is_classified_as_connection_refused() {
+        // Bind a TcpListener to grab a free port, drop it, then point
+        // the health check at that port. The kernel responds to the
+        // connect() with ECONNREFUSED immediately on loopback — the
+        // classifier must label it `connection_refused` (NOT `timeout`).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener);
+
+        let url = format!("http://127.0.0.1:{port}");
+        let err = super::test_opencode_health(&url, RemoteAgentAuthType::None, None, false)
+            .await
+            .expect_err("closed port must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("[code:connection_refused]"),
+            "expected connection_refused code, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_dns_failure_is_classified_as_dns_failure() {
+        // `.invalid` is reserved by RFC 2606; the resolver must fail
+        // with NXDOMAIN (dns_failure), not timeout.
+        let url = "http://chisl-a5-nonexistent.invalid";
+        let err = super::test_opencode_health(url, RemoteAgentAuthType::None, None, false)
+            .await
+            .expect_err("unresolvable host must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("[code:dns_failure]"),
+            "expected dns_failure code, got: {msg}"
+        );
     }
 }

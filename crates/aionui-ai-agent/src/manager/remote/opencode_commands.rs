@@ -162,10 +162,7 @@ pub async fn execute_server_command(
         agent: agent.map(String::from),
         model: model.map(String::from),
     };
-    let mut req = http_client
-        .post(url)
-        .json(&body)
-        .timeout(Duration::from_secs(120));
+    let mut req = http_client.post(url).json(&body).timeout(Duration::from_secs(120));
     if let Some(h) = auth_header {
         req = req.header(AUTHORIZATION, h);
     }

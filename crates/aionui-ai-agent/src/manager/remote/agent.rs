@@ -132,6 +132,13 @@ struct RemoteState {
     /// age (60 s TTL) and total count (capped at 1000) inside `confirm()`.
     /// Mirrors the `responded` Map in OpenCode's own `permission.tsx` SDK.
     recently_replied_permissions: HashMap<String, TimestampMs>,
+    /// Permission ids whose reply failed on BOTH the canonical and the
+    /// deprecated fallback endpoint and whose confirmation card was
+    /// re-queued for a user retry. Limits the re-queue to one cycle per id
+    /// so an already-resolved permission (genuine 404 on both routes) can't
+    /// ping-pong forever between "user approves" and "card re-appears".
+    /// Cleared on a later successful reply for the same id.
+    requeued_permissions: HashSet<String>,
     /// Path prefixes the user has blessed for the rest of this conversation.
     /// When a `permission.asked` arrives whose target path (extracted from
     /// `metadata.filepath` / `metadata.path` / `metadata.parentDir`) is
@@ -1075,10 +1082,21 @@ pub(crate) fn parse_opencode_skills(body: &Value) -> Vec<RemoteSkillInfo> {
 /// (`PermissionNotFoundError`) when the id is unknown / already resolved.
 ///
 /// Because the session-scoped variant is deprecated and the
-/// permission-id-only variant is canonical and needs no sessionID, we always
-/// use `/permission/{id}/reply` with the `{ "reply" }` field. The
-/// `session_id` parameter is retained for call-site compatibility and future
-/// diagnostics but is intentionally not required to construct the request.
+/// permission-id-only variant is canonical and needs no sessionID, we use
+/// `/permission/{id}/reply` with the `{ "reply" }` field first, and only
+/// fall back to the session-scoped variant when the canonical POST returns
+/// non-2xx (see [`post_permission_reply_with_fallback`]).
+///
+/// ## Directory scoping (live-pass failure 2026-06-09)
+///
+/// In server-tools mode AionCore scopes session calls to OpenCode's
+/// per-directory app instance via `?directory=<workspace>`. Permissions
+/// raised by a session living in that scoped instance are stored in THAT
+/// instance's registry — an unscoped reply hits the default instance and
+/// 404s with `PermissionNotFoundError` while the tool call stays parked.
+/// Callers must therefore append the directory param to the URL returned
+/// here (`opencode_context::append_v1_directory_value`); the helper
+/// [`post_permission_reply_with_fallback`] does this for both endpoints.
 ///
 /// `decision` must already be a wire-canonical value: `once` | `always` |
 /// `reject`. (Chisl-internal `allow_dir` / `allow_session` are mapped to
@@ -1092,6 +1110,151 @@ fn build_permission_reply_request(
         format!("{base_url}/permission/{request_id}/reply"),
         super::opencode_payloads::OpencodePermissionReply::new(decision),
     )
+}
+
+/// `(url, body)` for the deprecated-but-still-served session-scoped
+/// fallback `POST /session/{sessionID}/permissions/{permissionID}` with
+/// body `{ "response": <decision> }`. Only used after the canonical
+/// `/permission/{id}/reply` returns non-2xx.
+fn build_permission_respond_fallback_request(
+    base_url: &str,
+    session_id: &str,
+    request_id: &str,
+    decision: &str,
+) -> (String, super::opencode_payloads::OpencodePermissionRespond) {
+    (
+        format!("{base_url}/session/{session_id}/permissions/{request_id}"),
+        super::opencode_payloads::OpencodePermissionRespond {
+            response: decision.to_string(),
+        },
+    )
+}
+
+/// How a permission decision ultimately reached (or failed to reach) the
+/// OpenCode server. See [`post_permission_reply_with_fallback`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PermissionReplyOutcome {
+    /// Some endpoint acked 2xx; carries the endpoint URL for log lines and
+    /// whether the deprecated session-scoped fallback was the one that
+    /// succeeded.
+    Delivered { endpoint: String, via_fallback: bool },
+    /// Both the canonical and the fallback endpoint failed (or no session
+    /// id was available to address the fallback). The server-side
+    /// permission is still parked — callers must surface this.
+    Failed,
+}
+
+/// POST a permission decision to OpenCode, directory-scoped, with a
+/// one-shot fallback:
+///
+/// 1. Canonical `POST /permission/{id}/reply` body `{ "reply": .. }`,
+///    scoped with `?directory=` when `directory` is set (server-tools
+///    mode — replies MUST land on the same per-directory app instance as
+///    the session that raised the permission, else 404
+///    `PermissionNotFoundError`).
+/// 2. On non-2xx / transport error: one retry via the deprecated
+///    session-scoped `POST /session/{sid}/permissions/{pid}` body
+///    `{ "response": .. }`, same scoping.
+///
+/// Logs every failure with status/body + the endpoint attempted. Returns
+/// the outcome so callers can re-queue the confirmation / surface an error
+/// instead of leaving the UI cleared while the server still waits.
+#[allow(clippy::too_many_arguments)]
+async fn post_permission_reply_with_fallback(
+    http_client: &reqwest::Client,
+    base_url: &str,
+    directory: Option<&str>,
+    auth_header: Option<&str>,
+    conversation_id: &str,
+    request_id: &str,
+    session_id: Option<&str>,
+    decision: &str,
+    timeout: Duration,
+) -> PermissionReplyOutcome {
+    let (url, body) = build_permission_reply_request(base_url, request_id, decision);
+    let url = super::opencode_context::append_v1_directory_value(&url, directory);
+    let mut req = http_client.post(&url).json(&body).timeout(timeout);
+    if let Some(h) = auth_header {
+        req = req.header(AUTHORIZATION, h);
+    }
+    let canonical_failure = match req.send().await {
+        Ok(resp) if resp.status().is_success() => {
+            return PermissionReplyOutcome::Delivered {
+                endpoint: url,
+                via_fallback: false,
+            };
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            format!("status={status} body={body_text}")
+        }
+        Err(e) => format!("transport error: {e}"),
+    };
+
+    let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
+        warn!(
+            conversation_id = %conversation_id,
+            request_id = %request_id,
+            endpoint = %url,
+            failure = %canonical_failure,
+            "OpenCode permission reply returned non-success; no session id available for the deprecated session-scoped fallback"
+        );
+        return PermissionReplyOutcome::Failed;
+    };
+
+    let (fb_url, fb_body) = build_permission_respond_fallback_request(base_url, sid, request_id, decision);
+    let fb_url = super::opencode_context::append_v1_directory_value(&fb_url, directory);
+    warn!(
+        conversation_id = %conversation_id,
+        request_id = %request_id,
+        endpoint = %url,
+        failure = %canonical_failure,
+        fallback_endpoint = %fb_url,
+        "OpenCode permission reply returned non-success; retrying via deprecated session-scoped endpoint"
+    );
+    let mut fb_req = http_client.post(&fb_url).json(&fb_body).timeout(timeout);
+    if let Some(h) = auth_header {
+        fb_req = fb_req.header(AUTHORIZATION, h);
+    }
+    match fb_req.send().await {
+        Ok(resp) if resp.status().is_success() => {
+            info!(
+                conversation_id = %conversation_id,
+                request_id = %request_id,
+                reply = %decision,
+                endpoint = %fb_url,
+                "OpenCode permission reply delivered via deprecated session-scoped fallback"
+            );
+            PermissionReplyOutcome::Delivered {
+                endpoint: fb_url,
+                via_fallback: true,
+            }
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            warn!(
+                conversation_id = %conversation_id,
+                request_id = %request_id,
+                status = %status,
+                body = %body_text,
+                fallback_endpoint = %fb_url,
+                "OpenCode permission reply fallback also returned non-success"
+            );
+            PermissionReplyOutcome::Failed
+        }
+        Err(e) => {
+            warn!(
+                conversation_id = %conversation_id,
+                request_id = %request_id,
+                error = %e,
+                fallback_endpoint = %fb_url,
+                "OpenCode permission reply fallback request failed"
+            );
+            PermissionReplyOutcome::Failed
+        }
+    }
 }
 
 /// Approval-memory key for an "allow always" decision on the shell tool.
@@ -1559,6 +1722,7 @@ impl RemoteAgentManager {
                 pending_shell_approvals: HashMap::new(),
                 pending_elicitations: HashMap::new(),
                 recently_replied_permissions: HashMap::new(),
+                requeued_permissions: HashSet::new(),
                 auto_accept_paths: initial_auto_accept_paths,
                 auto_accept_sessions: HashSet::new(),
                 opencode_tool_call_ids: HashSet::new(),
@@ -2917,60 +3081,61 @@ impl RemoteAgentManager {
     }
 
     /// Fire-and-forget POST of an OpenCode permission response via the
-    /// canonical `POST /permission/{permID}/reply` endpoint (body `{reply}`).
-    /// See [`build_permission_reply_request`] for the endpoint-discovery notes.
+    /// canonical `POST /permission/{permID}/reply` endpoint (body `{reply}`),
+    /// directory-scoped in server-tools mode, with the deprecated
+    /// session-scoped endpoint as a one-shot fallback — see
+    /// [`post_permission_reply_with_fallback`].
     ///
-    /// `session_id` is retained for call-site compatibility (and possible
-    /// future diagnostics) but is not required to address the permission —
-    /// the canonical endpoint is keyed by permission id alone.
+    /// `session_id` is the permission's originating session; it addresses
+    /// the deprecated fallback endpoint when the canonical reply fails.
+    /// When absent we fall back to the root OpenCode session id.
     ///
     /// Shared by the auto-accept short-circuit in the `permission.asked`
-    /// handler and by `confirm()` itself. Returns immediately; the task
-    /// completes in the background. Errors are logged but don't propagate.
+    /// handler and by the blessing-drain in `confirm()`. Returns
+    /// immediately; the task completes in the background. Errors are logged
+    /// but don't propagate.
     fn spawn_permission_response(&self, request_id: String, session_id: Option<String>, reply: String) {
         if !is_opencode_protocol(&self.remote_config.protocol) {
             return;
         }
-        let _ = &session_id;
         let base_url = normalize_base_url(&self.remote_config.url);
+        // Server-tools mode: the reply must target the same per-directory
+        // app instance as the session that raised the permission.
+        let directory = super::opencode_context::server_directory(&self.remote_config, self.runtime.workspace());
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
         let http_client = self.http_client.clone();
         let conversation_id = self.runtime.conversation_id().to_string();
+        let fallback_session =
+            session_id.or_else(|| self.state.try_read().ok().and_then(|g| g.opencode_session_id.clone()));
         tokio::spawn(async move {
-            let (url, body) = build_permission_reply_request(&base_url, &request_id, &reply);
-            let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(10));
-            if let Some(h) = auth_header {
-                req = req.header(AUTHORIZATION, h);
-            }
-            match req.send().await {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = post_permission_reply_with_fallback(
+                &http_client,
+                &base_url,
+                directory.as_deref(),
+                auth_header.as_deref(),
+                &conversation_id,
+                &request_id,
+                fallback_session.as_deref(),
+                &reply,
+                Duration::from_secs(10),
+            )
+            .await;
+            match outcome {
+                PermissionReplyOutcome::Delivered { endpoint, .. } => {
                     debug!(
                         conversation_id = %conversation_id,
                         request_id = %request_id,
                         reply = %reply,
-                        endpoint = %url,
+                        endpoint = %endpoint,
                         "OpenCode permission response sent (auto)"
                     );
                 }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    warn!(
+                PermissionReplyOutcome::Failed => {
+                    error!(
                         conversation_id = %conversation_id,
                         request_id = %request_id,
-                        status = %status,
-                        body = %body,
-                        endpoint = %url,
-                        "OpenCode permission response returned non-success (auto)"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        conversation_id = %conversation_id,
-                        request_id = %request_id,
-                        error = %e,
-                        endpoint = %url,
-                        "OpenCode permission response request failed (auto)"
+                        reply = %reply,
+                        "OpenCode permission auto-response failed on both endpoints — server-side permission may stay parked"
                     );
                 }
             }
@@ -2986,15 +3151,24 @@ impl RemoteAgentManager {
             return;
         }
         let base_url = normalize_base_url(&self.remote_config.url);
+        // Server-tools mode: scope to the per-directory app instance that
+        // raised the question (same gap as permission replies — an unscoped
+        // POST hits the default instance and 404s).
+        let directory = super::opencode_context::server_directory(&self.remote_config, self.runtime.workspace());
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
         let http_client = self.http_client.clone();
         let conversation_id = self.runtime.conversation_id().to_string();
+        let state = Arc::clone(&self.state);
         tokio::spawn(async move {
             let (url, body) = opencode_question::build_question_reply_request(&base_url, &request_id, &answers);
+            let url = super::opencode_context::append_v1_directory_value(&url, directory.as_deref());
             let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(10));
             if let Some(h) = auth_header {
                 req = req.header(AUTHORIZATION, h);
             }
+            // On failure, drop the dedup stamp so a server re-emit of
+            // `question.asked` for the same request can resurface the cards
+            // instead of being suppressed while the turn hangs.
             match req.send().await {
                 Ok(resp) if resp.status().is_success() => {
                     debug!(%conversation_id, %request_id, endpoint = %url, "OpenCode question reply sent");
@@ -3002,10 +3176,12 @@ impl RemoteAgentManager {
                 Ok(resp) => {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
-                    warn!(%conversation_id, %request_id, %status, %body, endpoint = %url, "OpenCode question reply returned non-success");
+                    state.write().await.recently_replied_questions.remove(&request_id);
+                    error!(%conversation_id, %request_id, %status, %body, endpoint = %url, "OpenCode question reply returned non-success — answer may not have reached the server");
                 }
                 Err(e) => {
-                    warn!(%conversation_id, %request_id, error = %e, endpoint = %url, "OpenCode question reply request failed");
+                    state.write().await.recently_replied_questions.remove(&request_id);
+                    error!(%conversation_id, %request_id, error = %e, endpoint = %url, "OpenCode question reply request failed — answer may not have reached the server");
                 }
             }
         });
@@ -3017,11 +3193,14 @@ impl RemoteAgentManager {
             return;
         }
         let base_url = normalize_base_url(&self.remote_config.url);
+        // Server-tools mode: scope to the per-directory app instance.
+        let directory = super::opencode_context::server_directory(&self.remote_config, self.runtime.workspace());
         let auth_header = build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
         let http_client = self.http_client.clone();
         let conversation_id = self.runtime.conversation_id().to_string();
         tokio::spawn(async move {
             let url = opencode_question::build_question_reject_url(&base_url, &request_id);
+            let url = super::opencode_context::append_v1_directory_value(&url, directory.as_deref());
             let mut req = http_client.post(&url).timeout(Duration::from_secs(10));
             if let Some(h) = auth_header {
                 req = req.header(AUTHORIZATION, h);
@@ -3764,11 +3943,14 @@ impl RemoteAgentManager {
             Some(m) => self.opencode_message_after(m).await?,
             None => None,
         };
-        let body = super::opencode_payloads::OpencodeForkRequest {
-            message_id: fork_at,
-        };
+        let body = super::opencode_payloads::OpencodeForkRequest { message_id: fork_at };
         let resp = self
-            .opencode_session_request(reqwest::Method::POST, "/fork", Some(serde_json::to_value(&body).unwrap()), 30)
+            .opencode_session_request(
+                reqwest::Method::POST,
+                "/fork",
+                Some(serde_json::to_value(&body).unwrap()),
+                30,
+            )
             .await?;
         resp.get("id")
             .and_then(|v| v.as_str())
@@ -3795,9 +3977,14 @@ impl RemoteAgentManager {
             message_id: message_id.to_string(),
             part_id: part_id.filter(|p| p.starts_with("prt")).map(String::from),
         };
-        self.opencode_session_request(reqwest::Method::POST, "/revert", Some(serde_json::to_value(&body).unwrap()), 30)
-            .await
-            .map(|_| ())
+        self.opencode_session_request(
+            reqwest::Method::POST,
+            "/revert",
+            Some(serde_json::to_value(&body).unwrap()),
+            30,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// M02: restore all reverted messages.
@@ -4225,11 +4412,30 @@ impl RemoteAgentManager {
         // `permission.asked` handler.
         let server_tools = is_server_tool_host(&self.remote_config);
 
-        let session_body = if server_tools {
+        // Bet A5: in server-tools mode the OpenCode server's built-in tools
+        // operate on the server's working tree, not the user's local one. A
+        // workspace path the server cannot resolve (typo, missing mount,
+        // revoked share) used to limp along with 502s and spurious
+        // `external_directory` permission prompts on every turn. Probe the
+        // workspace on the server BEFORE creating the session so the user
+        // sees one actionable, localized error at session-create time
+        // instead of a stream of opaque failures during the conversation.
+        if server_tools {
             info!(
                 conversation_id = %self.runtime.conversation_id(),
                 "creating OpenCode session in server-tools mode (no local-fs MCP, no tool pre-deny)"
             );
+            if let Err(e) =
+                super::opencode_fs::fetch_path(&self.http_client, &self.remote_config, self.runtime.workspace()).await
+            {
+                return Err(AppError::BadRequest(format!(
+                    "[code:workspace_not_on_server] OpenCode server cannot access workspace '{}': {e}",
+                    self.runtime.workspace()
+                )));
+            }
+        }
+
+        let session_body = if server_tools {
             // Omit `permission` entirely so the server applies its own defaults
             // and emits permission prompts for sensitive operations.
             super::opencode_payloads::OpencodeSessionCreate::default()
@@ -4645,10 +4851,8 @@ impl RemoteAgentManager {
                             .split_once("::")
                             .map(|(p, m)| (p.to_string(), m.to_string()))
                             .unwrap_or_else(|| ("opencode-go".to_string(), m));
-                        serde_json::to_value(super::opencode_payloads::DesiredModel::new(
-                            provider_id, model_id,
-                        ))
-                        .unwrap()
+                        serde_json::to_value(super::opencode_payloads::DesiredModel::new(provider_id, model_id))
+                            .unwrap()
                     })
                     .or_else(|| state.desired_model.clone()),
                 override_agent.or_else(|| state.desired_agent.clone()),
@@ -4940,11 +5144,13 @@ impl RemoteAgentManager {
             (existing_provider, model_id.to_string())
         };
         let mut state = self.state.write().await;
-        state.desired_model = Some(serde_json::to_value(super::opencode_payloads::DesiredModel::new(
-            provider_id,
-            actual_model_id,
-        ))
-        .unwrap());
+        state.desired_model = Some(
+            serde_json::to_value(super::opencode_payloads::DesiredModel::new(
+                provider_id,
+                actual_model_id,
+            ))
+            .unwrap(),
+        );
         Ok(())
     }
 
@@ -5390,6 +5596,11 @@ impl RemoteAgentManager {
         // Snapshotted across the state lock so the spawned HTTP task can
         // address the canonical per-session endpoint.
         let mut originating_session_id: Option<String> = None;
+        // Full clone of the confirmation being answered, captured before it
+        // is stripped from the queue — used to re-queue the card if the
+        // reply fails to reach the server on both endpoints (Task: fail
+        // loudly, not silently).
+        let mut requeue_card: Option<Confirmation> = None;
 
         if let Ok(mut state) = self.state.try_write() {
             // In-process shell approval? These originate from our own local
@@ -5487,19 +5698,15 @@ impl RemoteAgentManager {
                 let key = approval_key(conf.action.as_deref(), conf.command_type.as_deref());
                 state.approval_memory.insert(key, true);
             }
-            // Snapshot the originating session id (for sub-agent-attributed
-            // permissions) BEFORE we strip the confirmation. The canonical
-            // OpenCode permission-reply endpoint is `/permission/{permID}/reply`
-            // (body `{reply}`) — the session-scoped variant
-            // `/session/{sessionID}/permissions/{permID}` is deprecated as of
-            // opencode 1.15.11 (see `build_permission_reply_request`). The
-            // sessionID is no longer required to address the permission, but we
-            // still snapshot it for diagnostics / future use.
-            originating_session_id = state
-                .confirmations
-                .iter()
-                .find(|c| c.call_id == call_id)
-                .and_then(|c| c.session_id.clone());
+            // Snapshot the confirmation (and its originating session id, for
+            // sub-agent-attributed permissions) BEFORE we strip it from the
+            // queue. The canonical OpenCode permission-reply endpoint is
+            // `/permission/{permID}/reply` (body `{reply}`); the session id
+            // addresses the deprecated session-scoped fallback when the
+            // canonical POST fails, and the card clone lets us re-queue on a
+            // double failure (see `post_permission_reply_with_fallback`).
+            requeue_card = state.confirmations.iter().find(|c| c.call_id == call_id).cloned();
+            originating_session_id = requeue_card.as_ref().and_then(|c| c.session_id.clone());
             state.confirmations.retain(|c| c.call_id != call_id);
 
             // For "allow_dir" / "allow_session", record the blessing and
@@ -5664,58 +5871,100 @@ impl RemoteAgentManager {
             }
 
             let base_url = normalize_base_url(&self.remote_config.url);
+            // Server-tools mode: the reply must carry `?directory=` so it
+            // lands on the same per-directory app instance as the session
+            // that raised the permission (live-pass failure 2026-06-09:
+            // unscoped reply → 404 PermissionNotFoundError → silent hang).
+            let directory = super::opencode_context::server_directory(&self.remote_config, self.runtime.workspace());
             let auth_header =
                 build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
             let http_client = self.http_client.clone();
             let conversation_id = self.runtime.conversation_id().to_string();
             let call_id = call_id.to_string();
-            let _originating_session_id = originating_session_id;
+            // Fallback session id for the deprecated session-scoped
+            // endpoint: the permission's originating session, else the root
+            // OpenCode session.
+            let fallback_session = originating_session_id
+                .clone()
+                .or_else(|| self.state.try_read().ok().and_then(|g| g.opencode_session_id.clone()));
             let wire_for_log = wire_reply.clone();
             // Clone the state handle so the background task can clear the
             // dedup entry on a confirmed 2xx (plan C05 §3.3) — letting a quick
-            // re-prompt with the same id re-reply instead of being suppressed.
+            // re-prompt with the same id re-reply instead of being suppressed —
+            // and re-queue the card on total failure.
             let dedup_state = Arc::clone(&self.state);
+            let runtime = self.runtime.clone();
             tokio::spawn(async move {
-                // Canonical permission-reply endpoint (`/permission/{id}/reply`,
-                // body `{reply}`) — see `build_permission_reply_request`.
-                let (url, body) = build_permission_reply_request(&base_url, &call_id, &wire_reply);
-                let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(10));
-                if let Some(h) = auth_header {
-                    req = req.header(AUTHORIZATION, h);
-                }
-                match req.send().await {
-                    Ok(resp) if resp.status().is_success() => {
+                let outcome = post_permission_reply_with_fallback(
+                    &http_client,
+                    &base_url,
+                    directory.as_deref(),
+                    auth_header.as_deref(),
+                    &conversation_id,
+                    &call_id,
+                    fallback_session.as_deref(),
+                    &wire_reply,
+                    Duration::from_secs(10),
+                )
+                .await;
+                match outcome {
+                    PermissionReplyOutcome::Delivered { endpoint, via_fallback } => {
                         // Confirmed success — drop the dedup stamp so a fresh
                         // re-prompt with the same id can be replied to again.
-                        dedup_state.write().await.recently_replied_permissions.remove(&call_id);
+                        {
+                            let mut st = dedup_state.write().await;
+                            st.recently_replied_permissions.remove(&call_id);
+                            st.requeued_permissions.remove(&call_id);
+                        }
                         info!(
                             conversation_id = %conversation_id,
                             request_id = %call_id,
                             reply = %wire_for_log,
-                            endpoint = %url,
+                            endpoint = %endpoint,
+                            via_fallback,
                             "OpenCode permission reply sent"
                         );
                     }
-                    Ok(resp) => {
-                        let status = resp.status();
-                        let body = resp.text().await.unwrap_or_default();
-                        warn!(
-                            conversation_id = %conversation_id,
-                            request_id = %call_id,
-                            status = %status,
-                            body = %body,
-                            endpoint = %url,
-                            "OpenCode permission reply returned non-success"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            conversation_id = %conversation_id,
-                            request_id = %call_id,
-                            error = %e,
-                            endpoint = %url,
-                            "OpenCode permission reply request failed"
-                        );
+                    PermissionReplyOutcome::Failed => {
+                        // Both endpoints failed: the server-side permission is
+                        // (most likely) still parked. Clear the dedup stamp and
+                        // re-queue the card once so the user sees "approval
+                        // failed — retry" instead of a silent hang. A second
+                        // total failure for the same id is dropped to avoid an
+                        // approve→re-queue ping-pong on permissions that were
+                        // genuinely resolved server-side already.
+                        let card_to_emit = {
+                            let mut st = dedup_state.write().await;
+                            st.recently_replied_permissions.remove(&call_id);
+                            let first_requeue = st.requeued_permissions.insert(call_id.clone());
+                            match (&requeue_card, first_requeue) {
+                                (Some(card), true) => {
+                                    if !st.confirmations.iter().any(|c| c.call_id == call_id) {
+                                        st.confirmations.push(card.clone());
+                                    }
+                                    Some(card.clone())
+                                }
+                                _ => None,
+                            }
+                        };
+                        if let Some(card) = card_to_emit {
+                            error!(
+                                conversation_id = %conversation_id,
+                                request_id = %call_id,
+                                reply = %wire_for_log,
+                                "OpenCode permission reply failed on both endpoints — re-queueing approval card for retry"
+                            );
+                            runtime.emit(AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(
+                                card,
+                            )));
+                        } else {
+                            error!(
+                                conversation_id = %conversation_id,
+                                request_id = %call_id,
+                                reply = %wire_for_log,
+                                "OpenCode permission reply failed on both endpoints (no card to re-queue or already re-queued once) — giving up"
+                            );
+                        }
                     }
                 }
             });
@@ -5819,6 +6068,10 @@ impl RemoteAgentManager {
     /// `Declined` and parked shell approvals resolve to `Reject`; question
     /// rejections go through the canonical `/question/{id}/reject` route.
     async fn synthesize_timeout_reject(&self, call_id: &str) {
+        // Originating session of the permission being rejected (if still
+        // queued) — addresses the deprecated session-scoped fallback when
+        // the canonical reject fails. Falls back to the root session below.
+        let mut fallback_session: Option<String> = None;
         if let Ok(mut state) = self.state.try_write() {
             if let Some(tx) = state.pending_shell_approvals.remove(call_id) {
                 state.confirmations.retain(|c| c.call_id != call_id);
@@ -5857,43 +6110,52 @@ impl RemoteAgentManager {
                 return;
             }
             // OpenCode permission: HTTP-reject on the canonical route.
+            fallback_session = state
+                .confirmations
+                .iter()
+                .find(|c| c.call_id == call_id)
+                .and_then(|c| c.session_id.clone())
+                .or_else(|| state.opencode_session_id.clone());
             state.confirmations.retain(|c| c.call_id != call_id);
             state.recently_replied_permissions.insert(call_id.to_string(), now_ms());
             state.prompt_expiries.remove(call_id);
             state.prompt_tool_call_ids.remove(call_id);
             state.prompt_patterns.remove(call_id);
         }
-        // HTTP reject lives outside the lock; same pattern as `confirm()`.
+        // HTTP reject lives outside the lock; same pattern as `confirm()` —
+        // directory-scoped, with the deprecated session-scoped fallback.
         if is_opencode_protocol(&self.remote_config.protocol) {
             let base_url = normalize_base_url(&self.remote_config.url);
+            let directory = super::opencode_context::server_directory(&self.remote_config, self.runtime.workspace());
             let auth_header =
                 build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
             let http_client = self.http_client.clone();
             let conversation_id = self.runtime.conversation_id().to_string();
             let call_id_owned = call_id.to_string();
             tokio::spawn(async move {
-                let (url, body) = build_permission_reply_request(&base_url, &call_id_owned, "reject");
-                let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(5));
-                if let Some(ref h) = auth_header {
-                    req = req.header(AUTHORIZATION, h.as_str());
-                }
-                match req.send().await {
-                    Ok(resp) if resp.status().is_success() => {
+                let outcome = post_permission_reply_with_fallback(
+                    &http_client,
+                    &base_url,
+                    directory.as_deref(),
+                    auth_header.as_deref(),
+                    &conversation_id,
+                    &call_id_owned,
+                    fallback_session.as_deref(),
+                    "reject",
+                    Duration::from_secs(5),
+                )
+                .await;
+                match outcome {
+                    PermissionReplyOutcome::Delivered { endpoint, .. } => {
                         debug!(
-                            %conversation_id, %call_id_owned,
+                            %conversation_id, %call_id_owned, endpoint = %endpoint,
                             "P1.2a (D6): denied_timeout — auto-rejected prompt past 100% timeout"
                         );
                     }
-                    Ok(resp) => {
+                    PermissionReplyOutcome::Failed => {
                         debug!(
-                            %conversation_id, %call_id_owned, status = %resp.status(),
-                            "P1.2a (D6): denied_timeout — auto-reject returned non-success (likely already resolved)"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            %conversation_id, %call_id_owned, error = %e,
-                            "P1.2a (D6): denied_timeout — auto-reject HTTP failed"
+                            %conversation_id, %call_id_owned,
+                            "P1.2a (D6): denied_timeout — auto-reject failed on both endpoints (likely already resolved)"
                         );
                     }
                 }
@@ -5966,7 +6228,7 @@ impl RemoteAgentManager {
     pub async fn reject_pending_confirmations(&self, reason: &'static str) {
         // Snapshot the work we need to do, then drop the write guard so the
         // OpenCode-permission HTTP replies below don't run while holding it.
-        let (shell_senders, elicitation_senders, opencode_call_ids) = {
+        let (shell_senders, elicitation_senders, opencode_call_ids, root_session_id) = {
             let mut state = self.state.write().await;
             if state.confirmations.is_empty()
                 && state.pending_shell_approvals.is_empty()
@@ -6026,7 +6288,8 @@ impl RemoteAgentManager {
             for id in question_request_ids {
                 self.spawn_question_reject(id);
             }
-            (shell_senders, elicitation_senders, opencode_call_ids)
+            let root_session_id = state.opencode_session_id.clone();
+            (shell_senders, elicitation_senders, opencode_call_ids, root_session_id)
         };
 
         let total = shell_senders.len() + elicitation_senders.len() + opencode_call_ids.len();
@@ -6058,40 +6321,42 @@ impl RemoteAgentManager {
         // responsive even if the server is slow.
         if !opencode_call_ids.is_empty() && is_opencode_protocol(&self.remote_config.protocol) {
             let base_url = normalize_base_url(&self.remote_config.url);
+            let directory = super::opencode_context::server_directory(&self.remote_config, self.runtime.workspace());
             let auth_header =
                 build_auth_header(&self.remote_config.auth_type, self.remote_config.auth_token.as_deref());
             let http_client = self.http_client.clone();
             let conversation_id = self.runtime.conversation_id().to_string();
             tokio::spawn(async move {
-                for (call_id, _session_for_url) in opencode_call_ids {
-                    // Canonical permission-reply endpoint — see
-                    // `build_permission_reply_request`.
-                    let (url, body) = build_permission_reply_request(&base_url, &call_id, "reject");
-                    let mut req = http_client.post(&url).json(&body).timeout(Duration::from_secs(5));
-                    if let Some(ref h) = auth_header {
-                        req = req.header(AUTHORIZATION, h.as_str());
-                    }
-                    match req.send().await {
-                        Ok(resp) if resp.status().is_success() => {
+                for (call_id, session_for_fallback) in opencode_call_ids {
+                    // Canonical permission-reply endpoint, directory-scoped,
+                    // with the deprecated session-scoped fallback — see
+                    // `post_permission_reply_with_fallback`. (404 on both
+                    // routes is normal here: the permission may already have
+                    // been resolved server-side by the abort.)
+                    let fallback_session = session_for_fallback.or_else(|| root_session_id.clone());
+                    let outcome = post_permission_reply_with_fallback(
+                        &http_client,
+                        &base_url,
+                        directory.as_deref(),
+                        auth_header.as_deref(),
+                        &conversation_id,
+                        &call_id,
+                        fallback_session.as_deref(),
+                        "reject",
+                        Duration::from_secs(5),
+                    )
+                    .await;
+                    match outcome {
+                        PermissionReplyOutcome::Delivered { endpoint, .. } => {
                             debug!(
-                                %conversation_id, %call_id, %reason,
+                                %conversation_id, %call_id, %reason, endpoint = %endpoint,
                                 "auto-rejected OpenCode permission"
                             );
                         }
-                        Ok(resp) => {
-                            // 404 here is normal — the permission may already
-                            // have been resolved server-side by the abort.
+                        PermissionReplyOutcome::Failed => {
                             debug!(
                                 %conversation_id, %call_id, %reason,
-                                status = %resp.status(),
-                                "OpenCode permission auto-reject returned non-success"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                %conversation_id, %call_id, %reason,
-                                error = %e,
-                                "OpenCode permission auto-reject request failed"
+                                "OpenCode permission auto-reject failed on both endpoints (likely already resolved)"
                             );
                         }
                     }
@@ -7515,5 +7780,676 @@ mod tests {
         // The body must NOT use the deprecated session-scoped `response` field.
         let body_v = serde_json::to_value(&body).unwrap();
         assert!(body_v.get("response").is_none());
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // A1: Permission + question relay — SERVER-ACKNOWLEDGMENT integration tests
+    //
+    // The unit tests above assert the *in-memory* side effects of a
+    // confirm/sweep (the confirmation leaves the queue). They do NOT prove the
+    // user's decision actually reaches the remote OpenCode server — which is
+    // the Phase-1 win-condition metric ("server acknowledges").
+    //
+    // These tests stand up a `wiremock` OpenCode server, point a real
+    // `RemoteAgentManager` at it, drive a confirm/sweep, and assert the
+    // canonical reply POST (`/permission/{id}/reply` or `/question/{id}/reply`)
+    // actually lands on the wire with the correct body. Because each reply is
+    // fired from a detached `tokio::spawn`, the tests poll a shared capture vec
+    // until the POST arrives (or a bounded number of polls elapse).
+    // ───────────────────────────────────────────────────────────────────────
+
+    use wiremock::matchers::{method as wm_method, path as wm_path, query_param as wm_query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    type AckCapture = Arc<std::sync::Mutex<Vec<Value>>>;
+
+    /// Build an OpenCode-protocol agent against `url` with an explicit
+    /// `tool_host` / workspace. The live-pass failure of 2026-06-09 showed
+    /// the ack contract differs between local and server tool-host modes
+    /// (directory scoping), so both dimensions are exercised below.
+    async fn opencode_agent_with(url: String, tool_host: &str, workspace: &str) -> RemoteAgentManager {
+        let config = RemoteAgentConfig {
+            remote_agent_id: "ra_ack".to_string(),
+            protocol: "opencode".to_string(),
+            url,
+            auth_type: "none".to_string(),
+            auth_token: None,
+            allow_insecure: false,
+            tool_host: tool_host.to_string(),
+        };
+        let agent = RemoteAgentManager::new("conv_ack".to_string(), workspace.to_string(), config, None)
+            .await
+            .unwrap();
+        agent.state.write().await.opencode_session_id = Some("sess_1".to_string());
+        agent
+    }
+
+    async fn opencode_agent_against(url: String) -> RemoteAgentManager {
+        opencode_agent_with(url, "local", "/ws").await
+    }
+
+    /// Mount a 200-returning mock on `POST {endpoint}` that records every
+    /// received JSON body into a fresh capture vec, and return that vec.
+    async fn capture_post(server: &MockServer, endpoint: &'static str) -> AckCapture {
+        let cap: AckCapture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = cap.clone();
+        Mock::given(wm_method("POST"))
+            .and(wm_path(endpoint))
+            .respond_with(move |req: &wiremock::Request| {
+                let body = serde_json::from_slice::<Value>(&req.body).unwrap_or(Value::Null);
+                sink.lock().unwrap().push(body);
+                ResponseTemplate::new(200)
+            })
+            .mount(server)
+            .await;
+        cap
+    }
+
+    /// Like [`capture_post`] but the mock ALSO requires query param
+    /// `key=value` to match. Used to pin the server-tools-mode contract:
+    /// the reply POST must carry `?directory=<workspace>` so it lands on
+    /// the same per-directory OpenCode app instance as the session that
+    /// raised the prompt. An unscoped POST does not match this mock (404),
+    /// so the ack is never captured and the assertion fails.
+    async fn capture_post_with_query(
+        server: &MockServer,
+        endpoint: &'static str,
+        key: &'static str,
+        value: &'static str,
+    ) -> AckCapture {
+        let cap: AckCapture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = cap.clone();
+        Mock::given(wm_method("POST"))
+            .and(wm_path(endpoint))
+            .and(wm_query_param(key, value))
+            .respond_with(move |req: &wiremock::Request| {
+                let body = serde_json::from_slice::<Value>(&req.body).unwrap_or(Value::Null);
+                sink.lock().unwrap().push(body);
+                ResponseTemplate::new(200)
+            })
+            .mount(server)
+            .await;
+        cap
+    }
+
+    /// Poll `cap` until it holds at least `want` entries or `attempts` polls
+    /// elapse (25ms each). Returns a snapshot of whatever was captured.
+    async fn wait_for_acks(cap: &AckCapture, want: usize, attempts: u32) -> Vec<Value> {
+        for _ in 0..attempts {
+            {
+                let g = cap.lock().unwrap();
+                if g.len() >= want {
+                    return g.clone();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        cap.lock().unwrap().clone()
+    }
+
+    fn perm_event(id: &str) -> String {
+        json!({
+            "type": "permission.asked",
+            "properties": {
+                "id": id,
+                "sessionID": "sess_1",
+                "permission": "bash",
+                "metadata": { "command": "ls" }
+            }
+        })
+        .to_string()
+    }
+
+    fn single_question_event(id: &str) -> String {
+        json!({
+            "type": "question.asked",
+            "properties": {
+                "id": id,
+                "sessionID": "sess_1",
+                "questions": [{
+                    "header": "DB choice",
+                    "question": "Which database?",
+                    "options": [
+                        { "label": "Postgres", "description": "Relational" },
+                        { "label": "SQLite", "description": "Embedded" }
+                    ],
+                    "multiple": false,
+                    "custom": false
+                }]
+            }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn permission_allow_once_posts_acknowledgment_to_opencode() {
+        let server = MockServer::start().await;
+        let cap = capture_post(&server, "/permission/per_ack/reply").await;
+        let agent = opencode_agent_against(server.uri()).await;
+
+        agent.handle_opencode_sse_event(&perm_event("per_ack")).await;
+        assert_eq!(agent.get_confirmations().len(), 1, "permission must be queued");
+
+        agent.confirm("", "per_ack", json!({ "value": "once" }), false).unwrap();
+
+        let bodies = wait_for_acks(&cap, 1, 160).await;
+        assert_eq!(
+            bodies.len(),
+            1,
+            "exactly one reply POST must reach OpenCode (server ack)"
+        );
+        assert_eq!(bodies[0], json!({ "reply": "once" }));
+        // And the queue is drained locally too.
+        assert!(agent.get_confirmations().iter().all(|c| c.call_id != "per_ack"));
+    }
+
+    #[tokio::test]
+    async fn permission_allow_always_posts_always_acknowledgment() {
+        let server = MockServer::start().await;
+        let cap = capture_post(&server, "/permission/per_always/reply").await;
+        let agent = opencode_agent_against(server.uri()).await;
+
+        agent.handle_opencode_sse_event(&perm_event("per_always")).await;
+        agent
+            .confirm("", "per_always", json!({ "value": "always" }), true)
+            .unwrap();
+
+        let bodies = wait_for_acks(&cap, 1, 160).await;
+        assert_eq!(bodies.len(), 1, "always-allow must reach OpenCode");
+        assert_eq!(bodies[0], json!({ "reply": "always" }));
+    }
+
+    #[tokio::test]
+    async fn permission_reject_posts_reject_acknowledgment() {
+        let server = MockServer::start().await;
+        let cap = capture_post(&server, "/permission/per_no/reply").await;
+        let agent = opencode_agent_against(server.uri()).await;
+
+        agent.handle_opencode_sse_event(&perm_event("per_no")).await;
+        agent
+            .confirm("", "per_no", json!({ "value": "reject" }), false)
+            .unwrap();
+
+        let bodies = wait_for_acks(&cap, 1, 160).await;
+        assert_eq!(bodies.len(), 1, "reject must reach OpenCode");
+        assert_eq!(bodies[0], json!({ "reply": "reject" }));
+    }
+
+    #[tokio::test]
+    async fn allow_dir_blessing_acks_as_once_on_the_wire() {
+        // "Allow this directory tree" is a Chisl-internal value; the blessing
+        // is recorded locally and the wire reply must degrade to the canonical
+        // "once" that OpenCode understands.
+        let server = MockServer::start().await;
+        let cap = capture_post(&server, "/permission/per_dir/reply").await;
+        let agent = opencode_agent_against(server.uri()).await;
+
+        agent.handle_opencode_sse_event(&perm_event("per_dir")).await;
+        agent
+            .confirm(
+                "",
+                "per_dir",
+                json!({ "value": "allow_dir", "params": { "path": "/Users/matt/proj" } }),
+                false,
+            )
+            .unwrap();
+
+        let bodies = wait_for_acks(&cap, 1, 160).await;
+        assert_eq!(bodies.len(), 1, "allow_dir must still reach OpenCode");
+        assert_eq!(bodies[0], json!({ "reply": "once" }));
+    }
+
+    /// Permission event whose metadata carries only a `filePath`, so the
+    /// confirmation `description` becomes that path — the field the
+    /// blessing-drain in `confirm()` matches against (`path_is_under_blessed`).
+    fn perm_event_with_filepath(id: &str, path: &str) -> String {
+        json!({
+            "type": "permission.asked",
+            "properties": {
+                "id": id,
+                "sessionID": "sess_1",
+                "permission": "external_directory",
+                "metadata": { "filePath": path }
+            }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn allow_dir_blessing_drains_multiple_descendants_on_the_wire() {
+        // A1 known-gap follow-up: the N=1 degradation is pinned by
+        // `allow_dir_blessing_acks_as_once_on_the_wire`; this test asserts the
+        // *sibling drain* — answering one prompt with "allow_dir" must
+        // auto-POST `{"reply":"once"}` for EVERY other pending prompt whose
+        // target path is a descendant of the blessed prefix (N>1), while a
+        // pending prompt outside the tree is left untouched (no POST, still
+        // queued).
+        let server = MockServer::start().await;
+        let cap_root = capture_post(&server, "/permission/per_root/reply").await;
+        let cap_c1 = capture_post(&server, "/permission/per_c1/reply").await;
+        let cap_c2 = capture_post(&server, "/permission/per_c2/reply").await;
+        let cap_out = capture_post(&server, "/permission/per_out/reply").await;
+        let agent = opencode_agent_against(server.uri()).await;
+
+        agent.handle_opencode_sse_event(&perm_event("per_root")).await;
+        agent
+            .handle_opencode_sse_event(&perm_event_with_filepath("per_c1", "/Users/matt/proj/src/a.rs"))
+            .await;
+        agent
+            .handle_opencode_sse_event(&perm_event_with_filepath("per_c2", "/Users/matt/proj/docs/b.md"))
+            .await;
+        agent
+            .handle_opencode_sse_event(&perm_event_with_filepath("per_out", "/elsewhere/c.txt"))
+            .await;
+        assert_eq!(agent.get_confirmations().len(), 4, "all four prompts queued");
+
+        agent
+            .confirm(
+                "",
+                "per_root",
+                json!({ "value": "allow_dir", "params": { "path": "/Users/matt/proj" } }),
+                false,
+            )
+            .unwrap();
+
+        // The answered prompt acks as canonical "once"...
+        let root = wait_for_acks(&cap_root, 1, 160).await;
+        assert_eq!(root, vec![json!({ "reply": "once" })], "blessed prompt ack");
+        // ...and BOTH descendants are auto-drained with their own POSTs.
+        let c1 = wait_for_acks(&cap_c1, 1, 160).await;
+        let c2 = wait_for_acks(&cap_c2, 1, 160).await;
+        assert_eq!(c1, vec![json!({ "reply": "once" })], "descendant 1 drained on the wire");
+        assert_eq!(c2, vec![json!({ "reply": "once" })], "descendant 2 drained on the wire");
+
+        // The out-of-tree prompt stays queued and got NO reply POST.
+        let remaining = agent.get_confirmations();
+        assert_eq!(remaining.len(), 1, "only the out-of-tree prompt remains");
+        assert_eq!(remaining[0].call_id, "per_out");
+        assert!(
+            cap_out.lock().unwrap().is_empty(),
+            "out-of-tree prompt must not be auto-acked"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_permissions_each_post_independent_acknowledgment() {
+        // Two prompts in flight at once must each round-trip without
+        // interfering — the core "concurrent prompts" QA cell.
+        let server = MockServer::start().await;
+        let cap_a = capture_post(&server, "/permission/per_a/reply").await;
+        let cap_b = capture_post(&server, "/permission/per_b/reply").await;
+        let agent = opencode_agent_against(server.uri()).await;
+
+        agent.handle_opencode_sse_event(&perm_event("per_a")).await;
+        agent.handle_opencode_sse_event(&perm_event("per_b")).await;
+        assert_eq!(agent.get_confirmations().len(), 2);
+
+        agent.confirm("", "per_a", json!({ "value": "once" }), false).unwrap();
+        agent.confirm("", "per_b", json!({ "value": "reject" }), false).unwrap();
+
+        let a = wait_for_acks(&cap_a, 1, 160).await;
+        let b = wait_for_acks(&cap_b, 1, 160).await;
+        assert_eq!(a, vec![json!({ "reply": "once" })], "per_a ack");
+        assert_eq!(b, vec![json!({ "reply": "reject" })], "per_b ack");
+    }
+
+    #[tokio::test]
+    async fn question_reply_posts_answers_acknowledgment() {
+        let server = MockServer::start().await;
+        let cap = capture_post(&server, "/question/que_ack/reply").await;
+        let agent = opencode_agent_against(server.uri()).await;
+
+        agent.handle_opencode_sse_event(&single_question_event("que_ack")).await;
+        // One synthetic confirmation per question, call_id "question-{id}-{i}".
+        assert!(
+            agent
+                .get_confirmations()
+                .iter()
+                .any(|c| c.call_id == "question-que_ack-0")
+        );
+
+        // The chosen value is the option *label* (verbatim), not a permission verb.
+        agent
+            .confirm("", "question-que_ack-0", json!({ "value": "Postgres" }), false)
+            .unwrap();
+
+        let bodies = wait_for_acks(&cap, 1, 160).await;
+        assert_eq!(bodies.len(), 1, "question answer must reach OpenCode");
+        assert_eq!(bodies[0], json!({ "answers": [["Postgres"]] }));
+    }
+
+    #[tokio::test]
+    async fn timeout_sweep_posts_reject_acknowledgment() {
+        // The 60s auto-reject (DEFAULT_PROMPT_TIMEOUT_MS) must POST a "reject"
+        // to OpenCode, not just silently drop the local card.
+        let server = MockServer::start().await;
+        let cap = capture_post(&server, "/permission/per_to/reply").await;
+        let agent = opencode_agent_against(server.uri()).await;
+
+        agent.handle_opencode_sse_event(&perm_event("per_to")).await;
+        {
+            // Force the deadline into the past so the next sweep expires it.
+            agent
+                .state
+                .write()
+                .await
+                .prompt_expiries
+                .insert("per_to".to_string(), 1);
+        }
+        let expired = agent.sweep_expired_prompts().await;
+        assert!(expired.contains(&"per_to".to_string()), "prompt must expire");
+
+        let bodies = wait_for_acks(&cap, 1, 160).await;
+        assert_eq!(bodies.len(), 1, "timeout auto-reject must reach OpenCode");
+        assert_eq!(bodies[0], json!({ "reply": "reject" }));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // A1 hotfix (live-pass failure 2026-06-09): server-tools-mode directory
+    // scoping + deprecated-endpoint fallback + loud failure.
+    //
+    // The 8 ack tests above run with `tool_host: "local"` — they pin
+    // AionCore's belief about the reply path but never exercised the
+    // `?directory=` scoping that server-tools mode requires. The live pass
+    // failed precisely there: the unscoped reply hit OpenCode's default app
+    // instance, 404'd with PermissionNotFoundError, and the conversation
+    // hung silently. These tests pin the scoped contract and the new
+    // resilience behavior.
+    // ───────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn server_mode_permission_reply_is_directory_scoped() {
+        let server = MockServer::start().await;
+        // Strict: only a POST carrying `?directory=/srv/ws` matches this
+        // mock — an unscoped reply would miss it and the ack would never
+        // be captured.
+        let cap = capture_post_with_query(&server, "/permission/per_srv/reply", "directory", "/srv/ws").await;
+        let agent = opencode_agent_with(server.uri(), "server", "/srv/ws").await;
+
+        agent.handle_opencode_sse_event(&perm_event("per_srv")).await;
+        agent.confirm("", "per_srv", json!({ "value": "once" }), false).unwrap();
+
+        let bodies = wait_for_acks(&cap, 1, 160).await;
+        assert_eq!(
+            bodies,
+            vec![json!({ "reply": "once" })],
+            "server-tools-mode reply must POST to the directory-scoped endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_mode_question_reply_is_directory_scoped() {
+        let server = MockServer::start().await;
+        let cap = capture_post_with_query(&server, "/question/que_srv/reply", "directory", "/srv/ws").await;
+        let agent = opencode_agent_with(server.uri(), "server", "/srv/ws").await;
+
+        agent.handle_opencode_sse_event(&single_question_event("que_srv")).await;
+        agent
+            .confirm("", "question-que_srv-0", json!({ "value": "Postgres" }), false)
+            .unwrap();
+
+        let bodies = wait_for_acks(&cap, 1, 160).await;
+        assert_eq!(
+            bodies,
+            vec![json!({ "answers": [["Postgres"]] })],
+            "server-tools-mode question reply must POST to the directory-scoped endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_mode_timeout_sweep_reject_is_directory_scoped() {
+        let server = MockServer::start().await;
+        let cap = capture_post_with_query(&server, "/permission/per_tosrv/reply", "directory", "/srv/ws").await;
+        let agent = opencode_agent_with(server.uri(), "server", "/srv/ws").await;
+
+        agent.handle_opencode_sse_event(&perm_event("per_tosrv")).await;
+        agent
+            .state
+            .write()
+            .await
+            .prompt_expiries
+            .insert("per_tosrv".to_string(), 1);
+        let expired = agent.sweep_expired_prompts().await;
+        assert!(expired.contains(&"per_tosrv".to_string()), "prompt must expire");
+
+        let bodies = wait_for_acks(&cap, 1, 160).await;
+        assert_eq!(
+            bodies,
+            vec![json!({ "reply": "reject" })],
+            "timeout auto-reject must hit the directory-scoped endpoint in server-tools mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_reply_404_falls_back_to_session_scoped_endpoint() {
+        let server = MockServer::start().await;
+        // Canonical endpoint replays the live failure: 404
+        // PermissionNotFoundError (domain 404 — the route exists).
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/permission/per_fb/reply"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "_tag": "PermissionNotFoundError",
+                "requestID": "per_fb"
+            })))
+            .mount(&server)
+            .await;
+        // Deprecated-but-still-served session-scoped endpoint must receive
+        // the fallback POST with the `{"response": ...}` body shape.
+        let cap = capture_post(&server, "/session/sess_1/permissions/per_fb").await;
+        let agent = opencode_agent_against(server.uri()).await;
+
+        agent.handle_opencode_sse_event(&perm_event("per_fb")).await;
+        agent.confirm("", "per_fb", json!({ "value": "once" }), false).unwrap();
+
+        let bodies = wait_for_acks(&cap, 1, 160).await;
+        assert_eq!(
+            bodies,
+            vec![json!({ "response": "once" })],
+            "canonical 404 must trigger one fallback POST with the deprecated `response` body"
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_reply_double_404_requeues_confirmation() {
+        let server = MockServer::start().await;
+        // Both the canonical and the fallback endpoint fail.
+        for path in ["/permission/per_dd/reply", "/session/sess_1/permissions/per_dd"] {
+            Mock::given(wm_method("POST"))
+                .and(wm_path(path))
+                .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                    "_tag": "PermissionNotFoundError",
+                    "requestID": "per_dd"
+                })))
+                .mount(&server)
+                .await;
+        }
+        let agent = opencode_agent_against(server.uri()).await;
+
+        agent.handle_opencode_sse_event(&perm_event("per_dd")).await;
+        agent.confirm("", "per_dd", json!({ "value": "once" }), false).unwrap();
+        // The card is removed synchronously by confirm()…
+        assert!(agent.get_confirmations().iter().all(|c| c.call_id != "per_dd"));
+
+        // …and must be re-queued asynchronously once both endpoints fail,
+        // instead of being silently dropped while the server still waits.
+        let mut requeued = false;
+        for _ in 0..160 {
+            if agent.get_confirmations().iter().any(|c| c.call_id == "per_dd") {
+                requeued = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            requeued,
+            "confirmation must be re-queued after a double endpoint failure"
+        );
+        // The dedup stamp must be cleared so the user's retry can re-fire
+        // the reply instead of being suppressed as a duplicate.
+        assert!(
+            !agent
+                .state
+                .read()
+                .await
+                .recently_replied_permissions
+                .contains_key("per_dd"),
+            "dedup stamp must be cleared so the re-queued card can be retried"
+        );
+    }
+
+    #[test]
+    fn default_prompt_timeout_is_sixty_seconds_not_seventy() {
+        // Pins the real auto-reject budget. The legacy PRD prose referenced a
+        // "70-second" timeout in one acceptance row; the implementation has
+        // always been 60s. This guards against doc-driven drift.
+        assert_eq!(DEFAULT_PROMPT_TIMEOUT_MS, 60_000);
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Bet A5: server-tools-mode workspace validation
+    //
+    // Live QA pass 2026-06-09 showed server-tools conversations with a
+    // workspace path that doesn't exist on the remote server used to limp
+    // along with 502s and spurious `external_directory` permissions on
+    // every turn. Fix: probe the workspace on the server before
+    // `POST /session` and fail fast with `[code:workspace_not_on_server]`.
+    //
+    // The probe uses `opencode_fs::fetch_path` which already appends
+    // `?directory=<workspace>` in server-tools mode, so a non-2xx
+    // response (404 etc.) means the server cannot resolve the workspace.
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// Build a permissive catch-all mock that returns 404 for any path
+    /// the strict mocks don't already cover. The local-mode test
+    /// exercises `ensure_local_fs_mcp`, which makes several OpenCode
+    /// probes (GET /mcp, POST /mcp/{name}/disconnect, etc.). We don't
+    /// care about their outcomes — the registration is best-effort and
+    /// the path we are testing is that `POST /session` is reached and
+    /// returns 200.
+    async fn mount_catch_all_404(server: &MockServer) {
+        Mock::given(wm_method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(server)
+            .await;
+        Mock::given(wm_method("POST"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(server)
+            .await;
+        Mock::given(wm_method("DELETE"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn server_mode_session_create_probes_workspace_and_succeeds() {
+        let server = MockServer::start().await;
+        // GET /path?directory=/remote/ws → 200 with workspace metadata
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/path"))
+            .and(wm_query_param("directory", "/remote/ws"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "directory": "/remote/ws" })))
+            .mount(&server)
+            .await;
+        // POST /session → 200 with new id
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/session"))
+            .and(wm_query_param("directory", "/remote/ws"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "sess_new" })))
+            .mount(&server)
+            .await;
+
+        let agent = opencode_agent_with(server.uri(), "server", "/remote/ws").await;
+        let id = agent
+            .opencode_create_session(&server.uri())
+            .await
+            .expect("server-mode session create must succeed when workspace resolves");
+        assert_eq!(id, "sess_new");
+    }
+
+    #[tokio::test]
+    async fn server_mode_session_create_fails_fast_when_workspace_missing() {
+        let server = MockServer::start().await;
+        // GET /path → 404 (the workspace doesn't exist on the server)
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/path"))
+            .and(wm_query_param("directory", "/missing/ws"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
+            .mount(&server)
+            .await;
+        // POST /session → 200, but it must NEVER be hit. Mount it with
+        // an `expect(0)` so the test fails if the workspace probe is
+        // skipped and the session create proceeds. We verify the
+        // expectation below to lock that contract.
+        let session_mock = Mock::given(wm_method("POST"))
+            .and(wm_path("/session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "should_not_create" })))
+            .expect(0)
+            .mount_as_scoped(&server)
+            .await;
+
+        let agent = opencode_agent_with(server.uri(), "server", "/missing/ws").await;
+        let err = agent
+            .opencode_create_session(&server.uri())
+            .await
+            .expect_err("session create must fail when workspace probe fails");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("[code:workspace_not_on_server]"),
+            "expected workspace_not_on_server code, got: {msg}"
+        );
+        assert!(
+            msg.contains("/missing/ws"),
+            "error must mention the offending workspace path, got: {msg}"
+        );
+
+        // Lock the contract: the session POST must never have been sent.
+        // Drop the mock first so its expectations are not held while
+        // we call `verify()`.
+        drop(session_mock);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn local_mode_session_create_skips_workspace_probe() {
+        let server = MockServer::start().await;
+        // POST /session → 200. Mount BEFORE the catch-all so its
+        // (insertion-order) priority wins on the exact match.
+        // Local mode does NOT append `?directory=` (see
+        // `opencode_context::server_directory` / `append_v1_directory`):
+        // the server runs the model on its own local working tree,
+        // not the user's, so the un-scoped POST matches this mock.
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "sess_l" })))
+            .mount(&server)
+            .await;
+        // Permissive 404s for every other path the local-fs MCP
+        // registration may probe (GET /mcp, POST /mcp/{name}/disconnect,
+        // etc.). We are NOT testing the registration here — the
+        // contract under test is that tool_host "local" must skip the
+        // /path workspace probe entirely and proceed straight to
+        // POST /session.
+        mount_catch_all_404(&server).await;
+
+        let agent = opencode_agent_with(server.uri(), "local", "/local/ws").await;
+        let id = agent
+            .opencode_create_session(&server.uri())
+            .await
+            .expect("local-mode session create must succeed without workspace probe");
+        assert_eq!(id, "sess_l");
+
+        // Lock the contract: NO /path probe was sent in local mode.
+        // /path is a workspace-probe concern; the local-fs MCP may
+        // make GET requests but never to /path itself.
+        let received = server.received_requests().await.unwrap_or_default();
+        for req in &received {
+            assert!(
+                req.url.path() != "/path",
+                "local mode must not probe /path, but got: {} {}",
+                req.method,
+                req.url
+            );
+        }
     }
 }

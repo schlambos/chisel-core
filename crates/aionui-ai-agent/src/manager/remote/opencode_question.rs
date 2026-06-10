@@ -311,7 +311,9 @@ pub fn build_question_reply_request(
     answers: &[Vec<String>],
 ) -> (String, super::opencode_payloads::OpencodeQuestionReply) {
     let url = format!("{base_url}/question/{request_id}/reply");
-    let body = super::opencode_payloads::OpencodeQuestionReply { answers: answers.to_vec() };
+    let body = super::opencode_payloads::OpencodeQuestionReply {
+        answers: answers.to_vec(),
+    };
     (url, body)
 }
 
@@ -527,7 +529,10 @@ mod tests {
         let answers = vec![vec!["Postgres".to_string()]];
         let (url, body) = build_question_reply_request("http://h:4096", "que_abc", &answers);
         assert_eq!(url, "http://h:4096/question/que_abc/reply");
-        assert_eq!(serde_json::to_value(&body).unwrap(), json!({ "answers": [["Postgres"]] }));
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            json!({ "answers": [["Postgres"]] })
+        );
     }
 
     #[test]

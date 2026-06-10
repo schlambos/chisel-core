@@ -615,11 +615,7 @@ impl AgentInstance {
     }
 
     /// M13: find files on the remote OpenCode workspace.
-    pub async fn remote_find_files(
-        &self,
-        query: &str,
-        limit: Option<u32>,
-    ) -> Result<serde_json::Value, AppError> {
+    pub async fn remote_find_files(&self, query: &str, limit: Option<u32>) -> Result<serde_json::Value, AppError> {
         match self {
             Self::Remote(m) => m.opencode_find_files(query, limit).await,
             _ => Err(AppError::BadRequest(
@@ -629,11 +625,7 @@ impl AgentInstance {
     }
 
     /// M13: text search on the remote OpenCode workspace.
-    pub async fn remote_find_text(
-        &self,
-        pattern: &str,
-        limit: Option<u32>,
-    ) -> Result<serde_json::Value, AppError> {
+    pub async fn remote_find_text(&self, pattern: &str, limit: Option<u32>) -> Result<serde_json::Value, AppError> {
         match self {
             Self::Remote(m) => m.opencode_find_text(pattern, limit).await,
             _ => Err(AppError::BadRequest(
@@ -851,11 +843,7 @@ fn map_opencode_file_nodes(value: serde_json::Value, search: Option<&str>) -> Ve
                 continue;
             }
         }
-        let entry_type = node
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("file")
-            .to_string();
+        let entry_type = node.get("type").and_then(|v| v.as_str()).unwrap_or("file").to_string();
         entries.push(WorkspaceEntry { name, entry_type });
     }
     entries.sort_by(|a, b| {

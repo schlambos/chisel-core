@@ -1070,10 +1070,10 @@ mod tests {
 
     // ── Per-tool-call snapshot hook (Task 14.3) ─────────────────────
 
-    use aionui_db::SqliteOpencodeToolSnapshotRepository;
-    use aionui_db::init_database_memory;
     use aionui_db::IConversationRepository;
     use aionui_db::IUserRepository;
+    use aionui_db::SqliteOpencodeToolSnapshotRepository;
+    use aionui_db::init_database_memory;
     use aionui_file::SnapshotService;
 
     /// Test harness for the snapshot hook: a real `SnapshotService` (backed
@@ -1097,10 +1097,7 @@ mod tests {
         // opencode_tool_snapshots; seed both parents via the repository
         // APIs so the schema stays one source of truth.
         let user_repo = aionui_db::SqliteUserRepository::new(pool.clone());
-        let user = user_repo
-            .create_user("tester", "")
-            .await
-            .expect("seed user");
+        let user = user_repo.create_user("tester", "").await.expect("seed user");
         let conversation_repo = aionui_db::SqliteConversationRepository::new(pool.clone());
         let row = aionui_db::models::ConversationRow {
             id: "conv-hook".into(),
@@ -1308,12 +1305,7 @@ mod tests {
 
         // Reconstruct the outcome by calling the hook helper directly so the
         // assertion is independent of dispatch's drop site.
-        let outcome = commit_tool_snapshot_after(
-            &harness.hook,
-            "call-obs-success",
-            vec!["obs.txt".to_string()],
-        )
-        .await;
+        let outcome = commit_tool_snapshot_after(&harness.hook, "call-obs-success", vec!["obs.txt".to_string()]).await;
         // The dispatch above already wrote a row for call-obs-success, so a
         // second hook invocation surfaces a duplicate-key warning (DB error)
         // rather than a hard success -- but the tool call itself succeeded.

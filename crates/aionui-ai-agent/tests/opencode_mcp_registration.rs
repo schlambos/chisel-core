@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use aionui_ai_agent::manager::remote::local_fs_mcp::{ShellApproval, ShellApprover};
 use aionui_ai_agent::manager::remote::opencode_mcp::{
-    start_and_register, sweep_stale_registrations, MCP_NAME, owns_slot_for_test,
+    MCP_NAME, owns_slot_for_test, start_and_register, sweep_stale_registrations,
 };
 use async_trait::async_trait;
 use serde_json::json;

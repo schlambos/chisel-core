@@ -216,6 +216,18 @@ impl OpencodePermissionReply {
     }
 }
 
+/// Body of the deprecated session-scoped fallback
+/// `POST /session/{sessionID}/permissions/{permissionID}`
+/// (`operationId: permission.respond`, `deprecated: true` — still served).
+///
+/// Only used when the canonical `/permission/{id}/reply` returns non-2xx;
+/// see `post_permission_reply_with_fallback` in `agent.rs`. The field is
+/// `response` (not `reply`) per the deprecated schema.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OpencodePermissionRespond {
+    pub response: String,
+}
+
 // -- V1 /question/{id}/reply, /question/{id}/reject -----------------------
 
 /// Body of `POST /question/{id}/reply`. `answers[i][j]` is the option label
@@ -331,7 +343,10 @@ impl OpencodeAuthBody {
     }
 
     pub fn wellknown(key: impl Into<String>, token: impl Into<String>) -> Self {
-        Self::WellKnown { key: key.into(), token: token.into() }
+        Self::WellKnown {
+            key: key.into(),
+            token: token.into(),
+        }
     }
 }
 
@@ -492,7 +507,10 @@ mod tests {
     fn session_create_deny_builtin_tools_shape() {
         let req = OpencodeSessionCreate::deny_builtin_tools();
         let v = to_value(&req);
-        let perms = v.get("permission").and_then(|p| p.as_array()).expect("permission array");
+        let perms = v
+            .get("permission")
+            .and_then(|p| p.as_array())
+            .expect("permission array");
         assert_eq!(perms.len(), 5);
         for entry in perms {
             assert_eq!(entry.get("pattern").and_then(|s| s.as_str()), Some("*"));
@@ -509,21 +527,32 @@ mod tests {
     fn fork_request_omits_message_id_when_at_tip() {
         let req = OpencodeForkRequest::default();
         assert_eq!(to_value(&req), json!({}));
-        let req = OpencodeForkRequest { message_id: Some("msg_after".into()) };
+        let req = OpencodeForkRequest {
+            message_id: Some("msg_after".into()),
+        };
         assert_eq!(to_value(&req), json!({ "messageID": "msg_after" }));
     }
 
     #[test]
     fn revert_request_required_message_id_optional_part_id() {
-        let req = OpencodeRevertRequest { message_id: "msg_1".into(), part_id: None };
+        let req = OpencodeRevertRequest {
+            message_id: "msg_1".into(),
+            part_id: None,
+        };
         assert_eq!(to_value(&req), json!({ "messageID": "msg_1" }));
-        let req = OpencodeRevertRequest { message_id: "msg_1".into(), part_id: Some("prt_2".into()) };
+        let req = OpencodeRevertRequest {
+            message_id: "msg_1".into(),
+            part_id: Some("prt_2".into()),
+        };
         assert_eq!(to_value(&req), json!({ "messageID": "msg_1", "partID": "prt_2" }));
     }
 
     #[test]
     fn summarize_request_shape() {
-        let req = OpencodeSummarizeRequest { provider_id: "anthropic".into(), model_id: "claude-sonnet-4-5".into() };
+        let req = OpencodeSummarizeRequest {
+            provider_id: "anthropic".into(),
+            model_id: "claude-sonnet-4-5".into(),
+        };
         assert_eq!(
             to_value(&req),
             json!({ "providerID": "anthropic", "modelID": "claude-sonnet-4-5" })
@@ -551,7 +580,11 @@ mod tests {
 
     #[test]
     fn command_request_minimal_only_command() {
-        let req = OpencodeCommandRequest { command: "/init".into(), agent: None, model: None };
+        let req = OpencodeCommandRequest {
+            command: "/init".into(),
+            agent: None,
+            model: None,
+        };
         assert_eq!(to_value(&req), json!({ "command": "/init" }));
     }
 
@@ -570,7 +603,12 @@ mod tests {
     #[test]
     fn v2_prompt_request_minimal_text_only() {
         let req = OpencodeV2PromptRequest {
-            prompt: OpencodeV2PromptText { text: "hello".into(), files: vec![], agent: None, reference: None },
+            prompt: OpencodeV2PromptText {
+                text: "hello".into(),
+                files: vec![],
+                agent: None,
+                reference: None,
+            },
             delivery: Some("immediate".into()),
         };
         let v = to_value(&req);
@@ -581,7 +619,9 @@ mod tests {
     fn v2_compact_request_optional_instructions() {
         let req = OpencodeV2CompactRequest::default();
         assert_eq!(to_value(&req), json!({}));
-        let req = OpencodeV2CompactRequest { instructions: Some("summarize".into()) };
+        let req = OpencodeV2CompactRequest {
+            instructions: Some("summarize".into()),
+        };
         assert_eq!(to_value(&req), json!({ "instructions": "summarize" }));
     }
 
@@ -595,7 +635,10 @@ mod tests {
         assert_eq!(v.get("name").and_then(|s| s.as_str()), Some("aionui-local-fs"));
         let cfg = v.get("config").unwrap();
         assert_eq!(cfg.get("type").and_then(|s| s.as_str()), Some("remote"));
-        assert_eq!(cfg.get("url").and_then(|s| s.as_str()), Some("http://127.0.0.1:7117/mcp"));
+        assert_eq!(
+            cfg.get("url").and_then(|s| s.as_str()),
+            Some("http://127.0.0.1:7117/mcp")
+        );
         assert_eq!(cfg.get("enabled").and_then(|b| b.as_bool()), Some(true));
         assert_eq!(cfg.get("oauth").and_then(|b| b.as_bool()), Some(false));
         let headers = cfg.get("headers").and_then(|h| h.as_object()).unwrap();
@@ -622,7 +665,10 @@ mod tests {
 
     #[test]
     fn oauth_authorize_minimal_method_only() {
-        let req = OpencodeOAuthAuthorizeRequest { method: 0, inputs: None };
+        let req = OpencodeOAuthAuthorizeRequest {
+            method: 0,
+            inputs: None,
+        };
         assert_eq!(to_value(&req), json!({ "method": 0 }));
     }
 
@@ -630,7 +676,10 @@ mod tests {
     fn oauth_authorize_with_inputs() {
         let mut inputs = HashMap::new();
         inputs.insert("api_key".to_string(), "sk-abc".to_string());
-        let req = OpencodeOAuthAuthorizeRequest { method: 0, inputs: Some(inputs) };
+        let req = OpencodeOAuthAuthorizeRequest {
+            method: 0,
+            inputs: Some(inputs),
+        };
         let v = to_value(&req);
         assert_eq!(v.get("method").and_then(|n| n.as_u64()), Some(0));
         assert_eq!(
@@ -641,7 +690,10 @@ mod tests {
 
     #[test]
     fn oauth_callback_with_code() {
-        let req = OpencodeOAuthCallbackRequest { method: 0, code: Some("auth-code".into()) };
+        let req = OpencodeOAuthCallbackRequest {
+            method: 0,
+            code: Some("auth-code".into()),
+        };
         let v = to_value(&req);
         assert_eq!(v.get("code").and_then(|s| s.as_str()), Some("auth-code"));
     }
@@ -655,7 +707,9 @@ mod tests {
 
     #[test]
     fn sync_steal_request_shape() {
-        let req = OpencodeSyncStealRequest { session_id: "ses_1".into() };
+        let req = OpencodeSyncStealRequest {
+            session_id: "ses_1".into(),
+        };
         assert_eq!(to_value(&req), json!({ "sessionID": "ses_1" }));
     }
 
@@ -685,7 +739,9 @@ mod tests {
         assert_eq!(v.get("level").and_then(|s| s.as_str()), Some("info"));
         assert_eq!(v.get("message").and_then(|s| s.as_str()), Some("prompt sent"));
         assert_eq!(
-            v.get("extra").and_then(|e| e.get("conversation_id")).and_then(|s| s.as_str()),
+            v.get("extra")
+                .and_then(|e| e.get("conversation_id"))
+                .and_then(|s| s.as_str()),
             Some("c1")
         );
     }

@@ -19,9 +19,7 @@ use reqwest::header::AUTHORIZATION;
 use serde_json::Value;
 
 use super::agent::{RemoteAgentConfig, build_auth_header, normalize_base_url};
-use super::opencode_payloads::{
-    OpencodeAuthBody, OpencodeOAuthAuthorizeRequest, OpencodeOAuthCallbackRequest,
-};
+use super::opencode_payloads::{OpencodeAuthBody, OpencodeOAuthAuthorizeRequest, OpencodeOAuthCallbackRequest};
 
 async fn parse_json(resp: reqwest::Response, label: &str) -> Result<Value, AppError> {
     if !resp.status().is_success() {
@@ -164,10 +162,7 @@ pub async fn complete_provider_oauth(
     if resp.status().as_u16() == 405 || resp.status().as_u16() == 404 {
         let code = code.ok_or_else(|| AppError::BadRequest("OAuth authorization code is required".into()))?;
         let enc = super::opencode_context::encode_query_value(code);
-        let legacy_url = provider_url(
-            &base_url,
-            &format!("/provider/{provider_id}/oauth/callback?code={enc}"),
-        );
+        let legacy_url = provider_url(&base_url, &format!("/provider/{provider_id}/oauth/callback?code={enc}"));
         let mut legacy = http_client.get(&legacy_url).timeout(Duration::from_secs(30));
         if let Some(ref h) = auth(cfg) {
             legacy = legacy.header(AUTHORIZATION, h);
@@ -176,17 +171,16 @@ pub async fn complete_provider_oauth(
             .send()
             .await
             .map_err(|e| AppError::BadGateway(format!("OpenCode OAuth callback (legacy GET) failed: {e}")))?;
-        return parse_json(legacy_resp, "GET /provider/oauth/callback").await.map(|_| ());
+        return parse_json(legacy_resp, "GET /provider/oauth/callback")
+            .await
+            .map(|_| ());
     }
 
     parse_json(resp, "POST /provider/oauth/callback").await.map(|_| ())
 }
 
 /// `GET /provider` — full catalog with models (§9).
-pub async fn list_providers(
-    http_client: &reqwest::Client,
-    cfg: &RemoteAgentConfig,
-) -> Result<Value, AppError> {
+pub async fn list_providers(http_client: &reqwest::Client, cfg: &RemoteAgentConfig) -> Result<Value, AppError> {
     let url = provider_url(&normalize_base_url(&cfg.url), "/provider");
     let mut req = http_client.get(&url).timeout(Duration::from_secs(15));
     if let Some(ref h) = auth(cfg) {

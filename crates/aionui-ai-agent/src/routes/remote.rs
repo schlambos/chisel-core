@@ -51,8 +51,14 @@ pub fn remote_agent_routes(state: RemoteAgentRouterState) -> Router {
             post(backfill_remote_history),
         )
         .route("/api/remote-agents/{id}/providers", get(fetch_provider_catalog))
-        .route("/api/remote-agents/{id}/providers/auth", get(fetch_provider_auth_methods))
-        .route("/api/remote-agents/{id}/providers/{providerId}/auth", post(set_provider_auth))
+        .route(
+            "/api/remote-agents/{id}/providers/auth",
+            get(fetch_provider_auth_methods),
+        )
+        .route(
+            "/api/remote-agents/{id}/providers/{providerId}/auth",
+            post(set_provider_auth),
+        )
         .route(
             "/api/remote-agents/{id}/providers/{providerId}/auth",
             axum::routing::delete(delete_provider_auth),
@@ -311,7 +317,9 @@ async fn fetch_provider_auth_methods(
     Extension(_user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.fetch_provider_auth_methods(&id).await?)))
+    Ok(Json(ApiResponse::ok(
+        state.service.fetch_provider_auth_methods(&id).await?,
+    )))
 }
 
 async fn set_provider_auth(
@@ -322,10 +330,7 @@ async fn set_provider_auth(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     if let Some(auth) = req.auth {
-        state
-            .service
-            .set_provider_auth_payload(&id, &provider_id, auth)
-            .await?;
+        state.service.set_provider_auth_payload(&id, &provider_id, auth).await?;
     } else if let (Some(key), Some(token)) = (req.wellknown_key, req.wellknown_token) {
         state
             .service

@@ -86,7 +86,9 @@ pub async fn v2_compact(
     instructions: Option<&str>,
     location: V2Location<'_>,
 ) -> Result<(), AppError> {
-    let body = OpencodeV2CompactRequest { instructions: instructions.map(String::from) };
+    let body = OpencodeV2CompactRequest {
+        instructions: instructions.map(String::from),
+    };
     let url = v2_session_url(base_url, session_id, "/compact", location);
     v2_session_request(
         http_client,
@@ -110,15 +112,7 @@ pub async fn v2_get_context(
     location: V2Location<'_>,
 ) -> Result<Value, AppError> {
     let url = v2_session_url(base_url, session_id, "/context", location);
-    v2_session_request(
-        http_client,
-        &url,
-        auth_header,
-        reqwest::Method::GET,
-        None,
-        30,
-    )
-    .await
+    v2_session_request(http_client, &url, auth_header, reqwest::Method::GET, None, 30).await
 }
 
 /// V2 prompt (`POST /api/session/{sessionID}/prompt`).
@@ -228,15 +222,7 @@ pub async fn v2_get_messages(
         subpath.push_str(&format!("{sep}cursor={c}"));
     }
     let url = v2_session_url(base_url, session_id, &subpath, location);
-    v2_session_request(
-        http_client,
-        &url,
-        auth_header,
-        reqwest::Method::GET,
-        None,
-        30,
-    )
-    .await
+    v2_session_request(http_client, &url, auth_header, reqwest::Method::GET, None, 30).await
 }
 
 /// V2 wait for session idle (`POST /api/session/{sessionID}/wait`).
@@ -249,16 +235,9 @@ pub async fn v2_wait(
     location: V2Location<'_>,
 ) -> Result<(), AppError> {
     let url = v2_session_url(base_url, session_id, "/wait", location);
-    v2_session_request(
-        http_client,
-        &url,
-        auth_header,
-        reqwest::Method::POST,
-        None,
-        300,
-    )
-    .await
-    .map(|_| ())
+    v2_session_request(http_client, &url, auth_header, reqwest::Method::POST, None, 300)
+        .await
+        .map(|_| ())
 }
 
 /// V2 model list (`GET /api/model`). Returns the raw JSON array of `ModelV2Info`.
