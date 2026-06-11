@@ -617,8 +617,21 @@ mod tests {
     async fn tools_list_omits_run_shell_without_approver() {
         let (_dir, server, url) = boot().await;
         let names = tools_list_names(&url, server.auth_token()).await;
-        assert!(!names.iter().any(|n| n == "run_shell"));
-        assert!(names.iter().any(|n| n == "read_file"));
+        // All three approval-gated tools must be hidden when no approver
+        // is wired (the dispatcher fails closed on them in either case).
+        for gated in ["run_shell", "delete_file", "rename"] {
+            assert!(
+                !names.iter().any(|n| n == gated),
+                "{gated} must be hidden without an approver: {names:?}"
+            );
+        }
+        // The read-only / non-gated tools must still be present.
+        for required in ["read_file", "write_file", "list_dir", "grep_dir"] {
+            assert!(
+                names.iter().any(|n| n == required),
+                "{required} must remain visible without an approver: {names:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -634,7 +647,22 @@ mod tests {
         let approver: std::sync::Arc<dyn ShellApprover> = std::sync::Arc::new(FixedApprover);
         let (_dir, server, url) = boot_with_approver(Some(approver)).await;
         let names = tools_list_names(&url, server.auth_token()).await;
-        assert!(names.iter().any(|n| n == "run_shell"));
+        // With an approver wired, every tool — including the three
+        // approval-gated ones — must be advertised.
+        for required in [
+            "read_file",
+            "write_file",
+            "list_dir",
+            "grep_dir",
+            "delete_file",
+            "rename",
+            "run_shell",
+        ] {
+            assert!(
+                names.iter().any(|n| n == required),
+                "{required} must be present with an approver: {names:?}"
+            );
+        }
     }
 
     #[tokio::test]

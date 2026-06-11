@@ -37,12 +37,13 @@ pub use bg::{
     BgError, BgProcessManager, DEFAULT_BG_TIMEOUT_SECS, MAX_BG_PROCESSES_PER_AGENT, MAX_BG_TIMEOUT_SECS, bg_global,
     bg_info_to_ui, kill_all_bg_processes,
 };
+pub use port::PLUGIN_PORT_ENV;
 pub use protocol::{
     BgErrorResponse, BgListResponse, BgProcessInfo, BgProcessResponse, BgReadResponse, BgRequest, BgStatus,
     BgTailRequest, PROTOCOL_VERSION, PluginAuditRecord, PluginHelloRequest, PluginHelloResponse, PluginProjectInfo,
     PluginPushEvent, PluginResultRequest, PluginResultResponse, RunShellStreamingRequest,
 };
-pub use auth::{DbPluginTokenValidator, db_token_validator};
+pub use auth::{DbPluginTokenValidator, db_token_validator, global_validator, set_global_validator};
 pub use registry::{
     PluginConnectionState, PluginRegistry, PluginTokenValidator, STICKY_VOICE_MODE_CAP, global as global_registry,
 };

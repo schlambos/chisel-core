@@ -86,6 +86,27 @@ pub trait ShellApprover: Send + Sync {
     }
 
     async fn approve_shell(&self, command: &str, cwd: &str) -> ShellApproval;
+
+    /// Ask the user to approve a destructive filesystem action (today:
+    /// `delete_file` / `rename`). `action` is the tool name and `detail` a
+    /// short human-readable summary of the affected paths.
+    ///
+    /// The default implementation synthesizes a pseudo-command and routes
+    /// through [`Self::approve_shell_with_context`] so existing approvers
+    /// (tests, plugin streaming) gain the gate without code changes.
+    /// Richer implementations (e.g. the remote agent) override this to show
+    /// a file-change-specific confirmation card with its own
+    /// "skip prompts" memory, separate from the shell one.
+    async fn approve_fs_action(
+        &self,
+        action: &str,
+        detail: &str,
+        cwd: &str,
+        context: &McpRequestContext,
+    ) -> ShellApproval {
+        self.approve_shell_with_context(&format!("{action} {detail}"), cwd, context)
+            .await
+    }
 }
 
 /// Bridges a tool's elicitation request (free-form user input mid-tool-call,

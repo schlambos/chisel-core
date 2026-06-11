@@ -94,12 +94,18 @@ pub struct ToolDescriptor {
     pub annotations: ToolAnnotations,
 }
 
-/// Tools advertised in `tools/list`, optionally omitting `run_shell` when no
-/// approver is wired (fail-closed at dispatch time either way).
+/// Tools that require an interactive approver before they may execute:
+/// `run_shell` (arbitrary commands) and the destructive filesystem ops
+/// (`delete_file`, `rename`). Hidden from `tools/list` when no approver is
+/// wired, and fail closed at dispatch time either way.
+const APPROVAL_GATED_TOOLS: [&str; 3] = ["run_shell", "delete_file", "rename"];
+
+/// Tools advertised in `tools/list`, optionally omitting the approval-gated
+/// ones when no approver is wired (fail-closed at dispatch time either way).
 pub fn tool_descriptors_for_state(has_approver: bool) -> Vec<ToolDescriptor> {
     all_tool_descriptors()
         .into_iter()
-        .filter(|d| d.name != "run_shell" || has_approver)
+        .filter(|d| has_approver || !APPROVAL_GATED_TOOLS.contains(&d.name))
         .collect()
 }
 
@@ -171,7 +177,8 @@ Do NOT prepend the workspace's absolute path that appears in session context.",
         ToolDescriptor {
             name: "delete_file",
             description: "Delete a file in the user's local project. Paths are RELATIVE to project root. \
-Do NOT prepend the workspace's absolute path that appears in session context.",
+Do NOT prepend the workspace's absolute path that appears in session context. \
+The user must approve each deletion before it happens, so never claim a file was deleted until this tool returns success.",
             input_schema: json!({
                 "type": "object",
                 "properties": { "path": { "type": "string", "description": "Relative path inside the project root. Do not prepend the workspace's absolute path." } },
@@ -182,7 +189,8 @@ Do NOT prepend the workspace's absolute path that appears in session context.",
         ToolDescriptor {
             name: "rename",
             description: "Rename or move a file within the user's local project. Both paths RELATIVE to project root. \
-Do NOT prepend the workspace's absolute path that appears in session context.",
+Do NOT prepend the workspace's absolute path that appears in session context. \
+The user must approve each rename/move before it happens, so never claim it succeeded until this tool returns success.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -199,7 +207,8 @@ Do NOT prepend the workspace's absolute path that appears in session context.",
 Use this to verify your work: build, run tests, run linters/formatters, git, or any terminal command. \
 Your own built-in/remote shell cannot see this project, so this is the ONLY way to execute commands against it. \
 The command runs in the project root using the user's native shell (the session context states which OS/shell — write the command in that syntax). \
-IMPORTANT: every call requires the user to approve the exact command before it runs, so combine related steps into one command rather than issuing many small ones.",
+IMPORTANT: every call requires the user to approve the exact command before it runs, so combine related steps into one command rather than issuing many small ones. \
+Output is BUFFERED — the user sees nothing until the command exits. If a `run_shell_streaming` tool is available in your toolset, prefer it for long-running or verbose commands so the user sees live output.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -337,9 +346,10 @@ struct ListEntry {
 /// Returns `(content_text, is_error)`.
 ///
 /// `approver` gates the `run_shell` tool: the command is only executed once
-/// the user approves it through the host agent's confirmation UI. It is
-/// `None` for the filesystem tools (which need no approval) and when no
-/// approval channel is wired up — in which case `run_shell` fails closed.
+/// the user approves it through the host agent's confirmation UI. It gates
+/// `run_shell` and the destructive filesystem ops (`delete_file`, `rename`);
+/// the read/write tools need no approval. When no approval channel is wired
+/// up, the gated tools fail closed (and are hidden from `tools/list`).
 ///
 /// `elicitation` lets a tool raise a free-form, schema-driven prompt back to
 /// the host UI (MCP `elicitation/create`-style flow). `None` disables it; the
@@ -377,8 +387,8 @@ pub async fn dispatch(
         "write_file" => dispatch_write(root, args).await,
         "list_dir" => dispatch_list(root, args).await,
         "grep_dir" => dispatch_grep(root, args).await,
-        "delete_file" => dispatch_delete(root, args).await,
-        "rename" => dispatch_rename(root, args).await,
+        "delete_file" => dispatch_delete(root, args, approver, context).await,
+        "rename" => dispatch_rename(root, args, approver, context).await,
         "run_shell" => dispatch_run_shell(root, args, approver, context).await,
         _ => Err(format!("unknown tool: {tool}")),
     };
@@ -425,15 +435,53 @@ async fn dispatch_grep(root: &Path, args: &Value) -> Result<(String, bool, Vec<S
     grep_dir(root, &input.pattern, &input.path, input.case_insensitive).map(|t| (t, false, Vec::new()))
 }
 
-async fn dispatch_delete(root: &Path, args: &Value) -> Result<(String, bool, Vec<String>), String> {
+/// Gate a destructive filesystem action on user approval. Fails closed: no
+/// approval channel means the action never executes. Mirrors `run_shell`'s
+/// fail-closed contract — the gated tools are also hidden from `tools/list`
+/// when no approver is wired (see [`APPROVAL_GATED_TOOLS`]).
+async fn approve_destructive(
+    approver: Option<&Arc<dyn ShellApprover>>,
+    context: &McpRequestContext,
+    root: &Path,
+    action: &str,
+    detail: &str,
+) -> Result<(), String> {
+    let Some(approver) = approver else {
+        warn!(%action, "destructive fs tool invoked with no approval channel; refusing to execute");
+        return Err(format!(
+            "{action} is unavailable: no approval channel is configured for this session"
+        ));
+    };
+    let cwd = root.to_string_lossy();
+    match approver.approve_fs_action(action, detail, &cwd, context).await {
+        ShellApproval::Allow => Ok(()),
+        ShellApproval::Reject => Err(format!("{action} was rejected by the user")),
+        ShellApproval::TimedOut => Err(format!("{action} approval timed out waiting for the user")),
+    }
+}
+
+async fn dispatch_delete(
+    root: &Path,
+    args: &Value,
+    approver: Option<&Arc<dyn ShellApprover>>,
+    context: &McpRequestContext,
+) -> Result<(String, bool, Vec<String>), String> {
     let input: DeleteInput = serde_json::from_value(args.clone()).map_err(|e| format!("invalid params: {e}"))?;
+    approve_destructive(approver, context, root, "delete_file", &input.path).await?;
     delete_file(root, &input.path)
         .await
         .map(|m| (m, false, vec![input.path]))
 }
 
-async fn dispatch_rename(root: &Path, args: &Value) -> Result<(String, bool, Vec<String>), String> {
+async fn dispatch_rename(
+    root: &Path,
+    args: &Value,
+    approver: Option<&Arc<dyn ShellApprover>>,
+    context: &McpRequestContext,
+) -> Result<(String, bool, Vec<String>), String> {
     let input: RenameInput = serde_json::from_value(args.clone()).map_err(|e| format!("invalid params: {e}"))?;
+    let detail = format!("{} -> {}", input.from, input.to);
+    approve_destructive(approver, context, root, "rename", &detail).await?;
     // Both endpoints touched: `from` (removed) and `to` (created). The
     // snapshot commit records both so the narrow revert can restore the
     // source if the tool call created it, or delete the destination if the
@@ -1173,11 +1221,17 @@ mod tests {
         let (harness, _g) = make_hook_harness().await;
         // Pre-create the file so `delete_file` has a target.
         std::fs::write(harness.workspace_root.join("bye.txt"), "x").unwrap();
+        // `delete_file` is approval-gated; pass an approver that auto-allows
+        // so the dispatch succeeds and the per-tool-call snapshot hook fires.
+        let approver: Arc<dyn ShellApprover> = Arc::new(FixedApprover {
+            decision: ShellApproval::Allow,
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
         let (out, err) = dispatch(
             &harness.workspace_root,
             "delete_file",
             &json!({"path": "bye.txt"}),
-            None,
+            Some(&approver),
             None,
             &McpRequestContext::default(),
             Some("call-del"),
@@ -1200,11 +1254,18 @@ mod tests {
     async fn snapshot_hook_records_rename_with_both_paths() {
         let (harness, _g) = make_hook_harness().await;
         std::fs::write(harness.workspace_root.join("old.txt"), "x").unwrap();
+        // `rename` is approval-gated; auto-allow so the dispatch runs to
+        // completion and the per-tool-call snapshot hook fires for both
+        // the source and destination paths.
+        let approver: Arc<dyn ShellApprover> = Arc::new(FixedApprover {
+            decision: ShellApproval::Allow,
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
         let (out, err) = dispatch(
             &harness.workspace_root,
             "rename",
             &json!({"from": "old.txt", "to": "new.txt"}),
-            None,
+            Some(&approver),
             None,
             &McpRequestContext::default(),
             Some("call-rename"),
@@ -1328,5 +1389,147 @@ mod tests {
         assert!(outcome.warning.is_some());
         assert!(outcome.error.is_none());
         assert!(outcome.commit_sha.is_none());
+    }
+
+    // ── Destructive-fs approval gating (Task: shell-approver parity) ─
+
+    /// Auto-rejecting approver for the gating tests: returns
+    /// [`ShellApproval::Reject`] for any action so we can assert that a
+    /// user denial short-circuits the destructive tool without touching
+    /// the filesystem.
+    struct RejectAll;
+
+    #[async_trait::async_trait]
+    impl ShellApprover for RejectAll {
+        async fn approve_shell(&self, _command: &str, _cwd: &str) -> ShellApproval {
+            ShellApproval::Reject
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_file_fails_closed_without_approver() {
+        // No approval channel wired → `delete_file` must refuse to execute
+        // and report an error. The file (which doesn't exist yet, but the
+        // gate fires before any IO) must remain untouched.
+        let (_g, root) = tmp();
+        let (out, err) = dispatch(
+            &root,
+            "delete_file",
+            &json!({"path": "missing.txt"}),
+            None,
+            None,
+            &McpRequestContext::default(),
+            None,
+            None,
+        )
+        .await;
+        assert!(err, "delete_file without approver must error");
+        assert!(
+            out.contains("no approval channel"),
+            "unexpected message: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_fails_closed_without_approver() {
+        // Mirror of `delete_file_fails_closed_without_approver` for the
+        // `rename` tool — same fail-closed contract.
+        let (_g, root) = tmp();
+        let (out, err) = dispatch(
+            &root,
+            "rename",
+            &json!({"from": "a.txt", "to": "b.txt"}),
+            None,
+            None,
+            &McpRequestContext::default(),
+            None,
+            None,
+        )
+        .await;
+        assert!(err, "rename without approver must error");
+        assert!(
+            out.contains("no approval channel"),
+            "unexpected message: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_file_rejected_by_user_does_not_delete() {
+        // A `RejectAll` approver must prevent the file from being
+        // removed: the dispatch returns an error, and the file on disk
+        // survives the (rejected) call.
+        let (_g, root) = tmp();
+        std::fs::write(root.join("kept.txt"), "preserved").unwrap();
+        let approver: Arc<dyn ShellApprover> = Arc::new(RejectAll);
+        let (out, err) = dispatch(
+            &root,
+            "delete_file",
+            &json!({"path": "kept.txt"}),
+            Some(&approver),
+            None,
+            &McpRequestContext::default(),
+            None,
+            None,
+        )
+        .await;
+        assert!(err, "rejected delete must error");
+        assert!(out.contains("rejected"), "unexpected message: {out}");
+        // The gate must short-circuit before the actual `fs::remove_file`
+        // call, so the file is still on disk afterwards.
+        assert!(
+            root.join("kept.txt").exists(),
+            "rejected delete must not touch the file"
+        );
+    }
+
+    #[test]
+    fn gated_tools_hidden_without_approver() {
+        // `tool_descriptors_for_state(false)` should advertise only the
+        // read/write tools — the three approval-gated tools must be
+        // omitted from the list so a model with no approval channel can
+        // never even see them.
+        let names: Vec<&str> = tool_descriptors_for_state(false)
+            .iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(
+            !names.contains(&"run_shell"),
+            "run_shell must be hidden when no approver is wired: {names:?}"
+        );
+        assert!(
+            !names.contains(&"delete_file"),
+            "delete_file must be hidden when no approver is wired: {names:?}"
+        );
+        assert!(
+            !names.contains(&"rename"),
+            "rename must be hidden when no approver is wired: {names:?}"
+        );
+        // The non-gated tools must still be present.
+        for required in ["read_file", "write_file", "list_dir", "grep_dir"] {
+            assert!(
+                names.contains(&required),
+                "{required} must be present even without an approver: {names:?}"
+            );
+        }
+
+        // With an approver, all seven tools are advertised.
+        let names_full: Vec<&str> = tool_descriptors_for_state(true)
+            .iter()
+            .map(|d| d.name)
+            .collect();
+        for required in [
+            "read_file",
+            "write_file",
+            "list_dir",
+            "grep_dir",
+            "delete_file",
+            "rename",
+            "run_shell",
+        ] {
+            assert!(
+                names_full.contains(&required),
+                "{required} must be present with an approver: {names_full:?}"
+            );
+        }
     }
 }

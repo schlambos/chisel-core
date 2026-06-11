@@ -6,6 +6,7 @@ use std::sync::Arc;
 use aionui_ai_agent::{
     AcpSessionSyncService, AcpSkillManager, AgentFactoryDeps, AgentRegistry, IWorkerTaskManager, WorkerTaskManagerImpl,
     build_agent_factory,
+    manager::remote::plugin::{db_token_validator, set_global_validator},
 };
 use aionui_api_types::GuideMcpConfig;
 use aionui_auth::{CookieConfig, JwtService, QrTokenStore, resolve_jwt_secret};
@@ -116,6 +117,13 @@ impl AppServices {
         let encryption_key = derive_encryption_key(&secret);
 
         let remote_agent_repo = Arc::new(SqliteRemoteAgentRepository::new(database.pool().clone()));
+
+        // Install the process-global plugin-token validator so the
+        // plugin webserver can be started eagerly from any code path
+        // (e.g. `ensure_local_fs_mcp`) without needing a local repo
+        // handle. Must happen before any remote agent session starts.
+        set_global_validator(db_token_validator(remote_agent_repo.clone()));
+
         let provider_repo = Arc::new(SqliteProviderRepository::new(database.pool().clone()));
         // User-configured MCP servers — injected into ACP `session/new`
         // so the agent gets the operator's tools (ELECTRON-1JG fix).

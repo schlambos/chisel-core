@@ -1264,6 +1264,14 @@ fn shell_approval_key() -> String {
     approval_key(Some("run_shell"), Some("run_shell"))
 }
 
+/// Approval-memory key for an "allow always" decision on destructive
+/// filesystem tools (`delete_file` / `rename`). Deliberately separate from
+/// [`shell_approval_key`]: "Skip shell prompts" must not silently waive
+/// file-deletion prompts, and vice versa.
+fn fs_approval_key() -> String {
+    approval_key(Some("fs_destructive"), Some("fs_destructive"))
+}
+
 /// Pull the filesystem target from an OpenCode permission's `metadata` blob.
 /// `external_directory` requests pack the touched path under `filepath` (with
 /// the ancestor as `parentDir`); shell-style metadata sometimes uses `path`.
@@ -1480,6 +1488,125 @@ impl ShellApprover for RemoteShellApprover {
                     %call_id,
                     wait_ms = SHELL_APPROVAL_WAIT_MS,
                     "shell approval timed out waiting for user"
+                );
+                ShellApproval::TimedOut
+            }
+        }
+    }
+
+    /// Destructive filesystem ops (`delete_file` / `rename`) get their own
+    /// confirmation card and "skip prompts" memory, separate from shell:
+    /// "Skip shell prompts" must never silently waive file deletions.
+    async fn approve_fs_action(
+        &self,
+        action: &str,
+        detail: &str,
+        cwd: &str,
+        context: &McpRequestContext,
+    ) -> ShellApproval {
+        // A prior "allow always" for file changes short-circuits the prompt.
+        {
+            let state = self.state.read().await;
+            if state.approval_memory.get(&fs_approval_key()).copied().unwrap_or(false) {
+                return ShellApproval::Allow;
+            }
+        }
+
+        // "fsop-" prefix (vs "shell-") lets `confirm()` pick the right
+        // approval-memory key for an "always" reply. Both prefixes resolve
+        // through the same `pending_shell_approvals` oneshot map.
+        let call_id = format!("fsop-{}", Uuid::new_v4());
+        let (tx, rx) = oneshot::channel();
+
+        let (session_id, parent_session_id, attribution_fallback) = {
+            let state = self.state.read().await;
+            let mut session_id = context.session_id.clone().or_else(|| state.opencode_session_id.clone());
+            let mut parent_session_id = context.parent_session_id.clone();
+            let mut attribution_fallback = false;
+            if context.session_id.is_none() {
+                attribution_fallback = true;
+                if parent_session_id.is_none()
+                    && let Some(child_id) = infer_parent_for_active_subagent(&state)
+                {
+                    parent_session_id = Some(child_id.clone());
+                    session_id = Some(child_id);
+                }
+            }
+            (session_id, parent_session_id, attribution_fallback)
+        };
+
+        let title = match action {
+            "delete_file" => "Delete a file on your machine?".to_string(),
+            "rename" => "Rename/move a file on your machine?".to_string(),
+            _ => "Modify files on your machine?".to_string(),
+        };
+        let confirmation = Confirmation {
+            id: call_id.clone(),
+            call_id: call_id.clone(),
+            title: Some(title),
+            action: Some(action.to_string()),
+            description: format!("{action}: {detail}\n\nin {cwd}"),
+            command_type: Some("fs_destructive".to_string()),
+            options: vec![
+                ConfirmationOption {
+                    label: "Allow once".to_string(),
+                    value: Value::String("once".to_string()),
+                    params: None,
+                },
+                ConfirmationOption {
+                    label: "Skip file-change prompts (this session)".to_string(),
+                    value: Value::String("always".to_string()),
+                    params: None,
+                },
+                ConfirmationOption {
+                    label: "Reject".to_string(),
+                    value: Value::String("reject".to_string()),
+                    params: None,
+                },
+            ],
+            session_id,
+            parent_session_id,
+        };
+
+        {
+            let mut state = self.state.write().await;
+            state.confirmations.retain(|c| c.call_id != call_id);
+            state.confirmations.push(confirmation.clone());
+            state.pending_shell_approvals.insert(call_id.clone(), tx);
+        }
+
+        info!(
+            conversation_id = %self.runtime.conversation_id(),
+            %call_id,
+            %action,
+            session_id = ?confirmation.session_id,
+            parent_session_id = ?confirmation.parent_session_id,
+            attribution_fallback,
+            "awaiting user approval for a destructive local file operation"
+        );
+        self.runtime
+            .emit(AgentStreamEvent::AcpPermission(AcpPermissionEventData::Confirmation(
+                confirmation,
+            )));
+
+        match tokio::time::timeout(Duration::from_millis(SHELL_APPROVAL_WAIT_MS as u64), rx).await {
+            Ok(Ok(decision)) => decision,
+            Ok(Err(_)) => {
+                let mut state = self.state.write().await;
+                state.pending_shell_approvals.remove(&call_id);
+                state.confirmations.retain(|c| c.call_id != call_id);
+                ShellApproval::Reject
+            }
+            Err(_) => {
+                let mut state = self.state.write().await;
+                state.pending_shell_approvals.remove(&call_id);
+                state.confirmations.retain(|c| c.call_id != call_id);
+                warn!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    %call_id,
+                    %action,
+                    wait_ms = SHELL_APPROVAL_WAIT_MS,
+                    "destructive fs approval timed out waiting for user"
                 );
                 ShellApproval::TimedOut
             }
@@ -3712,6 +3839,34 @@ impl RemoteAgentManager {
         if !self.remote_config.remote_agent_id.is_empty() {
             plugin::registry::global()
                 .register_shell_approver(&self.remote_config.remote_agent_id, shell_approver.clone());
+
+            // Eagerly start the plugin webserver if it isn't already
+            // running. Without this, the server only comes up when the
+            // user opens the Install Plugin settings panel (snippet
+            // generation) or spawns a local OpenCode — both of which
+            // are UI-triggered. After a Chisl restart, the plugin
+            // webserver on :64921 would be dead until one of those
+            // paths fires, causing `run_shell_streaming` POSTs from
+            // the remote plugin to fail with connection-refused.
+            // `ensure_plugin_server` is a process-wide singleton
+            // (OnceLock + Mutex), so this call is a no-op if the
+            // server is already up.
+            if let Some(validator) = plugin::global_validator() {
+                let plan = super::reachability::plan(base_url);
+                let bind = plugin::plugin_listen_addr(&plan);
+                if let Err(e) = plugin::ensure_plugin_server(bind, validator).await {
+                    warn!(
+                        error = %e,
+                        bind = %bind,
+                        "failed to eagerly start plugin webserver — run_shell_streaming will be unavailable until the server starts"
+                    );
+                }
+            } else {
+                warn!(
+                    "global plugin-token validator not installed — plugin webserver cannot start eagerly; \
+                     install it from the composition root (AppServices::from_config)"
+                );
+            }
         }
 
         match opencode_mcp::start_and_register(
@@ -4899,11 +5054,17 @@ impl RemoteAgentManager {
                  not absolute. Before claiming a file or directory does not exist, ALWAYS call \
                  aionui-local-fs_list_dir or aionui-local-fs_read_file on it — do not rely on \
                  memory of prior turns. To run terminal commands — build, test, lint, git, anything \
-                 you need to verify your work — you MUST use the aionui-local-fs_run_shell tool; \
+                 you need to verify your work — you MUST use a local shell tool; \
                  your own built-in shell runs on a different machine and cannot see this project. \
+                 If a tool named run_shell_streaming is available, PREFER it for shell commands — \
+                 its output streams live to the user while the command runs. Otherwise use \
+                 aionui-local-fs_run_shell, whose output only appears after the command finishes. \
                  Commands execute on the user's machine ({shell_hint}), in the project root, and \
                  each one requires the user to approve it first, so write commands in that shell's \
-                 syntax and prefer one combined command over many. The current project layout \
+                 syntax and prefer one combined command over many. Destructive file operations \
+                 (aionui-local-fs_delete_file, aionui-local-fs_rename) also require per-action \
+                 user approval — never report them as done until the tool returns success. \
+                 The current project layout \
                  (gitignore-respecting; may be truncated) is:\n\n{tree}"
             ))
         };
@@ -5646,13 +5807,21 @@ impl RemoteAgentManager {
         let mut requeue_card: Option<Confirmation> = None;
 
         if let Ok(mut state) = self.state.try_write() {
-            // In-process shell approval? These originate from our own local
-            // fs MCP server (call_id "shell-…"), so resolve them by waking
-            // the parked `run_shell` tool call — there is no OpenCode-side
-            // permission to reply to (that POST would 404).
+            // In-process shell/fs approval? These originate from our own
+            // local fs MCP server (call_id "shell-…" for run_shell,
+            // "fsop-…" for delete_file/rename), so resolve them by waking
+            // the parked tool call — there is no OpenCode-side permission
+            // to reply to (that POST would 404). The prefix picks which
+            // "allow always" memory an "always" reply flips: shell and
+            // file-change prompts are silenced independently.
             if let Some(tx) = state.pending_shell_approvals.remove(call_id) {
                 if reply == "always" {
-                    state.approval_memory.insert(shell_approval_key(), true);
+                    let key = if call_id.starts_with("fsop-") {
+                        fs_approval_key()
+                    } else {
+                        shell_approval_key()
+                    };
+                    state.approval_memory.insert(key, true);
                 }
                 state.confirmations.retain(|c| c.call_id != call_id);
                 drop(state);

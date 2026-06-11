@@ -96,6 +96,35 @@ pub async fn unregister_local_agent(repo: &Arc<dyn IRemoteAgentRepository>, agen
 mod tests {
     use super::*;
     use aionui_db::{SqliteRemoteAgentRepository, init_database_memory};
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Process-wide lock for tests that mutate `AIONUI_PLUGIN_PORT`.
+    /// The env var is process-global and read at call time by
+    /// [`crate::manager::remote::plugin::port::resolve_plugin_port`], so
+    /// two tests setting it concurrently would race; this lock serialises
+    /// them. Tests outside this module also read the same var (see
+    /// `plugin_listen_addr_uses_fixed_default_port` in
+    /// `manager/remote/plugin/server/tests.rs`), so the lock is held
+    /// until the test fully restores the previous value.
+    static PLUGIN_PORT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_plugin_port_env() -> MutexGuard<'static, ()> {
+        PLUGIN_PORT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Pick a random free TCP port. We bind to `127.0.0.1:0`, let the
+    /// OS assign one, then drop the listener immediately. There's a
+    /// tiny TOCTOU window where another process could grab the port
+    /// before the test binds it, but in practice this is reliable
+    /// enough for unit tests.
+    fn pick_free_port() -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind :0");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener);
+        port
+    }
 
     #[tokio::test]
     async fn register_and_resolve_plugin_token() {
@@ -113,6 +142,26 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_loopback_plugin_endpoint_returns_loopback_url() {
+        // The plugin webserver's listen port is fixed at
+        // `DEFAULT_PLUGIN_PORT` in production so remote Docker installs
+        // have a stable dial-back target. A dev `aioncore` instance
+        // running on the same host is therefore holding that port when
+        // these tests execute — bind an ephemeral port via the
+        // `AIONUI_PLUGIN_PORT` env override so the test can succeed
+        // regardless of what's already listening. The lock guards
+        // against parallel tests reading a half-set env var.
+        let _env_guard = lock_plugin_port_env();
+        let prev = std::env::var(crate::manager::remote::plugin::PLUGIN_PORT_ENV).ok();
+        let test_port = pick_free_port();
+        // SAFETY: test-only env mutation; serialised by
+        // `PLUGIN_PORT_ENV_LOCK`. Restored before return.
+        unsafe {
+            std::env::set_var(
+                crate::manager::remote::plugin::PLUGIN_PORT_ENV,
+                test_port.to_string(),
+            );
+        }
+
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IRemoteAgentRepository> =
             Arc::new(SqliteRemoteAgentRepository::new(db.pool().clone()));
@@ -121,9 +170,17 @@ mod tests {
         assert!(url.starts_with("http://127.0.0.1:"));
         assert!(url.ends_with('/'));
         assert!(!url.contains("/plugin"));
-        assert_eq!(
-            url,
-            format!("http://127.0.0.1:{}/", aionui_common::constants::DEFAULT_PLUGIN_PORT)
-        );
+        assert_eq!(url, format!("http://127.0.0.1:{test_port}/"));
+
+        // Restore the env var so other tests see the same baseline.
+        // SAFETY: paired with the set_var above; same lock held.
+        match prev {
+            Some(v) => unsafe {
+                std::env::set_var(crate::manager::remote::plugin::PLUGIN_PORT_ENV, v);
+            },
+            None => unsafe {
+                std::env::remove_var(crate::manager::remote::plugin::PLUGIN_PORT_ENV);
+            },
+        }
     }
 }
