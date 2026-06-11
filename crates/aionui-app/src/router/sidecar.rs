@@ -472,7 +472,10 @@ async fn sidecar_auth_layer(
         std::net::IpAddr::V6(v6) => v6.is_loopback(),
     };
     if !is_loopback {
-        tracing::warn!("SideCar proxy rejected: client connected from non-loopback address {}", addr);
+        tracing::warn!(
+            "SideCar proxy rejected: client connected from non-loopback address {}",
+            addr
+        );
         return forbidden("sidecar proxy only allows loopback connections");
     }
 

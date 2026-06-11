@@ -128,7 +128,12 @@ async fn boot_upstream() -> (SocketAddr, EchoSink) {
         .unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     (addr, sink)
@@ -159,7 +164,19 @@ async fn sc01_register_then_proxy_with_query_token_then_with_cookie() {
     // First navigation: ?sct=<token>
     let path = format!("/sidecar/{}/?sct={}", entry.id, entry.token);
     let req = Request::builder().method("GET").uri(&path).body(Body::empty()).unwrap();
-    let resp = app.clone().oneshot({ let mut req = req; req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12345))); req }).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot({
+            let mut req = req;
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            req
+        })
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let cookie = resp
         .headers()
@@ -181,7 +198,19 @@ async fn sc01_register_then_proxy_with_query_token_then_with_cookie() {
         .header(axum::http::header::COOKIE, cookie_header)
         .body(Body::empty())
         .unwrap();
-    let resp = app.clone().oneshot({ let mut req = req; req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12345))); req }).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot({
+            let mut req = req;
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            req
+        })
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let body = String::from_utf8_lossy(&body);
@@ -194,6 +223,40 @@ async fn sc01_register_then_proxy_with_query_token_then_with_cookie() {
 // 2. Refusal matrix
 // ===========================================================================
 
+/// A client connecting from a non-loopback address must be refused
+/// even when it presents a valid sidecar token. This is the active
+/// enforcement behind the "localhost-only, no external exposure"
+/// posture: if AionCore is ever launched with `--host 0.0.0.0`, the
+/// proxy still refuses to bridge network clients to local services.
+#[tokio::test]
+async fn sc01b_non_loopback_client_is_refused_even_with_valid_token() {
+    let (addr, _sink) = boot_upstream().await;
+    let state = SidecarState::new();
+    let entry = build_registered(&state, "ttyd", addr.port()).await;
+    let app = build_proxy(state.clone());
+
+    let path = format!("/sidecar/{}/?sct={}", entry.id, entry.token);
+    let req = Request::builder().method("GET").uri(&path).body(Body::empty()).unwrap();
+    let resp = app
+        .oneshot({
+            let mut req = req;
+            // Simulate a LAN client (192.168.0.99) hitting a 0.0.0.0 bind.
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 0, 99)),
+                    40000,
+                )));
+            req
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "non-loopback client must be refused"
+    );
+}
+
 #[tokio::test]
 async fn sc02_unknown_id_returns_404() {
     let state = SidecarState::new();
@@ -203,7 +266,18 @@ async fn sc02_unknown_id_returns_404() {
         .uri("/sidecar/nope/?sct=anything")
         .body(Body::empty())
         .unwrap();
-    let resp = app.oneshot({ let mut req = req; req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12345))); req }).await.unwrap();
+    let resp = app
+        .oneshot({
+            let mut req = req;
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            req
+        })
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -218,7 +292,18 @@ async fn sc03_wrong_token_returns_403() {
         .uri(format!("/sidecar/{}/?sct=not-the-right-token", entry.id))
         .body(Body::empty())
         .unwrap();
-    let resp = app.oneshot({ let mut req = req; req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12345))); req }).await.unwrap();
+    let resp = app
+        .oneshot({
+            let mut req = req;
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            req
+        })
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
@@ -233,7 +318,18 @@ async fn sc04_no_token_no_cookie_returns_403() {
         .uri(format!("/sidecar/{}/", entry.id))
         .body(Body::empty())
         .unwrap();
-    let resp = app.oneshot({ let mut req = req; req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12345))); req }).await.unwrap();
+    let resp = app
+        .oneshot({
+            let mut req = req;
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            req
+        })
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
@@ -250,7 +346,18 @@ async fn sc05_deleted_sidecar_returns_404() {
         .uri(format!("/sidecar/{}/?sct={}", entry.id, entry.token))
         .body(Body::empty())
         .unwrap();
-    let resp = app.oneshot({ let mut req = req; req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12345))); req }).await.unwrap();
+    let resp = app
+        .oneshot({
+            let mut req = req;
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            req
+        })
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -270,7 +377,19 @@ async fn sc06_port_allowlist_only_a_proxy_never_hits_b() {
         .uri(format!("/sidecar/{}/?sct={}", entry_a.id, entry_a.token))
         .body(Body::empty())
         .unwrap();
-    let resp = app.clone().oneshot({ let mut req = req; req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12345))); req }).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot({
+            let mut req = req;
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            req
+        })
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let _ = sink_a;
 
@@ -280,7 +399,18 @@ async fn sc06_port_allowlist_only_a_proxy_never_hits_b() {
         .uri("/sidecar/never-registered/?sct=irrelevant")
         .body(Body::empty())
         .unwrap();
-    let resp = app.oneshot({ let mut req = req; req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12345))); req }).await.unwrap();
+    let resp = app
+        .oneshot({
+            let mut req = req;
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            req
+        })
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let body = String::from_utf8_lossy(&body);
@@ -314,7 +444,18 @@ async fn sc07_post_body_forwarded_intact() {
         .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
         .body(Body::from(payload.clone()))
         .unwrap();
-    let resp = app.oneshot({ let mut req = req; req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12345))); req }).await.unwrap();
+    let resp = app
+        .oneshot({
+            let mut req = req;
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            req
+        })
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let upstream_body = sink.last_body.lock().await.clone();
     assert_eq!(upstream_body, payload, "request body must arrive intact");
@@ -345,7 +486,18 @@ async fn sc08_hop_by_hop_stripped_and_x_forwarded_added() {
         .header("upgrade", "h2c")
         .body(Body::empty())
         .unwrap();
-    let resp = app.oneshot({ let mut req = req; req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12345))); req }).await.unwrap();
+    let resp = app
+        .oneshot({
+            let mut req = req;
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            req
+        })
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     // sidecar_* cookie MUST NOT be forwarded to the upstream.
@@ -380,7 +532,18 @@ async fn sc09_non_sidecar_cookie_passed_through() {
         )
         .body(Body::empty())
         .unwrap();
-    let resp = app.oneshot({ let mut req = req; req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12345))); req }).await.unwrap();
+    let resp = app
+        .oneshot({
+            let mut req = req;
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            req
+        })
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let cookies = sink.last_cookies.lock().await.clone();
     let combined = cookies.join("; ");
@@ -414,7 +577,18 @@ async fn sc10_redirect_passes_through_untouched() {
         )
         .body(Body::empty())
         .unwrap();
-    let resp = app.oneshot({ let mut req = req; req.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12345))); req }).await.unwrap();
+    let resp = app
+        .oneshot({
+            let mut req = req;
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            req
+        })
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::FOUND);
     let loc = resp
         .headers()
@@ -473,7 +647,12 @@ async fn sc12_ws_route_actually_upgrades() {
         .unwrap();
     let proxy_addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
