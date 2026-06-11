@@ -267,6 +267,14 @@ async fn run_shell_inner(
             truncated: outcome.truncated,
         })
         .await;
+    tracing::trace!(
+        ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        exit_code = outcome.exit_code,
+        "plugin_shell_done",
+    );
 }
 
 /// Inner task: pull the child's stdout/stderr, forward `chunk` events
@@ -275,6 +283,7 @@ async fn run_shell_inner(
 async fn drive_child(mut child: Child, tx: &mpsc::Sender<ShellStreamEvent>, timeout_secs: u64) -> RunOutcome {
     let mut total_bytes: usize = 0;
     let mut truncated = false;
+    let mut chunk_seq: u64 = 0;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -298,7 +307,10 @@ async fn drive_child(mut child: Child, tx: &mpsc::Sender<ShellStreamEvent>, time
                 match wait_result {
                     Ok(status) => {
                         while let Ok(ev) = out_rx.try_recv() {
-                            if forward_chunk(tx, ev, &mut total_bytes, &mut truncated).await.is_err() {
+                            if forward_chunk(tx, ev, &mut total_bytes, &mut truncated, &mut chunk_seq)
+                                .await
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -318,7 +330,10 @@ async fn drive_child(mut child: Child, tx: &mpsc::Sender<ShellStreamEvent>, time
             maybe_chunk = out_rx.recv() => {
                 match maybe_chunk {
                     Some(ev) => {
-                        if forward_chunk(tx, ev, &mut total_bytes, &mut truncated).await.is_err() {
+                        if forward_chunk(tx, ev, &mut total_bytes, &mut truncated, &mut chunk_seq)
+                            .await
+                            .is_err()
+                        {
                             let _ = child.kill().await;
                             return RunOutcome { exit_code: None, is_error: true, truncated };
                         }
@@ -395,6 +410,7 @@ async fn forward_chunk(
     ev: ChunkEvent,
     total_bytes: &mut usize,
     truncated: &mut bool,
+    chunk_seq: &mut u64,
 ) -> Result<(), ()> {
     if *truncated {
         return Ok(());
@@ -406,6 +422,8 @@ async fn forward_chunk(
         if remaining > 0 {
             let truncated_text = truncate_lossy(&ev.data, remaining);
             *total_bytes += truncated_text.len();
+            let stream_name = ev.stream.clone();
+            let data_len = truncated_text.len();
             if tx
                 .send(ShellStreamEvent::Chunk {
                     stream: ev.stream,
@@ -416,6 +434,17 @@ async fn forward_chunk(
             {
                 return Err(());
             }
+            *chunk_seq += 1;
+            tracing::trace!(
+                chunk_seq = *chunk_seq,
+                ts_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                stream = %stream_name,
+                bytes = data_len,
+                "plugin_shell_chunk_emit",
+            );
         }
         debug!(
             total_bytes = *total_bytes,
@@ -425,6 +454,8 @@ async fn forward_chunk(
         return Ok(());
     }
     *total_bytes = new_total;
+    let stream_name = ev.stream.clone();
+    let data_len = ev.data.len();
     if tx
         .send(ShellStreamEvent::Chunk {
             stream: ev.stream,
@@ -435,6 +466,17 @@ async fn forward_chunk(
     {
         return Err(());
     }
+    *chunk_seq += 1;
+    tracing::trace!(
+        chunk_seq = *chunk_seq,
+        ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        stream = %stream_name,
+        bytes = data_len,
+        "plugin_shell_chunk_emit",
+    );
     Ok(())
 }
 
