@@ -23,6 +23,14 @@ pub async fn run_server(env: ServerEnvironment, services: AppServices) -> Result
     let router = create_router(&services).await;
     let addr = env.config.socket_addr();
     let listener = TcpListener::bind(&addr).await?;
+    if !listener.local_addr()?.ip().is_loopback() {
+        warn!(
+            %addr,
+            "AionCore is binding to a non-loopback address. \
+             The entire API (including the sidecar proxy) will be reachable \
+             from the network. Use --host 127.0.0.1 for local-only access."
+        );
+    }
     info!(elapsed_ms = boot.elapsed().as_millis(), "Server listening on {addr}");
 
     // Kick off the idle-ACP-agent reaper. `start_idle_scanner` returns

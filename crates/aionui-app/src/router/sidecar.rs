@@ -26,7 +26,8 @@
 //!   keeps the door closed if the token format ever changes.
 //! - Hop-by-hop headers are stripped on the way in and out; the proxy
 //!   never logs tokens or cookies; connect timeout is 3s but no
-//!   response-body timeout (long-lived streams OK).
+//!   response-body timeout (responses are streamed, not buffered, so
+//!   long-lived streams flow through unchanged).
 //!
 //! Layout:
 //!
@@ -757,9 +758,28 @@ async fn http_proxy(
         req_headers.insert(HOST, host_value);
     }
 
+    // Parse the inbound `Connection` header to discover any extra
+    // header names it lists for removal on this hop (RFC 7230 §6.1).
+    // Without this, a client can use `Connection: X-Secret` to make
+    // a custom header hop-by-hop and the proxy would forward it
+    // anyway, potentially leaking app-internal values to the upstream.
+    let connection_listed: std::collections::HashSet<String> = headers
+        .get_all("connection")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+
     for (name, value) in headers.iter() {
         let lower = name.as_str().to_ascii_lowercase();
         if HOP_BY_HOP.contains(&lower.as_str()) {
+            continue;
+        }
+        if connection_listed.contains(&lower) {
+            // RFC 7230 §6.1: any header named in the Connection
+            // header is hop-by-hop and must not be forwarded.
             continue;
         }
         if lower == "cookie" {
@@ -771,6 +791,13 @@ async fn http_proxy(
                     req_headers.insert(ReqHeaderName::from_static("cookie"), rv);
                 }
             }
+            continue;
+        }
+        if lower == "referer" {
+            // Don't forward the Referer to the sidecar upstream: the
+            // first navigation URL embeds the per-sidecar token as
+            // `?sct=<token>`, and many upstreams log the Referer,
+            // which would leak the token into upstream logs.
             continue;
         }
         if let (Ok(n), Ok(v)) = (ReqHeaderName::from_bytes(name.as_str().as_bytes()), value.to_str()) {
@@ -833,15 +860,17 @@ async fn http_proxy(
     if issue_cookie && let Ok(v) = HeaderValue::from_str(&build_set_cookie(&entry.id, &entry.token)) {
         response = response.header("set-cookie", v);
     }
-    let body_bytes = match upstream.bytes().await {
-        Ok(b) => b.to_vec(),
-        Err(e) => {
-            warn!(sidecar_id = %entry.id, error = %e, "upstream body read failed");
-            let body = ErrorResponse::new("sidecar upstream body unreadable", "BAD_GATEWAY");
-            return (StatusCode::BAD_GATEWAY, Json(body)).into_response();
-        }
-    };
-    let body = Body::from(body_bytes);
+    // Stream the response body instead of buffering it entirely.
+    // This fixes SSE/chunked responses (which would otherwise appear
+    // hung until upstream closes) and removes the unbounded-memory
+    // `Vec<u8>` that the old `upstream.bytes().await` required.
+    let body_stream = upstream.bytes_stream().map(move |result| {
+        result.map_err(|e| {
+            warn!(sidecar_id = %entry.id, error = %e, "upstream stream error");
+            axum::Error::new(e)
+        })
+    });
+    let body = Body::from_stream(body_stream);
     response
         .body(body)
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
