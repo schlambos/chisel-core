@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use aionui_ai_agent::{
-    AgentRouterState, AgentService, RemoteAgentRouterState, RemoteAgentService, RemoteSessionSyncHook,
+    AgentRouterState, AgentService, LocalOpenCodeRouterState, RemoteAgentRouterState, RemoteAgentService,
+    RemoteSessionSyncHook,
 };
 use aionui_assistant::{AssistantRouterState, AssistantService, BuiltinAssistantRegistry};
 use aionui_auth::extract_token_from_ws_headers;
@@ -70,6 +71,8 @@ pub struct ModuleStates {
     pub assistant: AssistantRouterState,
     /// Sidecar reverse-proxy state (registry + shared reqwest client).
     pub sidecar: crate::router::sidecar::SidecarState,
+    /// Local `opencode serve` process manager (Phase 4).
+    pub local_opencode: LocalOpenCodeRouterState,
 }
 
 fn default_allowed_roots(work_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
@@ -163,6 +166,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         shell: build_shell_state(services),
         assistant,
         sidecar: crate::router::sidecar::SidecarState::new(),
+        local_opencode: build_local_opencode_state(services),
     };
 
     (states, channel_components)
@@ -681,6 +685,29 @@ pub async fn build_extension_states(
     };
 
     (ext_state, hub_state, skill_state)
+}
+
+/// Build the default `LocalOpenCodeRouterState` from application services.
+///
+/// Pulls the process-global [`aionui_ai_agent::manager::local_opencode::LocalOpenCodeManager`]
+/// and configures it with the data dir plus the remote-agent
+/// repository used to register per-instance plugin tokens.
+pub fn build_local_opencode_state(services: &AppServices) -> LocalOpenCodeRouterState {
+    let manager = aionui_ai_agent::manager::local_opencode::global();
+
+    let data_dir = services.data_dir.clone();
+    let mgr = manager.clone();
+    tokio::spawn(async move {
+        mgr.set_data_dir(data_dir).await;
+    });
+
+    let repo = Arc::new(SqliteRemoteAgentRepository::new(services.database.pool().clone()));
+    let mgr2 = manager.clone();
+    tokio::spawn(async move {
+        mgr2.set_remote_repo(repo).await;
+    });
+
+    LocalOpenCodeRouterState { manager }
 }
 
 /// Build the default `WsHandlerState` from application services.

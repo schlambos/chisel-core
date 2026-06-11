@@ -41,6 +41,15 @@ pub struct AppServices {
     pub jwt_secret_raw: String,
     pub data_dir: PathBuf,
     pub work_dir: PathBuf,
+    /// Server bind host, copied from `AppConfig.host` so module
+    /// builders can derive absolute URLs without holding a
+    /// reference to the original config.
+    pub host: String,
+    /// Server bind port, copied from `AppConfig.port` for the
+    /// same reason. Used by the local-OpenCode manager to
+    /// build the dial-back URL it tells the spawned
+    /// `opencode serve` plugin to connect to.
+    pub port: u16,
     /// When `true`, skip JWT authentication and use a fixed default user.
     pub local: bool,
     pub app_version: String,
@@ -75,6 +84,8 @@ impl AppServices {
     pub async fn from_config(database: Database, config: &AppConfig) -> anyhow::Result<Self> {
         let data_dir = config.data_dir.clone();
         let work_dir = config.work_dir.clone();
+        let host = config.host.clone();
+        let port = config.port;
         let local = config.local;
         let app_version = config.app_version.clone();
         let user_repo: Arc<dyn IUserRepository> = Arc::new(SqliteUserRepository::new(database.pool().clone()));
@@ -198,6 +209,8 @@ impl AppServices {
             jwt_secret_raw: secret,
             data_dir,
             work_dir,
+            host,
+            port,
             local,
             app_version,
             skill_paths,

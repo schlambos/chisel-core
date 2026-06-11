@@ -15,6 +15,7 @@ mod custom_agent;
 mod extension;
 mod file;
 mod lifecycle;
+pub mod local_opencode;
 pub mod lsp;
 mod mcp;
 mod office;
@@ -90,6 +91,9 @@ pub use file::{
     WorkspaceVcsSummary, WriteFileRequest, ZipFileEntry, ZipRequest,
 };
 pub use lifecycle::{GitHubReleaseAsset, SystemInfoResponse, UpdateCheckRequest, UpdateCheckResult, UpdateReleaseInfo};
+pub use local_opencode::{
+    LocalOpenCodeInstance, LocalOpenCodeListResponse, LocalOpenCodeStatus, StartLocalOpenCodeRequest,
+};
 pub use mcp::{
     BatchImportMcpServersRequest, CreateMcpServerRequest, DetectedMcpServerResponse, McpAgentSyncResult, McpAuthMethod,
     McpConnectionTestResult, McpServerResponse, McpSyncResult, McpToolResponse, McpTransport, OAuthCheckStatusRequest,

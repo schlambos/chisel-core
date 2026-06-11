@@ -9,7 +9,7 @@ use axum::routing::get;
 use axum::{Router, middleware};
 use tower_http::cors::{Any, CorsLayer};
 
-use aionui_ai_agent::{agent_routes, remote_agent_routes};
+use aionui_ai_agent::{agent_routes, local_opencode_routes, remote_agent_routes};
 use aionui_assets::{AssetRouterState, asset_routes};
 use aionui_assistant::assistant_routes;
 use aionui_auth::{
@@ -147,6 +147,10 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
     let agent_authenticated =
         agent_routes(states.agent).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
+    // Local OpenCode process-manager routes (Phase 4) protected by auth middleware
+    let local_opencode_authenticated = local_opencode_routes(states.local_opencode)
+        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+
     // Connection test routes (Bedrock, Gemini) protected by auth middleware
     let connection_test_authenticated = connection_test_routes(states.connection_test)
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
@@ -245,6 +249,7 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
         .merge(conversation_ops_authenticated)
         .merge(remote_agent_authenticated)
         .merge(agent_authenticated)
+        .merge(local_opencode_authenticated)
         .merge(connection_test_authenticated)
         .merge(file_authenticated)
         .merge(lsp_authenticated)

@@ -63,6 +63,16 @@ pub async fn run_server(env: ServerEnvironment, services: AppServices) -> Result
         info!(killed, "background processes killed on graceful shutdown");
     }
 
+    // Kill any local `opencode serve` instances spawned by the
+    // Phase 4 process manager. Each instance's Builder set
+    // `kill_on_drop(true)` so this is technically a backstop
+    // too, but doing it explicitly lets us log the count and
+    // makes the shutdown path easier to reason about.
+    let local_killed = aionui_ai_agent::manager::local_opencode::kill_all_local_opencode().await;
+    if local_killed > 0 {
+        info!(local_killed, "local OpenCode instances killed on graceful shutdown");
+    }
+
     // Wait for the scanner to observe the shutdown watch value and
     // return; at worst this blocks for the current 60 s tick.
     if let Err(e) = idle_scanner_handle.await {
