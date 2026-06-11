@@ -24,6 +24,8 @@
 //! agent has its own token, connection state, audit log, and push
 //! channel (see [`registry::PluginRegistry`]).
 
+pub mod auth;
+mod port;
 pub mod bg;
 pub mod protocol;
 pub mod registry;
@@ -40,10 +42,11 @@ pub use protocol::{
     BgTailRequest, PROTOCOL_VERSION, PluginAuditRecord, PluginHelloRequest, PluginHelloResponse, PluginProjectInfo,
     PluginPushEvent, PluginResultRequest, PluginResultResponse, RunShellStreamingRequest,
 };
+pub use auth::{DbPluginTokenValidator, db_token_validator};
 pub use registry::{
     PluginConnectionState, PluginRegistry, PluginTokenValidator, STICKY_VOICE_MODE_CAP, global as global_registry,
 };
-pub use server::{PluginServer, ensure_plugin_server};
+pub use server::{PluginServer, ensure_plugin_server, plugin_listen_addr};
 #[cfg(any(test, feature = "test-support"))]
 pub use ui_push::install_for_test as install_ui_notifier_for_test;
 pub use ui_push::{notify as notify_ui, set_ui_notifier};

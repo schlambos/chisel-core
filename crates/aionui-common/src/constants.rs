@@ -23,6 +23,8 @@ pub const CSRF_HEADER_NAME: &str = "x-csrf-token";
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const REMOTE_HOST: &str = "0.0.0.0";
 pub const DEFAULT_PORT: u16 = 25808;
+/// Fixed port for the OpenCode plugin dial-back webserver.
+pub const DEFAULT_PLUGIN_PORT: u16 = 64921;
 /// Request body size limit (10 MB).
 pub const BODY_LIMIT: usize = 10 * 1024 * 1024;
 /// File upload size limit (30 MB).

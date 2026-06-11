@@ -313,6 +313,24 @@ impl Drop for PluginServer {
     }
 }
 
+/// Resolve the socket address for the plugin webserver.
+///
+/// Port is fixed at [`super::port::resolve_plugin_port`]. The reachability
+/// [`crate::manager::remote::reachability::Plan`] only decides the bind
+/// interface.
+pub fn plugin_listen_addr(plan: &crate::manager::remote::reachability::Plan) -> std::net::SocketAddr {
+    use std::net::SocketAddr;
+
+    let port = super::port::resolve_plugin_port();
+
+    match plan {
+        crate::manager::remote::reachability::Plan::Override { .. } => {
+            SocketAddr::from(([127, 0, 0, 1], port))
+        }
+        crate::manager::remote::reachability::Plan::Auto { .. } => SocketAddr::from(([0, 0, 0, 0], port)),
+    }
+}
+
 /// Get-or-create the process-wide plugin webserver. First call binds;
 /// later calls return the already-bound address. Pass the same
 /// `validator` on every call — the first call's validator is the one

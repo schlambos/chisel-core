@@ -198,10 +198,15 @@ impl PluginRegistry {
         hooks: Vec<String>,
     ) -> u64 {
         let now = aionui_common::now_ms();
+        let is_probe = plugin_version == "0.0.0" && hooks.is_empty();
         self.entry_mut(agent_id, |e| {
-            e.state.plugin_version = Some(plugin_version);
-            e.state.opencode_version = opencode_version;
-            e.state.hooks = hooks;
+            // Probe hellos (v0.0.0, no hooks) only update liveness timestamp —
+            // they must not overwrite real plugin metadata from a prior hello.
+            if !is_probe || e.state.plugin_version.is_none() {
+                e.state.plugin_version = Some(plugin_version);
+                e.state.opencode_version = opencode_version;
+                e.state.hooks = hooks;
+            }
             e.state.last_hello_at_ms = Some(now.max(0) as u64);
             e.state.hello_count += 1;
             e.state.hello_count

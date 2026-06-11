@@ -399,6 +399,31 @@ async fn ensure_plugin_server_is_singleton() {
 }
 
 #[test]
+fn plugin_listen_addr_uses_fixed_default_port() {
+    use crate::manager::remote::reachability::{Candidate, Plan};
+    use crate::manager::remote::plugin::plugin_listen_addr;
+    use aionui_common::constants::DEFAULT_PLUGIN_PORT;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let auto = Plan::Auto {
+        candidates: vec![Candidate {
+            ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            provider: "loopback",
+        }],
+    };
+    let addr = plugin_listen_addr(&auto);
+    assert_eq!(addr.port(), DEFAULT_PLUGIN_PORT);
+    assert!(addr.ip().is_unspecified());
+
+    let override_plan = Plan::Override {
+        public_url: "https://tunnel.example/".into(),
+    };
+    let loopback = plugin_listen_addr(&override_plan);
+    assert_eq!(loopback.port(), DEFAULT_PLUGIN_PORT);
+    assert!(loopback.ip().is_loopback());
+}
+
+#[test]
 fn constant_time_eq_works() {
     assert!(constant_time_eq(b"hello", b"hello"));
     assert!(!constant_time_eq(b"hello", b"world"));

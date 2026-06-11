@@ -595,12 +595,8 @@ impl RemoteAgentService {
         // uses, so a token rotation we just persisted is immediately
         // visible to the next inbound request.
         let plan = crate::manager::remote::reachability::plan(&row.url);
-        let bind_addr = plan.bind_addr();
-        let repo_for_validator: Arc<dyn IRemoteAgentRepository> = self.repo.clone();
-        let validator: Arc<dyn crate::manager::remote::plugin::PluginTokenValidator> =
-            Arc::new(DbPluginTokenValidator {
-                repo: repo_for_validator,
-            });
+        let bind_addr = crate::manager::remote::plugin::plugin_listen_addr(&plan);
+        let validator = crate::manager::remote::plugin::db_token_validator(self.repo.clone());
         let bound_addr = crate::manager::remote::plugin::ensure_plugin_server(bind_addr, validator)
             .await
             .map_err(|e| AppError::Internal(format!("failed to start plugin webserver: {e}")))?;
@@ -620,8 +616,14 @@ impl RemoteAgentService {
         // Snippets — single JSON object for the OpenCode config
         // `plugin` key, and a `KEY=VALUE` env block the user
         // can paste into the OpenCode process's environment.
+        // Docker images bundle the plugin at this path; the npm name is not
+        // on the public registry. Tuple url/token can be omitted when env_snippet
+        // is set on the OpenCode process instead.
         let config_snippet = serde_json::to_string_pretty(&serde_json::json!({
-            "plugin": ["@chisl/chisl-opencode-plugin"]
+            "plugin": [[
+                "file:///opt/chisl-opencode-plugin/opencode-entry.mjs",
+                { "url": endpoint_url, "token": token }
+            ]]
         }))
         .map_err(|e| AppError::Internal(format!("config snippet serialise: {e}")))?;
         let env_snippet = format!("AIONCORE_URL={endpoint_url}\nAIONCORE_TOKEN={token}\n");
@@ -881,26 +883,6 @@ impl RemoteAgentService {
 }
 
 // ── Validation ──────────────────────────────────────────────────
-
-/// Bridges `IRemoteAgentRepository::find_by_plugin_token` to the
-/// plugin webserver's [`PluginTokenValidator`] trait. Cheap to clone
-/// (just wraps the `Arc<dyn IRemoteAgentRepository>`), so the
-/// singleton plugin server can hold one across the process lifetime.
-struct DbPluginTokenValidator {
-    repo: Arc<dyn IRemoteAgentRepository>,
-}
-
-#[async_trait::async_trait]
-impl crate::manager::remote::plugin::PluginTokenValidator for DbPluginTokenValidator {
-    async fn resolve(&self, token: &str) -> Option<String> {
-        self.repo
-            .find_by_plugin_token(token)
-            .await
-            .ok()
-            .flatten()
-            .map(|row| row.id)
-    }
-}
 
 fn validate_create_request(req: &CreateRemoteAgentRequest) -> Result<(), AppError> {
     if req.name.trim().is_empty() {
