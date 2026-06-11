@@ -574,3 +574,6 @@ data/
 .graphify_detect.json
 graphify-out/
 .graphify_*
+
+# OpenCode config backups may contain auth tokens — never commit
+opencode-backup.json
