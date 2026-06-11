@@ -468,6 +468,9 @@ mod tests {
         let event = AgentStreamEvent::Error(ErrorEventData {
             message: "timeout".into(),
             code: None,
+            kind: None,
+            metadata: None,
+            recoverable: None,
         });
         let action = ChannelMessageService::process_stream_event(&event);
         match action {

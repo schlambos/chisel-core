@@ -33,6 +33,9 @@ mod tests {
         AgentStreamEvent::Error(ErrorEventData {
             message: message.to_string(),
             code: None,
+            kind: None,
+            metadata: None,
+            recoverable: None,
         })
     }
 
@@ -99,6 +102,9 @@ mod crash_tests {
         let event = AgentStreamEvent::Error(ErrorEventData {
             message: "process exited unexpectedly".into(),
             code: None,
+            kind: None,
+            metadata: None,
+            recoverable: None,
         });
         assert_eq!(detect_crash(&event), Some(CrashReason::ProcessExited));
     }
@@ -108,6 +114,9 @@ mod crash_tests {
         let event = AgentStreamEvent::Error(ErrorEventData {
             message: "Session not found".into(),
             code: None,
+            kind: None,
+            metadata: None,
+            recoverable: None,
         });
         assert_eq!(detect_crash(&event), Some(CrashReason::SessionNotFound));
     }
@@ -117,6 +126,9 @@ mod crash_tests {
         let event = AgentStreamEvent::Error(ErrorEventData {
             message: "something else broke".into(),
             code: None,
+            kind: None,
+            metadata: None,
+            recoverable: None,
         });
         assert_eq!(
             detect_crash(&event),

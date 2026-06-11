@@ -83,6 +83,9 @@ async fn relay_handles_error_event() {
         .send(AgentStreamEvent::Error(ErrorEventData {
             message: "timeout".into(),
             code: None,
+            kind: None,
+            metadata: None,
+            recoverable: None,
         }))
         .unwrap();
 
