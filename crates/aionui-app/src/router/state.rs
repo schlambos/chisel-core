@@ -34,7 +34,7 @@ use aionui_office::{
     ConversionService, OfficeRouterState, OfficecliWatchManager, ProxyService,
     SnapshotService as OfficeSnapshotService, StarOfficeDetector,
 };
-use aionui_realtime::{NoopMessageRouter, WsHandlerState};
+use aionui_realtime::{EventBroadcaster, NoopMessageRouter, WsHandlerState};
 use aionui_shell::ShellRouterState;
 use aionui_system::{
     ClientPrefService, ConnectionTestRouterState, ConnectionTestService, ModelFetchService, ProtocolDetectionService,
@@ -68,6 +68,8 @@ pub struct ModuleStates {
     pub office: OfficeRouterState,
     pub shell: ShellRouterState,
     pub assistant: AssistantRouterState,
+    /// Sidecar reverse-proxy state (registry + shared reqwest client).
+    pub sidecar: crate::router::sidecar::SidecarState,
 }
 
 fn default_allowed_roots(work_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
@@ -160,6 +162,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         office: build_office_state(services),
         shell: build_shell_state(services),
         assistant,
+        sidecar: crate::router::sidecar::SidecarState::new(),
     };
 
     (states, channel_components)
@@ -261,6 +264,23 @@ pub fn build_remote_agent_state(services: &AppServices) -> RemoteAgentRouterStat
     let encryption_key = derive_encryption_key(&services.jwt_secret_raw);
     let pool = services.database.pool().clone();
     let repo = Arc::new(SqliteRemoteAgentRepository::new(pool));
+
+    // Install the process-global UI notifier the plugin webserver
+    // and bg-process manager call into when they want to surface
+    // WebSocket events to the renderer. We do this here (rather
+    // than in `RemoteAgentService::new`) so the broadcaster
+    // dependency stays in the router state where it belongs and
+    // the plugin pipeline can call it from any thread. The
+    // notifier closure is a thin `broadcaster.broadcast(...)` —
+    // it never blocks, never panics, and silently drops when no
+    // WS clients are attached (the same behaviour the
+    // `EventBroadcaster` implementation already provides).
+    let broadcaster_for_notifier = services.event_bus.clone();
+    let notifier: Arc<dyn Fn(&str, serde_json::Value) + Send + Sync> = Arc::new(move |name, payload| {
+        broadcaster_for_notifier.broadcast(aionui_api_types::WebSocketMessage::new(name, payload));
+    });
+    aionui_ai_agent::manager::remote::plugin::ui_push::set_ui_notifier(notifier);
+
     RemoteAgentRouterState {
         service: Arc::new(RemoteAgentService::new(repo, encryption_key)),
         conversation_repo: services.conversation_repo.clone(),
@@ -612,6 +632,7 @@ pub fn build_shell_state(services: &AppServices) -> ShellRouterState {
             aionui_shell::DefaultSystemOpener,
         ))),
         stt_service: Arc::new(aionui_shell::SttService::new(reqwest::Client::new())),
+        tts_service: Arc::new(aionui_shell::TtsService::new(reqwest::Client::new())),
         client_pref_service,
     }
 }

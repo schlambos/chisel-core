@@ -105,6 +105,63 @@ pub struct SpeechToTextConfig {
     pub deepgram: Option<DeepgramSpeechToTextConfig>,
 }
 
+// ---------------------------------------------------------------------------
+// Text-to-speech types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextToSpeechProvider {
+    /// OpenAI's `/v1/audio/speech` endpoint (server-side).
+    Openai,
+    /// Renderer-side Web Speech API. Never reaches the server.
+    System,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TtsResult {
+    /// Base64-encoded audio bytes returned by the upstream provider.
+    pub audio: String,
+    /// MIME type describing the audio payload (e.g. `audio/mpeg`).
+    pub mime: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenAITextToSpeechConfig {
+    pub api_key: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Defaults to `tts-1` if the field is missing or empty.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Defaults to `alloy` if the field is missing or empty.
+    #[serde(default)]
+    pub voice: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TextToSpeechConfig {
+    pub enabled: bool,
+    pub provider: TextToSpeechProvider,
+    #[serde(default)]
+    pub openai: Option<OpenAITextToSpeechConfig>,
+    /// Populated when the renderer selects the system (Web Speech) provider.
+    /// The server never executes this — it only validates the shape.
+    #[serde(default)]
+    pub system: Option<serde_json::Value>,
+}
+
+/// Request body for `POST /api/tts`.
+///
+/// The config is passed inline (unlike `/api/stt`, which reads config from
+/// `ClientPrefService`). This keeps the wire contract self-contained and
+/// matches the desktop client integration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TtsRequest {
+    pub text: String,
+    pub config: TextToSpeechConfig,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +411,161 @@ mod tests {
         assert!(config.detect_language.is_none());
         assert!(config.punctuate.is_none());
         assert!(config.smart_format.is_none());
+    }
+
+    // -- TextToSpeechProvider --
+
+    #[test]
+    fn tts_provider_serializes_lowercase() {
+        assert_eq!(serde_json::to_value(TextToSpeechProvider::Openai).unwrap(), "openai");
+        assert_eq!(serde_json::to_value(TextToSpeechProvider::System).unwrap(), "system");
+    }
+
+    #[test]
+    fn tts_provider_deserializes_lowercase() {
+        let o: TextToSpeechProvider = serde_json::from_str(r#""openai""#).unwrap();
+        assert_eq!(o, TextToSpeechProvider::Openai);
+        let s: TextToSpeechProvider = serde_json::from_str(r#""system""#).unwrap();
+        assert_eq!(s, TextToSpeechProvider::System);
+    }
+
+    #[test]
+    fn tts_provider_rejects_unknown() {
+        let result = serde_json::from_str::<TextToSpeechProvider>(r#""azure""#);
+        assert!(result.is_err());
+    }
+
+    // -- TtsResult --
+
+    #[test]
+    fn tts_result_serializes_audio_and_mime() {
+        let result = TtsResult {
+            audio: "SGVsbG8=".to_owned(),
+            mime: "audio/mpeg".to_owned(),
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["audio"], "SGVsbG8=");
+        assert_eq!(json["mime"], "audio/mpeg");
+    }
+
+    // -- OpenAITextToSpeechConfig --
+
+    #[test]
+    fn tts_openai_config_full() {
+        let raw = json!({
+            "api_key": "sk-test",
+            "base_url": "https://api.openai.com",
+            "model": "tts-1-hd",
+            "voice": "nova"
+        });
+        let config: OpenAITextToSpeechConfig = serde_json::from_value(raw).unwrap();
+        assert_eq!(config.api_key, "sk-test");
+        assert_eq!(config.base_url.as_deref(), Some("https://api.openai.com"));
+        assert_eq!(config.model.as_deref(), Some("tts-1-hd"));
+        assert_eq!(config.voice.as_deref(), Some("nova"));
+    }
+
+    #[test]
+    fn tts_openai_config_minimal() {
+        let raw = json!({ "api_key": "sk-key" });
+        let config: OpenAITextToSpeechConfig = serde_json::from_value(raw).unwrap();
+        assert_eq!(config.api_key, "sk-key");
+        assert!(config.base_url.is_none());
+        assert!(config.model.is_none());
+        assert!(config.voice.is_none());
+    }
+
+    // -- TextToSpeechConfig --
+
+    #[test]
+    fn tts_config_full_openai() {
+        let raw = json!({
+            "enabled": true,
+            "provider": "openai",
+            "openai": {
+                "api_key": "sk-test",
+                "base_url": "https://api.openai.com/v1",
+                "model": "tts-1",
+                "voice": "alloy"
+            }
+        });
+        let config: TextToSpeechConfig = serde_json::from_value(raw).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.provider, TextToSpeechProvider::Openai);
+        let openai = config.openai.unwrap();
+        assert_eq!(openai.api_key, "sk-test");
+        assert_eq!(openai.base_url.as_deref(), Some("https://api.openai.com/v1"));
+        assert_eq!(openai.model.as_deref(), Some("tts-1"));
+        assert_eq!(openai.voice.as_deref(), Some("alloy"));
+        assert!(config.system.is_none());
+    }
+
+    #[test]
+    fn tts_config_system_provider_parses() {
+        let raw = json!({
+            "enabled": true,
+            "provider": "system",
+            "system": { "voice": "default" }
+        });
+        let config: TextToSpeechConfig = serde_json::from_value(raw).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.provider, TextToSpeechProvider::System);
+        assert!(config.openai.is_none());
+        assert!(config.system.is_some());
+    }
+
+    #[test]
+    fn tts_config_minimal() {
+        let raw = json!({
+            "enabled": false,
+            "provider": "openai"
+        });
+        let config: TextToSpeechConfig = serde_json::from_value(raw).unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.provider, TextToSpeechProvider::Openai);
+        assert!(config.openai.is_none());
+        assert!(config.system.is_none());
+    }
+
+    #[test]
+    fn tts_config_missing_required_field() {
+        let raw = json!({ "enabled": true });
+        let result = serde_json::from_value::<TextToSpeechConfig>(raw);
+        assert!(result.is_err());
+    }
+
+    // -- TtsRequest --
+
+    #[test]
+    fn tts_request_parses() {
+        let raw = json!({
+            "text": "hello world",
+            "config": {
+                "enabled": true,
+                "provider": "openai",
+                "openai": {
+                    "api_key": "sk-test",
+                    "model": "tts-1",
+                    "voice": "alloy"
+                }
+            }
+        });
+        let req: TtsRequest = serde_json::from_value(raw).unwrap();
+        assert_eq!(req.text, "hello world");
+        assert!(req.config.enabled);
+        assert_eq!(req.config.provider, TextToSpeechProvider::Openai);
+        let openai = req.config.openai.unwrap();
+        assert_eq!(openai.api_key, "sk-test");
+        assert_eq!(openai.model.as_deref(), Some("tts-1"));
+        assert_eq!(openai.voice.as_deref(), Some("alloy"));
+    }
+
+    #[test]
+    fn tts_request_missing_text() {
+        let raw = json!({
+            "config": { "enabled": true, "provider": "openai" }
+        });
+        let result = serde_json::from_value::<TtsRequest>(raw);
+        assert!(result.is_err());
     }
 }

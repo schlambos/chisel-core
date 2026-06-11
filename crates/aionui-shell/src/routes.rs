@@ -5,11 +5,11 @@ use axum::{Json, Router};
 
 use aionui_api_types::{
     ApiResponse, CheckToolInstalledRequest, CheckToolInstalledResponse, OpenExternalRequest, OpenFileRequest,
-    OpenFolderWithRequest, ShowItemInFolderRequest, SpeechToTextConfig,
+    OpenFolderWithRequest, ShowItemInFolderRequest, SpeechToTextConfig, TtsRequest,
 };
 use aionui_common::AppError;
 
-use crate::error::SttError;
+use crate::error::{SttError, TtsError};
 use crate::state::ShellRouterState;
 
 pub fn shell_routes(state: ShellRouterState) -> Router {
@@ -20,6 +20,7 @@ pub fn shell_routes(state: ShellRouterState) -> Router {
         .route("/api/shell/check-tool-installed", post(check_tool_installed))
         .route("/api/shell/open-folder-with", post(open_folder_with))
         .route("/api/stt", post(speech_to_text))
+        .route("/api/tts", post(text_to_speech))
         .with_state(state)
 }
 
@@ -206,6 +207,44 @@ fn stt_error_response(err: &SttError) -> (StatusCode, Json<serde_json::Value>) {
     (status, Json(body))
 }
 
+async fn text_to_speech(
+    State(state): State<ShellRouterState>,
+    body: Result<Json<TtsRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
+    let Json(req) = body.map_err(|e| tts_bad_request_response(&e.to_string()))?;
+
+    let result = state
+        .tts_service
+        .synthesize(&req.text, &req.config)
+        .await
+        .map_err(|e| tts_error_response(&e))?;
+
+    let body = serde_json::json!({
+        "success": true,
+        "data": result,
+    });
+    Ok((StatusCode::OK, Json(body)))
+}
+
+fn tts_bad_request_response(message: &str) -> (StatusCode, Json<serde_json::Value>) {
+    let body = serde_json::json!({
+        "success": false,
+        "error": message,
+        "code": "TTS_BAD_REQUEST",
+    });
+    (StatusCode::BAD_REQUEST, Json(body))
+}
+
+fn tts_error_response(err: &TtsError) -> (StatusCode, Json<serde_json::Value>) {
+    let status = StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let body = serde_json::json!({
+        "success": false,
+        "error": err.to_string(),
+        "code": err.error_code(),
+    });
+    (status, Json(body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +258,7 @@ mod tests {
         use crate::opener::NoopSystemOpener;
         use crate::shell::ShellService;
         use crate::stt::SttService;
+        use crate::tts::TtsService;
 
         let pool = sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap();
         let repo = Arc::new(aionui_db::SqliteClientPreferenceRepository::new(pool));
@@ -227,6 +267,7 @@ mod tests {
         ShellRouterState {
             shell_service: Arc::new(ShellService::new(Arc::new(NoopSystemOpener))),
             stt_service: Arc::new(SttService::new(reqwest::Client::new())),
+            tts_service: Arc::new(TtsService::new(reqwest::Client::new())),
             client_pref_service,
         }
     }

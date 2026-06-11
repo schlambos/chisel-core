@@ -53,6 +53,13 @@ pub fn remote_agent_routes(state: RemoteAgentRouterState) -> Router {
         .route("/api/remote-agents/{id}/providers", get(fetch_provider_catalog))
         .route("/api/remote-agents/{id}/plugin", get(plugin_info))
         .route("/api/remote-agents/{id}/plugin/rotate-token", post(plugin_rotate_token))
+        .route("/api/remote-agents/{id}/plugin/voice-mode", post(plugin_voice_mode))
+        .route("/api/remote-agents/{id}/bg-processes", get(list_bg_processes))
+        .route("/api/remote-agents/{id}/bg-processes/{pid}/stop", post(stop_bg_process))
+        .route(
+            "/api/remote-agents/{id}/bg-processes/{pid}/output",
+            get(read_bg_process_output),
+        )
         .route(
             "/api/remote-agents/{id}/providers/auth",
             get(fetch_provider_auth_methods),
@@ -467,4 +474,129 @@ async fn plugin_rotate_token(
 ) -> Result<Json<ApiResponse<RemoteAgentPluginInfoResponse>>, AppError> {
     let info = state.service.rotate_plugin_token(&id).await?;
     Ok(Json(ApiResponse::ok(info)))
+}
+
+/// `POST /api/remote-agents/{id}/plugin/voice-mode` — toggle
+/// voice-mode for the plugin. The renderer invokes this when the
+/// user enables/disables voice input in the chat UI. The service
+/// layer pushes the toggle to the plugin channel (live + sticky
+/// for replay on reconnect) and fires a UI WS notification so
+/// other renderer surfaces can mirror the state without a REST
+/// poll. Body: `{ "enabled": bool, "session_id"?: string }`.
+async fn plugin_voice_mode(
+    State(state): State<RemoteAgentRouterState>,
+    Path(id): Path<String>,
+    Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<VoiceModeRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    state.service.set_voice_mode(&id, req.enabled, req.session_id).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+/// Body shape for `POST /api/remote-agents/{id}/plugin/voice-mode`.
+/// `session_id` is `None` for the unsessioned (global) toggle.
+#[derive(serde::Deserialize)]
+struct VoiceModeRequest {
+    enabled: bool,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+// ── Background processes (UI REST) ──────────────────────────────
+
+/// `GET /api/remote-agents/{id}/bg-processes` — list every
+/// background process the plugin webserver currently knows about
+/// for this agent row (running + recent terminal). Cheap — reads
+/// the in-memory [`crate::manager::remote::plugin::bg::BgProcessManager`]
+/// under a short mutex and clones the snapshots. The renderer
+/// can poll this on its existing 5 s cadence without a meaningful
+/// host-side cost.
+async fn list_bg_processes(
+    State(state): State<RemoteAgentRouterState>,
+    Path(id): Path<String>,
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<aionui_api_types::BgProcessListResponse>>, AppError> {
+    // First make sure the agent row exists — the list endpoint
+    // is auth-gated but we should still 404 for an unknown id
+    // rather than returning an empty list, so the UI can
+    // distinguish "agent exists, no processes yet" from "wrong
+    // id".
+    state.service.get(&id).await?;
+    let processes = crate::services::bg_process::list_bg_processes(&id);
+    Ok(Json(ApiResponse::ok(aionui_api_types::BgProcessListResponse {
+        processes,
+    })))
+}
+
+/// `POST /api/remote-agents/{id}/bg-processes/{pid}/stop` — stop a
+/// running background process. Idempotent for already-terminal
+/// processes: the response is the post-stop snapshot either way.
+/// Translates the plugin `BgError` to the standard `AppError`
+/// shape so the renderer can show the same error UI it uses for
+/// every other REST call.
+async fn stop_bg_process(
+    State(state): State<RemoteAgentRouterState>,
+    Path((id, pid)): Path<(String, String)>,
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<aionui_api_types::BgProcessUiInfo>>, AppError> {
+    state.service.get(&id).await?;
+    let process = crate::services::bg_process::stop_bg_process(&id, &pid)
+        .await
+        .map_err(bg_error_to_app_error)?;
+    Ok(Json(ApiResponse::ok(process)))
+}
+
+/// `GET /api/remote-agents/{id}/bg-processes/{pid}/output?offset=N`
+/// — read the ring-buffer slice from `offset` to the current
+/// write head. `offset` defaults to 0 when the caller is asking
+/// for the full buffer; pass a previous `next_offset` to resume.
+/// The renderer should treat `output_bytes` on the process
+/// snapshot as the source of truth for "how much has been
+/// emitted total" — `output` is the *retained* slice and may be
+/// shorter when `truncated == true`.
+async fn read_bg_process_output(
+    State(state): State<RemoteAgentRouterState>,
+    Path((id, pid)): Path<(String, String)>,
+    Extension(_user): Extension<CurrentUser>,
+    axum::extract::Query(query): axum::extract::Query<BgReadOutputQuery>,
+) -> Result<Json<ApiResponse<aionui_api_types::BgProcessOutputResponse>>, AppError> {
+    state.service.get(&id).await?;
+    let offset = query.offset.unwrap_or(0);
+    let (output, next_offset, process) =
+        crate::services::bg_process::read_bg_process(&id, &pid, offset).map_err(bg_error_to_app_error)?;
+    Ok(Json(ApiResponse::ok(aionui_api_types::BgProcessOutputResponse {
+        output,
+        next_offset,
+        process,
+    })))
+}
+
+/// Query string for `GET .../bg-processes/{pid}/output`. `offset`
+/// is the absolute byte offset the caller has already consumed;
+/// defaults to 0 (read the whole ring from the start).
+#[derive(serde::Deserialize, Default)]
+struct BgReadOutputQuery {
+    #[serde(default)]
+    offset: Option<u64>,
+}
+
+/// Map a plugin `BgError` to the standard `AppError` shape. The
+/// `code()` and message we surface in the response body match
+/// the plugin webserver's wire shape so a renderer that already
+/// knows `bg.denied` / `bg.no_approver` / etc. can render the
+/// same error UI for both surfaces.
+fn bg_error_to_app_error(e: crate::manager::remote::plugin::BgError) -> AppError {
+    use crate::manager::remote::plugin::BgError as Bg;
+    match e {
+        Bg::NotFound(id) => AppError::NotFound(format!("background process '{id}' not found")),
+        Bg::LimitExceeded(n) => AppError::BadRequest(format!(
+            "agent already has {n} running background processes (limit: {n})"
+        )),
+        Bg::Denied => AppError::BadRequest("shell approver rejected the command".into()),
+        Bg::NoApprover => AppError::BadRequest("no shell approver registered for this workspace".into()),
+        Bg::ApprovalTimedOut => AppError::BadRequest("approval timed out".into()),
+        Bg::Spawn(msg) => AppError::Internal(format!("failed to spawn shell: {msg}")),
+        Bg::Invalid(msg) => AppError::BadRequest(msg),
+    }
 }

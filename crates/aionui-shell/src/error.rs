@@ -84,6 +84,70 @@ impl From<SttError> for AppError {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum TtsError {
+    #[error("TTS is not enabled")]
+    Disabled,
+
+    #[error("OpenAI TTS is not configured: missing API key")]
+    OpenaiNotConfigured,
+
+    #[error("TTS provider '{0}' is not supported server-side")]
+    ProviderNotSupported(String),
+
+    #[error("TTS text must not be empty")]
+    TextEmpty,
+
+    #[error("TTS text exceeds maximum length of {0} characters")]
+    TextTooLong(usize),
+
+    #[error("TTS request failed: {0}")]
+    RequestFailed(String),
+
+    #[error("TTS unknown error: {0}")]
+    Unknown(String),
+}
+
+impl TtsError {
+    pub fn error_code(&self) -> &'static str {
+        match self {
+            Self::Disabled => "TTS_DISABLED",
+            Self::OpenaiNotConfigured => "TTS_OPENAI_NOT_CONFIGURED",
+            Self::ProviderNotSupported(_) => "TTS_PROVIDER_NOT_SUPPORTED",
+            Self::TextEmpty => "TTS_TEXT_EMPTY",
+            Self::TextTooLong(_) => "TTS_TEXT_TOO_LONG",
+            Self::RequestFailed(_) => "TTS_REQUEST_FAILED",
+            Self::Unknown(_) => "TTS_UNKNOWN",
+        }
+    }
+
+    pub fn status_code(&self) -> u16 {
+        match self {
+            Self::Disabled
+            | Self::OpenaiNotConfigured
+            | Self::ProviderNotSupported(_)
+            | Self::TextEmpty
+            | Self::TextTooLong(_) => 400,
+            Self::RequestFailed(_) => 502,
+            Self::Unknown(_) => 500,
+        }
+    }
+}
+
+impl From<TtsError> for AppError {
+    fn from(err: TtsError) -> Self {
+        match &err {
+            TtsError::Disabled
+            | TtsError::OpenaiNotConfigured
+            | TtsError::ProviderNotSupported(_)
+            | TtsError::TextEmpty
+            | TtsError::TextTooLong(_) => AppError::BadRequest(err.to_string()),
+            TtsError::RequestFailed(_) => AppError::BadGateway(err.to_string()),
+            TtsError::Unknown(_) => AppError::Internal(err.to_string()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +277,95 @@ mod tests {
             "STT request failed: timeout"
         );
         assert_eq!(SttError::Unknown("oops".into()).to_string(), "STT unknown error: oops");
+    }
+
+    #[test]
+    fn tts_disabled_maps_to_bad_request() {
+        let err: AppError = TtsError::Disabled.into();
+        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("not enabled")));
+    }
+
+    #[test]
+    fn tts_openai_not_configured_maps_to_bad_request() {
+        let err: AppError = TtsError::OpenaiNotConfigured.into();
+        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("OpenAI")));
+    }
+
+    #[test]
+    fn tts_provider_not_supported_maps_to_bad_request() {
+        let err: AppError = TtsError::ProviderNotSupported("system".into()).into();
+        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("system")));
+    }
+
+    #[test]
+    fn tts_text_empty_maps_to_bad_request() {
+        let err: AppError = TtsError::TextEmpty.into();
+        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("empty")));
+    }
+
+    #[test]
+    fn tts_text_too_long_maps_to_bad_request() {
+        let err: AppError = TtsError::TextTooLong(8192).into();
+        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("8192")));
+    }
+
+    #[test]
+    fn tts_request_failed_maps_to_bad_gateway() {
+        let err: AppError = TtsError::RequestFailed("HTTP 500".into()).into();
+        assert!(matches!(err, AppError::BadGateway(msg) if msg.contains("HTTP 500")));
+    }
+
+    #[test]
+    fn tts_unknown_maps_to_internal() {
+        let err: AppError = TtsError::Unknown("oops".into()).into();
+        assert!(matches!(err, AppError::Internal(msg) if msg.contains("oops")));
+    }
+
+    #[test]
+    fn tts_error_codes() {
+        assert_eq!(TtsError::Disabled.error_code(), "TTS_DISABLED");
+        assert_eq!(TtsError::OpenaiNotConfigured.error_code(), "TTS_OPENAI_NOT_CONFIGURED");
+        assert_eq!(
+            TtsError::ProviderNotSupported("system".into()).error_code(),
+            "TTS_PROVIDER_NOT_SUPPORTED"
+        );
+        assert_eq!(TtsError::TextEmpty.error_code(), "TTS_TEXT_EMPTY");
+        assert_eq!(TtsError::TextTooLong(8192).error_code(), "TTS_TEXT_TOO_LONG");
+        assert_eq!(TtsError::RequestFailed("x".into()).error_code(), "TTS_REQUEST_FAILED");
+        assert_eq!(TtsError::Unknown("x".into()).error_code(), "TTS_UNKNOWN");
+    }
+
+    #[test]
+    fn tts_status_codes() {
+        assert_eq!(TtsError::Disabled.status_code(), 400);
+        assert_eq!(TtsError::OpenaiNotConfigured.status_code(), 400);
+        assert_eq!(TtsError::ProviderNotSupported("x".into()).status_code(), 400);
+        assert_eq!(TtsError::TextEmpty.status_code(), 400);
+        assert_eq!(TtsError::TextTooLong(1).status_code(), 400);
+        assert_eq!(TtsError::RequestFailed("x".into()).status_code(), 502);
+        assert_eq!(TtsError::Unknown("x".into()).status_code(), 500);
+    }
+
+    #[test]
+    fn tts_error_display_messages() {
+        assert_eq!(TtsError::Disabled.to_string(), "TTS is not enabled");
+        assert_eq!(
+            TtsError::OpenaiNotConfigured.to_string(),
+            "OpenAI TTS is not configured: missing API key"
+        );
+        assert_eq!(
+            TtsError::ProviderNotSupported("system".into()).to_string(),
+            "TTS provider 'system' is not supported server-side"
+        );
+        assert_eq!(TtsError::TextEmpty.to_string(), "TTS text must not be empty");
+        assert_eq!(
+            TtsError::TextTooLong(8192).to_string(),
+            "TTS text exceeds maximum length of 8192 characters"
+        );
+        assert_eq!(
+            TtsError::RequestFailed("timeout".into()).to_string(),
+            "TTS request failed: timeout"
+        );
+        assert_eq!(TtsError::Unknown("oops".into()).to_string(), "TTS unknown error: oops");
     }
 }

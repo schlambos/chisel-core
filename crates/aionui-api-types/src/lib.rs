@@ -5,6 +5,7 @@ mod agent_build_extra;
 mod agent_discovery;
 mod assistant;
 mod auth;
+mod bg_process;
 mod channel;
 mod confirmation;
 mod connection_test;
@@ -48,6 +49,7 @@ pub use auth::{
     RefreshResponse, RefreshTokenRequest, UserInfoResponse, WebuiChangePasswordRequest, WebuiChangeUsernameRequest,
     WebuiChangeUsernameResponse, WebuiGenerateQrTokenResponse, WebuiResetPasswordResponse, WsTokenResponse,
 };
+pub use bg_process::{BgProcessListResponse, BgProcessOutputResponse, BgProcessStatus, BgProcessUiInfo};
 pub use channel::{
     ApprovePairingRequest, BridgeResponse, ChannelSessionResponse, ChannelUserResponse, DisablePluginRequest,
     EnablePluginRequest, PairingRequestResponse, PairingRequestedPayload, PluginStatusChangedPayload,
@@ -115,8 +117,9 @@ pub use remote_agent::{
 pub use response::{ApiResponse, ErrorResponse};
 pub use shell::{
     CheckToolInstalledRequest, CheckToolInstalledResponse, DeepgramSpeechToTextConfig, OpenAISpeechToTextConfig,
-    OpenExternalRequest, OpenFileRequest, OpenFolderWithRequest, ShowItemInFolderRequest, SpeechToTextConfig,
-    SpeechToTextProvider, SpeechToTextResult, ToolType,
+    OpenAITextToSpeechConfig, OpenExternalRequest, OpenFileRequest, OpenFolderWithRequest, ShowItemInFolderRequest,
+    SpeechToTextConfig, SpeechToTextProvider, SpeechToTextResult, TextToSpeechConfig, TextToSpeechProvider, ToolType,
+    TtsRequest, TtsResult,
 };
 pub use skill::{
     AddExternalPathRequest, BuiltinAutoSkillResponse, DeleteSkillRequest, ExportSkillRequest,

@@ -651,6 +651,107 @@ impl RemoteAgentService {
         })
     }
 
+    /// Toggle voice-mode for the given remote agent's plugin
+    /// channel. The renderer uses voice-mode to ask the OpenCode
+    /// plugin to start/stop recording a voice session tied to a
+    /// specific session id (or the unsessioned "all sessions" case
+    /// when `session_id` is `None`).
+    ///
+    /// On the wire this:
+    /// 1. Verifies the agent row exists (404 otherwise).
+    /// 2. Pushes a `voice_mode` event to the plugin's
+    ///    per-agent broadcast channel so a connected plugin
+    ///    sees the toggle in real time.
+    /// 3. Records the toggle as **sticky** state in the
+    ///    plugin registry so a freshly-connected plugin
+    ///    (after a restart or reconnect) replays the latest
+    ///    state for every session it's tracking.
+    /// 4. Audits the toggle in the per-agent audit ring
+    ///    buffer (renderer status panel).
+    /// 5. Fires a UI WebSocket notification so the
+    ///    renderer's voice-mode UI can update without
+    ///    waiting for the next REST poll.
+    ///
+    /// All five steps are best-effort from a 4xx/5xx
+    /// perspective — the only failure mode is "agent row
+    /// not found" which surfaces as 404.
+    pub async fn set_voice_mode(&self, id: &str, enabled: bool, session_id: Option<String>) -> Result<(), AppError> {
+        // Existence check first — we don't want a typo'd
+        // agent id to silently succeed and create a stale
+        // sticky entry in the plugin registry.
+        self.repo
+            .find_by_id(id)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::NotFound(format!("Remote agent '{id}' not found")))?;
+
+        // The wire shape the plugin expects is
+        // `{"type": "voice_mode", "data": {"sessionID": ..., "enabled": ...}}`.
+        // We wrap it the same way the existing `context.update`
+        // event was wired in Phase 2 so the plugin's existing
+        // SSE consumer can switch on `type` regardless of which
+        // push produced the event.
+        let data = serde_json::json!({
+            "type": "voice_mode",
+            "data": {
+                "sessionID": session_id,
+                "enabled": enabled,
+            }
+        });
+        let event = crate::manager::remote::plugin::PluginPushEvent {
+            event: "voice_mode".to_string(),
+            data: data.clone(),
+        };
+
+        let registry = crate::manager::remote::plugin::registry::global();
+        // Live push — a currently-connected plugin sees this
+        // immediately.
+        registry.push(id, event.clone());
+        // Sticky replay — a freshly-connected plugin recovers
+        // this state on the next SSE handshake. Keyed by the
+        // session id (or empty string for the unsessioned
+        // case) so multiple concurrent sessions don't collide.
+        let session_key = session_id.clone().unwrap_or_default();
+        registry.set_sticky_voice_mode(id, session_key, event);
+
+        // Audit. The summary intentionally mentions the
+        // session id (or "all") so the renderer's audit panel
+        // can show what was toggled. No raw command bodies,
+        // no secrets.
+        let now = aionui_common::now_ms().max(0) as u64;
+        let summary = match &session_id {
+            Some(sid) => format!("voice {} for session {sid}", if enabled { "on" } else { "off" }),
+            None => format!("voice {} for all sessions", if enabled { "on" } else { "off" }),
+        };
+        let session_audit = session_id.clone();
+        registry.record_audit(
+            id,
+            crate::manager::remote::plugin::PluginAuditRecord {
+                kind: "voice_mode".to_string(),
+                tool: None,
+                session_id: session_audit,
+                call_id: None,
+                at_ms: now,
+                summary: crate::manager::remote::plugin::server::truncate_summary(&summary),
+            },
+        );
+
+        // UI broadcast: the renderer's voice-mode UI can
+        // react to the toggle without polling the next REST
+        // list. Best-effort — the notifier is a no-op when
+        // the host hasn't installed one.
+        let mut payload = serde_json::json!({
+            "agent_id": id,
+            "enabled": enabled,
+        });
+        if let Some(sid) = session_id {
+            payload["session_id"] = serde_json::Value::String(sid);
+        }
+        crate::manager::remote::plugin::ui_push::notify("remote.voiceModeChanged", payload);
+
+        Ok(())
+    }
+
     /// M12: start provider OAuth — returns `ProviderAuthAuthorization` (§8).
     pub async fn start_provider_oauth(
         &self,
@@ -2391,5 +2492,102 @@ mod tests {
             msg.contains("[code:dns_failure]"),
             "expected dns_failure code, got: {msg}"
         );
+    }
+
+    // ── Phase 3: voice-mode service tests ────────────────────
+
+    async fn build_service_with_agent(name: &str) -> (RemoteAgentService, aionui_db::Database) {
+        use aionui_db::CreateRemoteAgentParams;
+        use aionui_db::SqliteRemoteAgentRepository;
+        use aionui_db::init_database_memory;
+        let db = init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        let repo: Arc<dyn aionui_db::IRemoteAgentRepository> = Arc::new(SqliteRemoteAgentRepository::new(pool));
+        repo.create(CreateRemoteAgentParams {
+            name,
+            protocol: "opencode",
+            url: "wss://voice.example",
+            auth_type: "bearer",
+            auth_token: None,
+            allow_insecure: false,
+            avatar: None,
+            description: None,
+            device_id: None,
+            device_public_key: None,
+            device_private_key: None,
+            device_token: None,
+            tool_host: Some("local"),
+        })
+        .await
+        .unwrap();
+        let service = RemoteAgentService::new(repo, [0u8; 32]);
+        (service, db)
+    }
+
+    #[tokio::test]
+    async fn voice_mode_unknown_agent_is_not_found() {
+        // Use the global registry so sticky state doesn't leak
+        // across cases.
+        let registry = crate::manager::remote::plugin::registry::global();
+        registry.clear_sticky_voice_mode("missing_agent");
+        // Build a service that has no agent row matching the id.
+        let (service, _db) = build_service_with_agent("present").await;
+        let err = service
+            .set_voice_mode("missing_agent", true, Some("ses_x".into()))
+            .await
+            .expect_err("unknown agent should 404");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("NotFound"), "expected NotFound, got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn voice_mode_happy_path_records_sticky_and_audit_and_notifies() {
+        use crate::manager::remote::plugin::registry::global as global_registry;
+        use crate::manager::remote::plugin::ui_push;
+        let registry = global_registry();
+        registry.clear_sticky_voice_mode("ra_voice_ok");
+
+        let (service, _db) = build_service_with_agent("Voice Test").await;
+
+        let captured: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap_clone = captured.clone();
+        let notifier: Arc<dyn Fn(&str, serde_json::Value) + Send + Sync> = Arc::new(move |n, p| {
+            cap_clone.lock().unwrap().push((n.to_string(), p));
+        });
+        let _guard = ui_push::install_for_test(notifier);
+
+        // The seeded agent's id is auto-generated; fetch it.
+        let list = service.list().await.unwrap();
+        let agent_id = list[0].id.clone();
+        service
+            .set_voice_mode(&agent_id, true, Some("ses_1".into()))
+            .await
+            .expect("set_voice_mode should succeed");
+
+        // Sticky entry recorded.
+        let sticky = registry.sticky_voice_mode(&agent_id);
+        assert_eq!(sticky.len(), 1);
+        assert_eq!(sticky[0].data["type"], "voice_mode");
+        assert_eq!(sticky[0].data["data"]["enabled"], true);
+        assert_eq!(sticky[0].data["data"]["sessionID"], "ses_1");
+
+        // Audit entry recorded.
+        let audit = registry.audit_records(&agent_id);
+        assert!(
+            audit
+                .iter()
+                .any(|r| r.kind == "voice_mode" && r.summary.contains("ses_1"))
+        );
+
+        // UI notifier fired.
+        let log = captured.lock().unwrap();
+        assert!(
+            log.iter()
+                .any(|(n, p)| n == "remote.voiceModeChanged" && p["enabled"] == true && p["session_id"] == "ses_1")
+        );
+
+        // Cleanup.
+        registry.clear_sticky_voice_mode(&agent_id);
     }
 }

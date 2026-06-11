@@ -7,10 +7,13 @@ pub mod state;
 pub mod stt;
 pub(crate) mod stt_deepgram;
 pub(crate) mod stt_openai;
+pub mod tts;
+pub(crate) mod tts_openai;
 
-pub use error::{ShellError, SttError};
+pub use error::{ShellError, SttError, TtsError};
 pub use opener::{DefaultSystemOpener, ISystemOpener, NoopSystemOpener};
 pub use routes::shell_routes;
 pub use shell::ShellService;
 pub use state::ShellRouterState;
 pub use stt::SttService;
+pub use tts::TtsService;

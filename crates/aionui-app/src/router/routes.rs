@@ -37,6 +37,7 @@ use aionui_ai_agent::RemoteAgentService;
 use aionui_db::SqliteRemoteAgentRepository;
 
 use super::health::{guide_mcp_status, health_check};
+use super::sidecar::{sidecar_proxy_routes, sidecar_routes};
 use super::state::{ModuleStates, build_module_states, build_ws_state};
 use super::trace::with_access_log;
 
@@ -208,11 +209,24 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
     let guide_mcp_authenticated = Router::new()
         .route("/api/system/guide-mcp", get(guide_mcp_status))
         .with_state(services.guide_mcp_config.clone())
-        .route_layer(from_fn_with_state(auth_mw_state, auth_middleware));
+        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+
+    // Sidecar management routes (`/api/sidecars`) protected by auth.
+    // The proxy surface (`/sidecar/{id}/...`) is mounted OUTSIDE the
+    // auth layer because the embedded webview can't send Authorization
+    // headers; per-sidecar auth lives in the proxy's own middleware.
+    let sidecar_authenticated =
+        sidecar_routes(states.sidecar.clone()).route_layer(from_fn_with_state(auth_mw_state, auth_middleware));
 
     // Office proxy routes — exempt from auth (serve iframe content)
     let office_proxy = office_proxy_routes(states.office);
     let public_assets = asset_routes(AssetRouterState::default());
+
+    // Sidecar reverse proxy — exempt from the api auth layer. Auth
+    // is enforced per-sidecar by `sidecar_proxy_routes`'s own
+    // middleware (token/cookie). See `sidecar.rs` for the security
+    // posture.
+    let sidecar_proxy = sidecar_proxy_routes(states.sidecar.clone());
 
     // WebSocket upgrade route — exempt from CSRF (no cookie-based
     // double-submit) but still gets security response headers.
@@ -244,7 +258,8 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
         .merge(office_authenticated)
         .merge(shell_authenticated)
         .merge(assistant_authenticated)
-        .merge(guide_mcp_authenticated);
+        .merge(guide_mcp_authenticated)
+        .merge(sidecar_authenticated);
 
     // Conditionally merge WeChat login SSE route (feature-gated)
     #[cfg(feature = "weixin")]
@@ -261,6 +276,7 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
     .merge(ws_routes)
     .merge(lsp_ws)
     .merge(office_proxy)
+    .merge(sidecar_proxy)
     .merge(public_assets)
     .layer(middleware::from_fn(security_headers_middleware));
 

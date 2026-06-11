@@ -2,6 +2,7 @@
 
 mod health;
 mod routes;
+mod sidecar;
 mod state;
 mod trace;
 

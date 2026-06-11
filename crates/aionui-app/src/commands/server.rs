@@ -34,12 +34,26 @@ pub async fn run_server(env: ServerEnvironment, services: AppServices) -> Result
     let idle_scanner_handle =
         aionui_ai_agent::start_idle_scanner(services.worker_task_manager.clone(), shutdown_rx, None, None);
 
-    axum::serve(listener, router)
+    let app = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+    axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
             let _ = shutdown_tx.send(true);
         })
         .await?;
+
+    // Reap any background processes the OpenCode plugin may
+    // have started. This is a backstop — the per-conversation
+    // close path (`manager/remote/agent.rs`) already kills
+    // processes owned by closing conversations, and
+    // `Builder::clean_cli` sets `kill_on_drop(true)` so a
+    // dropped monitor task SIGKILLs its child. We call this
+    // before closing the DB to ensure the audit log captures
+    // any final `bg.stop` records.
+    let killed = aionui_ai_agent::manager::remote::plugin::bg::kill_all_bg_processes().await;
+    if killed > 0 {
+        info!(killed, "background processes killed on graceful shutdown");
+    }
 
     // Wait for the scanner to observe the shutdown watch value and
     // return; at worst this blocks for the current 60 s tick.

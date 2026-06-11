@@ -51,6 +51,11 @@ sha2.workspace = true
 reqwest.workspace = true
 rmcp = { version = "1.5", features = ["server", "transport-io", "schemars"] }
 anyhow.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+http-body-util.workspace = true
+tokio-tungstenite.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 aionui-api-types.workspace = true

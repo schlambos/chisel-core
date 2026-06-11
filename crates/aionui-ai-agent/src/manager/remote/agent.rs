@@ -5524,6 +5524,28 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
             // No-op for empty `remote_agent_id`.
             if !self.remote_config.remote_agent_id.is_empty() {
                 plugin::registry::global().unregister_shell_approver(&self.remote_config.remote_agent_id);
+                // Same conversation-close teardown should also
+                // reap any background processes the plugin
+                // started against this agent row, so we don't
+                // leak shell processes owned by a now-closed
+                // conversation. The `kill_all_for_agent` path
+                // is a fire-and-forget signal — the monitor
+                // tasks do the actual `child.kill()` work
+                // asynchronously, and `kill_on_drop(true)` on
+                // the runtime builder is a backstop if the
+                // task is somehow dropped before the signal
+                // fires.
+                let agent_for_bg = self.remote_config.remote_agent_id.clone();
+                tokio::spawn(async move {
+                    let killed = plugin::bg::bg_global().kill_all_for_agent(&agent_for_bg).await;
+                    if killed > 0 {
+                        tracing::debug!(
+                            agent_id = %agent_for_bg,
+                            killed,
+                            "background processes killed on conversation close"
+                        );
+                    }
+                });
             }
             let http_client = self.http_client.clone();
             let base_url = normalize_base_url(&self.remote_config.url);

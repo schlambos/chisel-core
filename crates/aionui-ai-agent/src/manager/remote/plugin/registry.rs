@@ -46,6 +46,14 @@ const HELLO_CONNECTED_GRACE_MS: u64 = 60_000;
 /// cap and let `send` errors silently drop on overflow.
 const PUSH_CHANNEL_CAP: usize = 256;
 
+/// Soft cap on the per-agent sticky voice-mode state we remember for
+/// replay when a plugin reconnects. The plugin only needs the most
+/// recent toggle per session to recover state; the cap exists to keep
+/// the in-memory footprint bounded for agents that run many short
+/// sessions in sequence. LRU/insertion-order eviction — the oldest
+/// entry is dropped when the cap is hit.
+pub const STICKY_VOICE_MODE_CAP: usize = 64;
+
 // ── Token validator trait ────────────────────────────────────────
 
 /// Resolves a plugin-channel bearer token to its owning `remote_agent_id`.
@@ -101,6 +109,22 @@ struct AgentEntry {
     /// conversation becomes live. `None` when no conversation is
     /// currently bound to this agent row.
     shell_approver: Option<Arc<dyn ShellApprover>>,
+    /// Sticky voice-mode state — the most recent toggle per session
+    /// (or for the unsessioned case, keyed by the empty string).
+    /// Replayed in insertion order when a plugin opens
+    /// `/plugin/events`. Capped at [`STICKY_VOICE_MODE_CAP`].
+    voice_sticky: VecDeque<StickyVoiceMode>,
+}
+
+/// One sticky voice-mode record. `session_key` is either the
+/// session id the renderer set voice mode for, or the empty string
+/// for the unsessioned case. The keying is what makes "latest wins"
+/// per session work — re-setting the same `session_id` overwrites
+/// the prior entry instead of growing the list.
+#[derive(Debug, Clone)]
+pub struct StickyVoiceMode {
+    pub session_key: String,
+    pub event: PluginPushEvent,
 }
 
 /// Process-wide singleton. `std::sync::Mutex` matches the local_fs_mcp
@@ -150,6 +174,7 @@ impl PluginRegistry {
             audit: VecDeque::with_capacity(AUDIT_RING_CAP),
             push_tx: tokio::sync::broadcast::channel(PUSH_CHANNEL_CAP).0,
             shell_approver: None,
+            voice_sticky: VecDeque::with_capacity(STICKY_VOICE_MODE_CAP),
         });
         f(entry)
     }
@@ -286,8 +311,49 @@ impl PluginRegistry {
             audit: VecDeque::with_capacity(AUDIT_RING_CAP),
             push_tx: tokio::sync::broadcast::channel(PUSH_CHANNEL_CAP).0,
             shell_approver: None,
+            voice_sticky: VecDeque::with_capacity(STICKY_VOICE_MODE_CAP),
         });
         entry.push_tx.subscribe()
+    }
+
+    // ── Sticky voice-mode (for SSE replay on reconnect) ───────
+
+    /// Record the latest voice-mode toggle for the given session
+    /// (empty string for the unsessioned case) as a sticky event.
+    /// "Latest wins" per session — re-setting the same
+    /// `session_key` overwrites the prior entry; the cap
+    /// ([`STICKY_VOICE_MODE_CAP`]) only kicks in when a new
+    /// `session_key` arrives and the list is full.
+    pub fn set_sticky_voice_mode(&self, agent_id: &str, session_key: String, event: PluginPushEvent) {
+        self.entry_mut(agent_id, |e| {
+            if let Some(existing) = e.voice_sticky.iter_mut().find(|s| s.session_key == session_key) {
+                existing.event = event;
+                return;
+            }
+            if e.voice_sticky.len() >= STICKY_VOICE_MODE_CAP {
+                e.voice_sticky.pop_front();
+            }
+            e.voice_sticky.push_back(StickyVoiceMode { session_key, event });
+        });
+    }
+
+    /// Snapshot the sticky voice-mode events in insertion order
+    /// (oldest first). Empty for an unknown agent. The SSE handler
+    /// replays this list verbatim after the initial `ping` so a
+    /// freshly-connected plugin recovers its state.
+    pub fn sticky_voice_mode(&self, agent_id: &str) -> Vec<PluginPushEvent> {
+        let map = self.agents.lock().expect("PluginRegistry mutex poisoned");
+        map.get(agent_id)
+            .map(|e| e.voice_sticky.iter().map(|s| s.event.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Test-only: clear sticky voice-mode state for one agent. Used
+    /// by tests that build an isolated registry and want a fresh
+    /// slate between cases.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_sticky_voice_mode(&self, agent_id: &str) {
+        self.entry_mut(agent_id, |e| e.voice_sticky.clear());
     }
 }
 
@@ -465,5 +531,83 @@ mod tests {
             .expect("timeout")
             .expect("recv");
         assert_eq!(got.event, "late");
+    }
+
+    #[test]
+    fn sticky_voice_mode_unknown_agent_is_empty() {
+        let r = registry();
+        assert!(r.sticky_voice_mode("ra_unknown").is_empty());
+    }
+
+    #[test]
+    fn sticky_voice_mode_latest_wins_per_session() {
+        let r = registry();
+        // Two different sessions: A and B.
+        r.set_sticky_voice_mode(
+            "ra_x",
+            "ses_a".into(),
+            PluginPushEvent {
+                event: "voice_mode".into(),
+                data: serde_json::json!({"type": "voice_mode", "data": {"sessionID": "ses_a", "enabled": true}}),
+            },
+        );
+        r.set_sticky_voice_mode(
+            "ra_x",
+            "ses_b".into(),
+            PluginPushEvent {
+                event: "voice_mode".into(),
+                data: serde_json::json!({"type": "voice_mode", "data": {"sessionID": "ses_b", "enabled": true}}),
+            },
+        );
+        // Re-set ses_a with a new payload — should overwrite, not append.
+        r.set_sticky_voice_mode(
+            "ra_x",
+            "ses_a".into(),
+            PluginPushEvent {
+                event: "voice_mode".into(),
+                data: serde_json::json!({"type": "voice_mode", "data": {"sessionID": "ses_a", "enabled": false}}),
+            },
+        );
+        let entries = r.sticky_voice_mode("ra_x");
+        assert_eq!(entries.len(), 2, "no duplicate for re-set session");
+        // Insertion order: ses_a first (overwrite, kept in place), then ses_b.
+        assert_eq!(entries[0].data["data"]["enabled"], false);
+        assert_eq!(entries[0].data["data"]["sessionID"], "ses_a");
+        assert_eq!(entries[1].data["data"]["sessionID"], "ses_b");
+    }
+
+    #[test]
+    fn sticky_voice_mode_caps_at_limit() {
+        let r = registry();
+        for i in 0..(STICKY_VOICE_MODE_CAP + 5) {
+            r.set_sticky_voice_mode(
+                "ra_x",
+                format!("ses_{i}"),
+                PluginPushEvent {
+                    event: "voice_mode".into(),
+                    data: serde_json::json!({"n": i}),
+                },
+            );
+        }
+        let entries = r.sticky_voice_mode("ra_x");
+        assert_eq!(entries.len(), STICKY_VOICE_MODE_CAP, "cap enforced");
+        // The first 5 were evicted; the oldest survivor is ses_5.
+        assert_eq!(entries[0].data["n"], 5);
+        assert_eq!(entries.last().unwrap().data["n"], STICKY_VOICE_MODE_CAP as i64 + 4);
+    }
+
+    #[test]
+    fn sticky_voice_mode_unsessioned_uses_empty_key() {
+        let r = registry();
+        r.set_sticky_voice_mode(
+            "ra_x",
+            String::new(),
+            PluginPushEvent {
+                event: "voice_mode".into(),
+                data: serde_json::json!({"enabled": true}),
+            },
+        );
+        let entries = r.sticky_voice_mode("ra_x");
+        assert_eq!(entries.len(), 1);
     }
 }

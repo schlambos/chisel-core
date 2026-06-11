@@ -24,14 +24,26 @@
 //! agent has its own token, connection state, audit log, and push
 //! channel (see [`registry::PluginRegistry`]).
 
+pub mod bg;
 pub mod protocol;
 pub mod registry;
 pub mod server;
 pub mod shell_stream;
+pub mod ui_push;
 
-pub use protocol::{
-    PROTOCOL_VERSION, PluginAuditRecord, PluginHelloRequest, PluginHelloResponse, PluginProjectInfo, PluginPushEvent,
-    PluginResultRequest, PluginResultResponse, RunShellStreamingRequest,
+pub use bg::{
+    BgError, BgProcessManager, DEFAULT_BG_TIMEOUT_SECS, MAX_BG_PROCESSES_PER_AGENT, MAX_BG_TIMEOUT_SECS, bg_global,
+    bg_info_to_ui, kill_all_bg_processes,
 };
-pub use registry::{PluginConnectionState, PluginRegistry, PluginTokenValidator, global as global_registry};
+pub use protocol::{
+    BgErrorResponse, BgListResponse, BgProcessInfo, BgProcessResponse, BgReadResponse, BgRequest, BgStatus,
+    BgTailRequest, PROTOCOL_VERSION, PluginAuditRecord, PluginHelloRequest, PluginHelloResponse, PluginProjectInfo,
+    PluginPushEvent, PluginResultRequest, PluginResultResponse, RunShellStreamingRequest,
+};
+pub use registry::{
+    PluginConnectionState, PluginRegistry, PluginTokenValidator, STICKY_VOICE_MODE_CAP, global as global_registry,
+};
 pub use server::{PluginServer, ensure_plugin_server};
+#[cfg(any(test, feature = "test-support"))]
+pub use ui_push::install_for_test as install_ui_notifier_for_test;
+pub use ui_push::{notify as notify_ui, set_ui_notifier};

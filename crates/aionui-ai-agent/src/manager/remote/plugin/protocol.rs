@@ -176,3 +176,140 @@ pub struct PluginPushEvent {
     pub event: String,
     pub data: serde_json::Value,
 }
+
+// ── Background process management ───────────────────────────────
+
+/// Lifecycle status of a background process. `running` is the
+/// active state; `exited` means the child terminated under its own
+/// steam (exit code set, `ended_at_ms` set); `killed` is the catch-all
+/// for stop / timeout / shutdown paths where we initiated the kill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BgStatus {
+    Running,
+    Exited,
+    Killed,
+}
+
+/// Snapshot of a background process's state. Surfaces in the plugin
+/// tool's start/stop/list/read responses and in the renderer-facing
+/// REST listing. Mirrors the audit log's `bg.*` kinds so the UI can
+/// reconstruct the same timeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BgProcessInfo {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub command: String,
+    pub cwd: String,
+    pub session_id: String,
+    pub status: BgStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    pub started_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at_ms: Option<u64>,
+    /// Total bytes that have been appended to the ring buffer for
+    /// this process. Equal to `output.len()` when `truncated == false`;
+    /// when `truncated == true`, the ring has evicted older bytes and
+    /// this counts what the child emitted in total.
+    pub output_bytes: u64,
+    /// True once the ring buffer has wrapped at least once for this
+    /// process — i.e. callers asking for an `offset` below
+    /// `output_bytes - <ring_cap>` no longer get the original bytes.
+    pub truncated: bool,
+}
+
+/// Plugin → server request body for `POST /tools/bg`. Internally
+/// tagged on `op` so the wire shape is one flat JSON object with a
+/// discriminator field, matching the convention the
+/// [`PluginResultRequest`] enum uses for the same channel.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum BgRequest {
+    /// Start a long-running process. `command` runs under the user's
+    /// native shell (mirrors the streaming shell tool's
+    /// `resolve_shell` + `Builder::clean_cli` pipeline) and streams
+    /// into a 512 KiB ring buffer. The plugin is expected to supply a
+    /// `session_id` for the `McpRequestContext` the approver sees.
+    Start {
+        command: String,
+        #[serde(default)]
+        cwd: Option<String>,
+        session_id: String,
+        #[serde(default)]
+        call_id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
+    /// Stop a running process. Idempotent — stopping an already
+    /// terminal process is a no-op that returns the existing record.
+    Stop { process_id: String, session_id: String },
+    /// List every known process for the agent row (running + terminal,
+    /// capped at 16 terminal records per agent).
+    List { session_id: String },
+    /// Read output from `offset` to the current end of the ring
+    /// buffer. `offset` defaults to 0 when the caller is asking for
+    /// the full buffer; pass a previous `next_offset` to resume.
+    Read {
+        process_id: String,
+        session_id: String,
+        #[serde(default)]
+        offset: Option<u64>,
+    },
+}
+
+/// Body of `POST /tools/bg_tail`. Tail replays the ring buffer from
+/// `from_offset` and then follows live output as new chunks arrive.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BgTailRequest {
+    pub process_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub from_offset: Option<u64>,
+}
+
+/// Response body for the `Start` and `Stop` ops. `process` is the
+/// full snapshot after the operation completed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BgProcessResponse {
+    pub ok: bool,
+    pub process: BgProcessInfo,
+}
+
+/// Response body for the `List` op.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BgListResponse {
+    pub ok: bool,
+    pub processes: Vec<BgProcessInfo>,
+}
+
+/// Response body for the `Read` op. `output` is the slice of the
+/// ring buffer between `offset` and the current write head;
+/// `next_offset` is what to pass on the next `read` call to keep
+/// streaming.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BgReadResponse {
+    pub ok: bool,
+    pub output: String,
+    pub next_offset: u64,
+    pub process: BgProcessInfo,
+}
+
+/// `ok: false` payload for ops that fail. `code` is a stable string
+/// the plugin can switch on (`"no_approver"`, `"not_found"`,
+/// `"limit_exceeded"`, `"denied"`, `"timeout"`, `"invalid"`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BgErrorResponse {
+    pub ok: bool,
+    pub code: String,
+    pub message: String,
+}
