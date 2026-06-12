@@ -6,6 +6,95 @@
 
 Project-specific rules and conventions for AI assistants and contributors.
 
+## Operating Rules (HARD)
+
+These rules exist because agents have done real damage to this project: rewriting `main`'s history, force-pushing, inventing branches, scrubbing history to "fix" secrets, and scope-creeping into unrelated refactors. Read this section before any action.
+
+This is a **solo-developer fork**. The sole contributor is the user. No PRs from outside contributors, no co-authors, no release process the agent needs to drive. Operations that touch a remote or rewrite history are the user's job.
+
+### Git Safety
+
+**NEVER, without explicit per-operation user approval:**
+
+- **Never push to any remote** — not `origin`, not `upstream`, not feature branches. Commit locally and stop. Wait for the user to say "push it."
+- **Never force-push.** Not with `--force`, `--force-with-lease`, `+refspec`, or any equivalent. There is no scenario where an agent force-pushes.
+- **Never rewrite pushed history.** No `git rebase` on pushed commits, no `git commit --amend` on pushed commits, no `git reset` that moves the branch backward.
+- **Never run history-rewriting tools.** No `git filter-repo`, `git filter-branch`, BFG, or anything that rewrites commit SHAs. Even for scrubbing secrets — stop and ask.
+- **Never create branches.** Commit to the currently checked-out branch. If a branch seems needed, ask. Do not run `git checkout -b`, `git switch -c`, or `git branch <name>`.
+- **Never merge into `main`** — including fast-forwards, including from a branch the agent created. The user merges to `main`.
+- **Never delete branches or tags** (local or remote).
+- **Never touch the `upstream` remote** (iOfficeAI/AionUi). No fetch, no merge, no rebase onto it, no PR. This fork is one-way: upstream → fork, never the reverse. The user handles all upstream-facing work.
+
+**ALWAYS:**
+
+- Commit to the current branch: `git add <named files>` (never `-A` / `.`), then `git commit -m "<type>(<scope>): <subject>"`.
+- When in doubt, stop and ask. The cost of pausing is small; the cost of an unauthorized rewrite is hours of recovery.
+- If an operation feels like "cleanup," it is almost certainly destructive. Ask first.
+
+### Secrets
+
+- **Files never to commit:** `.env`, `.env.*`, `*-backup.json`, `credentials*`, `*.pem`, `*.key`, and anything containing `secret` or `token` in the name.
+- **If a secret is found in repo history → STOP and tell the user.** Do not run `git filter-repo`, BFG, or any history-scrubber. The cure has caused more damage than the disease here.
+- Never log, print, or `echo` environment-variable contents.
+
+### Scope Discipline
+
+- Fix only what the task asks. No "while I'm here" cleanups, no reformatting unrelated files, no opportunistic refactors.
+- Don't add error handling, validation, or fallbacks for cases that can't happen. Trust internal code and framework guarantees.
+- Don't introduce abstractions for hypothetical future needs. Three similar lines beats a premature helper.
+- If the work expands beyond what was asked (a 2-file fix turns into 20 files), **STOP and check** with the user before continuing.
+
+### Verification Before Claiming "Done"
+
+- "The code looks right" is not done. Run the relevant tests / clippy / fmt before saying a task is complete.
+- If the change cannot be validated by the agent in this environment, the agent **MUST give the operator a numbered test plan in plain English** — no file paths, no jargon, no "verify the X handler returns 201." Describe what the operator should DO and what they should SEE:
+
+  ```
+  1. Start the app and open a chat with any agent.
+  2. Send a message — it should appear in the conversation within a second.
+  3. Refresh the page — the message should still be there.
+  ```
+
+- "I think this works" is fine. "Verified" requires evidence (command + exit code, or test output).
+
+### Test Discipline
+
+- Do not delete failing tests to make them pass.
+- Do not weaken specific assertions to vague ones (`assert_eq!(status, 201)` → `assert!(status.is_success())` is prohibited).
+- Do not add `#[ignore]` to make CI green.
+- If a test is genuinely wrong, fix it with a clear explanation of why — don't quietly mutate assertions.
+
+(See also [Test Failure Handling](#test-failure-handling) below for the existing project rules.)
+
+### Documentation & Comments
+
+- Do not create new `.md` files (planning docs, decision logs, summaries, `NOTES.md`, etc.) unless explicitly asked.
+- Do not add comments that restate what the code does.
+- Do not add "PR description" comments in code — no `// added for issue #123`, no `// per user request`, no dated changelogs in source files. The commit message and `CHANGELOG.md` are the right places for "why."
+
+### Stop-and-Ask Triggers
+
+The agent **must stop and ask** the user when:
+
+- Git is in an unexpected state — untracked files, unfamiliar branches, in-progress merge/rebase, detached HEAD. Do not "clean up." Ask.
+- A test has been failing across multiple debug attempts. Stop debugging in circles; describe the symptom and ask.
+- The task's scope is expanding beyond the original ask.
+- Anything labeled "NEVER" elsewhere in this file would need to happen for the task to proceed.
+
+### Shell & Process Hygiene
+
+- No `rm -rf` outside the immediate working directory.
+- No `git add -A` or `git add .` — always name files. Prevents accidentally staging `.env`, secret files, or unrelated work.
+- No `--no-verify`, `--no-gpg-sign`, or any flag that bypasses commit hooks "to get unstuck." If a hook fails, fix the underlying issue.
+- Don't pipe `curl` or `wget` directly into `sh` / `bash`.
+
+### Honest Reporting
+
+- Surface unexpected results — don't bury them under a clean-looking summary.
+- If a step was skipped, say so explicitly.
+- If the agent made a judgment call the user didn't ask for, flag it.
+- End-of-task summary must answer: **what changed, what was verified, what wasn't, and what the operator should test.**
+
 ## High-Priority Rules
 
 ### Do NOT add fields to `AcpAgentManager` unless every alternative is exhausted
