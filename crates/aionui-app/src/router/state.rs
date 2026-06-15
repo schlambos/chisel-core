@@ -27,6 +27,7 @@ use aionui_extension::{
 };
 use aionui_file::{FileRouterState, FileService, FileWatchService, SnapshotService};
 use aionui_lsp::{LspRouterState, LspService};
+use aionui_terminal::{TerminalRouterState, TerminalService};
 use aionui_mcp::{
     AionrsAdapter, AionuiAdapter, ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, GeminiAdapter, McpAgentAdapter,
     McpConfigService, McpConnectionTestService, McpRouterState, McpSyncService, OpencodeAdapter, QwenAdapter,
@@ -69,6 +70,7 @@ pub struct ModuleStates {
     pub office: OfficeRouterState,
     pub shell: ShellRouterState,
     pub assistant: AssistantRouterState,
+    pub terminal: TerminalRouterState,
     /// Sidecar reverse-proxy state (registry + shared reqwest client).
     pub sidecar: crate::router::sidecar::SidecarState,
     /// Local `opencode serve` process manager (Phase 4).
@@ -165,6 +167,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         office: build_office_state(services),
         shell: build_shell_state(services),
         assistant,
+        terminal: build_terminal_state(services),
         sidecar: crate::router::sidecar::SidecarState::new(),
         local_opencode: build_local_opencode_state(services),
     };
@@ -342,6 +345,17 @@ pub fn build_file_state(services: &AppServices) -> FileRouterState {
 pub fn build_lsp_state(_services: &AppServices) -> LspRouterState {
     LspRouterState {
         service: Arc::new(LspService::new()),
+    }
+}
+
+/// Build the default `TerminalRouterState`. The terminal service is stateful
+/// (session map) but holds no dependency on `AppServices`; we still take `_services`
+/// to keep the builder signature uniform with the rest of the module.
+pub fn build_terminal_state(services: &AppServices) -> TerminalRouterState {
+    TerminalRouterState {
+        service: Arc::new(TerminalService::new()),
+        jwt_service: services.jwt_service.clone(),
+        local: services.local,
     }
 }
 

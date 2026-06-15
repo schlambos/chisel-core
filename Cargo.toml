@@ -23,6 +23,7 @@ members = [
   "crates/aionui-assistant",
   "crates/aionui-app",
   "crates/aionui-opencode-conformance",
+  "crates/aionui-terminal",
 ]
 
 [workspace.package]
@@ -53,6 +54,7 @@ aionui-team = { path = "crates/aionui-team" }
 aionui-cron = { path = "crates/aionui-cron" }
 aionui-assistant = { path = "crates/aionui-assistant" }
 aionui-app = { path = "crates/aionui-app" }
+aionui-terminal = { path = "crates/aionui-terminal" }
 
 aion-agent = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.1.27" }
 aion-types = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.1.27" }
@@ -166,6 +168,9 @@ rustls-native-certs = "0.8"
 
 # Pin rustls-webpki to fix RUSTSEC-2026-{0098,0099,0104}
 rustls-webpki = "0.103.13"
+
+# PTY for terminal sessions
+portable-pty = "0.6"
 
 # OAuth / MCP
 oauth2 = "5.0.0-rc.1"

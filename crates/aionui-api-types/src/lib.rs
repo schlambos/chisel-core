@@ -27,6 +27,7 @@ mod skill;
 mod system;
 mod team;
 mod team_mcp;
+pub mod terminal;
 mod websocket;
 
 pub use acp::{
@@ -143,4 +144,9 @@ pub use team::{
     TeamMcpStatusPayload, TeamResponse, TeammateMessagePayload,
 };
 pub use team_mcp::{GuideMcpConfig, TEAM_MCP_SERVER_NAME, TeamMcpStdioConfig};
+pub use terminal::{
+    TerminalCreateSessionRequest, TerminalCreateSessionResponse, TerminalKillSessionRequest,
+    TerminalListSessionsResponse, TerminalMessageType, TerminalOutputMessage, TerminalOutputType,
+    TerminalResizeSessionRequest, TerminalSessionInfo, TerminalWebSocketMessage,
+};
 pub use websocket::WebSocketMessage;

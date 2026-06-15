@@ -34,6 +34,7 @@ aionui-channel.workspace = true
 aionui-team.workspace = true
 aionui-cron.workspace = true
 aionui-assistant.workspace = true
+aionui-terminal.workspace = true
 aionui-runtime.workspace = true
 aion-config.workspace = true
 axum.workspace = true
