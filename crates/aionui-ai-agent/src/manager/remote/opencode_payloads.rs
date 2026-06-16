@@ -276,13 +276,6 @@ pub struct OpencodeV2PromptText {
     pub reference: Option<serde_json::Value>,
 }
 
-/// Body of `POST /api/session/{id}/compact` (V2).
-#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
-pub struct OpencodeV2CompactRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
-}
-
 // -- V1 /mcp (mcp.add) ----------------------------------------------------
 
 /// Body of `POST /mcp`. OpenCode's "remote" transport is what the deployed
@@ -613,16 +606,6 @@ mod tests {
         };
         let v = to_value(&req);
         assert_eq!(v, json!({ "prompt": { "text": "hello" }, "delivery": "immediate" }));
-    }
-
-    #[test]
-    fn v2_compact_request_optional_instructions() {
-        let req = OpencodeV2CompactRequest::default();
-        assert_eq!(to_value(&req), json!({}));
-        let req = OpencodeV2CompactRequest {
-            instructions: Some("summarize".into()),
-        };
-        assert_eq!(to_value(&req), json!({ "instructions": "summarize" }));
     }
 
     #[test]

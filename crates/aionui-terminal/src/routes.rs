@@ -66,14 +66,10 @@ async fn create_session(
         .create_session(req.command, req.cwd, req.cols, req.rows)
         .map_err(map_error)?;
 
-    Ok(Json(ApiResponse::ok(TerminalCreateSessionResponse {
-        session_id,
-    })))
+    Ok(Json(ApiResponse::ok(TerminalCreateSessionResponse { session_id })))
 }
 
-async fn list_sessions(
-    State(state): State<TerminalRouterState>,
-) -> Json<ApiResponse<TerminalListSessionsResponse>> {
+async fn list_sessions(State(state): State<TerminalRouterState>) -> Json<ApiResponse<TerminalListSessionsResponse>> {
     let sessions: Vec<TerminalSessionInfo> = state
         .service
         .list_sessions()
@@ -101,10 +97,7 @@ async fn kill_session(
         )
     })?;
 
-    state
-        .service
-        .kill_session(&req.session_id)
-        .map_err(map_error)?;
+    state.service.kill_session(&req.session_id).map_err(map_error)?;
 
     Ok(Json(ApiResponse::success()))
 }
@@ -138,37 +131,41 @@ async fn ws_upgrade(
         let token = match extract_token_from_ws_headers(&headers) {
             Some(t) => t,
             None => {
-                return Err((StatusCode::UNAUTHORIZED, Json(json!({
-                    "success": false,
-                    "error": "Authentication required for terminal WebSocket connection",
-                    "code": "UNAUTHORIZED"
-                }))));
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "success": false,
+                        "error": "Authentication required for terminal WebSocket connection",
+                        "code": "UNAUTHORIZED"
+                    })),
+                ));
             }
         };
 
         if state.jwt_service.verify(&token).is_err() {
-            return Err((StatusCode::FORBIDDEN, Json(json!({
-                "success": false,
-                "error": "Invalid or expired authentication token",
-                "code": "FORBIDDEN"
-            }))));
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "success": false,
+                    "error": "Invalid or expired authentication token",
+                    "code": "FORBIDDEN"
+                })),
+            ));
         }
     }
 
     debug!(session_id = %session_id, "terminal ws upgrade: authenticated");
-    
+
     let svc = state.service.clone();
-    
+
     Ok(ws.on_upgrade(move |socket| async move {
         match svc.attach_transport(&session_id).await {
-            Ok(pty) => {
-                match transport::ws_upgrade_handler(socket, pty).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        warn!(session_id = %session_id, error = %e, "terminal ws upgrade handler failed");
-                    }
+            Ok(pty) => match transport::ws_upgrade_handler(socket, pty).await {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(session_id = %session_id, error = %e, "terminal ws upgrade handler failed");
                 }
-            }
+            },
             Err(e) => {
                 warn!(session_id = %session_id, error = %e, "terminal attach_transport failed");
             }

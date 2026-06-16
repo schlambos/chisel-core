@@ -10,11 +10,17 @@
 
 use std::path::Component;
 
+use aionui_ai_agent::AgentInstance;
+use aionui_ai_agent::protocol::events::{AgentStreamEvent, OpencodeSessionCompactedData};
 use aionui_api_types::{
     AgentModeResponse, GetModelInfoResponse, RemoteSkillInfo, SetModeRequest, SetModelRequest, SideQuestionRequest,
-    SideQuestionResponse, SlashCommandItem, WorkspaceBrowseQuery, WorkspaceEntry,
+    SideQuestionResponse, SlashCommandItem, WebSocketMessage, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 use aionui_common::AppError;
+use aionui_db::SortOrder;
+use serde_json::{Value, json};
+use tokio::time::{Duration, timeout};
+use tracing::{debug, warn};
 
 use crate::service::ConversationService;
 
@@ -168,8 +174,17 @@ impl ConversationService {
     }
 
     /// M04: summarize/compact the remote session.
+    ///
+    /// After the HTTP call returns, waits briefly for `session.compacted` on the
+    /// agent event bus (idle chats have no `StreamRelay`), then persists
+    /// `extra.compaction_*` and broadcasts `conversation.listChanged(updated)` plus
+    /// `message.stream` (`opencode_session_compacted`) like M02 revert.
     pub async fn summarize_remote_session(&self, conversation_id: &str) -> Result<(), AppError> {
-        self.task(conversation_id)?.summarize_remote_session().await
+        let agent = self.get_or_build_agent(conversation_id).await?;
+        let mut rx = agent.subscribe();
+        agent.summarize_remote_session().await?;
+        self.finalize_remote_session_compaction(conversation_id, &agent, &mut rx)
+            .await
     }
 
     /// M03: share the remote session. Returns the share URL.
@@ -245,12 +260,14 @@ impl ConversationService {
     // ── V2 session API (M22) ────────────────────────────────────────
 
     /// M22: compact the remote session using V2 (with V1 fallback).
-    pub async fn compact_remote_session(
-        &self,
-        conversation_id: &str,
-        instructions: Option<&str>,
-    ) -> Result<(), AppError> {
-        self.task(conversation_id)?.compact_remote_session(instructions).await
+    ///
+    /// Same post-compact fan-out as [`summarize_remote_session`].
+    pub async fn compact_remote_session(&self, conversation_id: &str) -> Result<(), AppError> {
+        let agent = self.get_or_build_agent(conversation_id).await?;
+        let mut rx = agent.subscribe();
+        agent.compact_remote_session().await?;
+        self.finalize_remote_session_compaction(conversation_id, &agent, &mut rx)
+            .await
     }
 
     /// M22: get the session's active context window.
@@ -517,5 +534,457 @@ impl ConversationService {
         });
 
         Ok(entries)
+    }
+
+    /// After manual summarize/compact, collect `OpencodeSessionCompacted` from the
+    /// agent bus (no turn-scoped relay) and mirror revert's extra + WS fan-out.
+    async fn finalize_remote_session_compaction(
+        &self,
+        conversation_id: &str,
+        agent: &AgentInstance,
+        rx: &mut tokio::sync::broadcast::Receiver<AgentStreamEvent>,
+    ) -> Result<(), AppError> {
+        let mut compacted = match timeout(Duration::from_secs(15), Self::recv_session_compacted(rx)).await {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                debug!(
+                    conversation_id = %conversation_id,
+                    "compact finished without OpencodeSessionCompacted event"
+                );
+                OpencodeSessionCompactedData {
+                    summary: String::new(),
+                    tokens_reclaimed: 0,
+                    original_start_message_id: String::new(),
+                    original_end_message_id: String::new(),
+                }
+            }
+            Err(_) => {
+                debug!(
+                    conversation_id = %conversation_id,
+                    "timed out waiting for OpencodeSessionCompacted after compact"
+                );
+                OpencodeSessionCompactedData {
+                    summary: String::new(),
+                    tokens_reclaimed: 0,
+                    original_start_message_id: String::new(),
+                    original_end_message_id: String::new(),
+                }
+            }
+        };
+
+        // The live OpenCode server (1.15.x) emits a bare `session.compacted`
+        // = `{sessionID}` with no summary, range, or token metrics. When that
+        // happens we pull the truth from the server's own transcript: the
+        // compaction is a user message carrying a `compaction` part, and the
+        // structured summary lives in the assistant message whose `parentID`
+        // is that user message. This is what OpenCode's own UI renders.
+        let transcript = self.fetch_compaction_from_server(agent).await;
+        if compacted.summary.is_empty() || compacted.original_end_message_id.is_empty() {
+            if let Some(transcript) = transcript.as_ref() {
+                if compacted.summary.is_empty() {
+                    compacted.summary = transcript.summary_markdown.clone();
+                }
+                if compacted.original_end_message_id.is_empty() {
+                    compacted.original_end_message_id = transcript.compaction_message_id.clone();
+                }
+            }
+        }
+
+        if compacted.summary.is_empty() {
+            warn!(
+                conversation_id = %conversation_id,
+                "OpenCode compaction completed but no transcript summary message was found"
+            );
+        }
+
+        // OpenCode anchors the divider at the compaction boundary — the
+        // compaction message itself, with the retained tail (new context)
+        // below it. `compaction_end_message_id` is that boundary; the
+        // renderer draws the firm divider after it and renders the summary
+        // markdown below. Map the OpenCode id to a local row when possible so
+        // the renderer can match it against the persisted transcript.
+        let marker_row = if compacted.original_end_message_id.is_empty() {
+            None
+        } else {
+            self.resolve_local_row_for_opencode_message(conversation_id, &compacted.original_end_message_id)
+                .await?
+        };
+        let fallback_visible_boundary = match (marker_row.as_ref(), transcript.as_ref()) {
+            (Some(_), _) => None,
+            (None, Some(t)) => {
+                let mut row = None;
+                for opencode_id in t.previous_visible_message_ids.iter().rev() {
+                    if let Some(resolved) = self
+                        .resolve_local_row_for_opencode_message(conversation_id, opencode_id)
+                        .await?
+                    {
+                        row = Some(resolved);
+                        break;
+                    }
+                }
+                row
+            }
+            (None, None) => None,
+        };
+        let end_anchor = if compacted.original_end_message_id.is_empty() {
+            serde_json::Value::Null
+        } else if let Some(row) = marker_row.as_ref().or(fallback_visible_boundary.as_ref()) {
+            serde_json::Value::String(row.clone())
+        } else {
+            serde_json::Value::String(compacted.original_end_message_id.clone())
+        };
+
+        let marker_value = if compacted.original_end_message_id.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(compacted.original_end_message_id.clone())
+        };
+        let summary_message_value = transcript
+            .as_ref()
+            .and_then(|t| t.summary_message_id.as_ref())
+            .map(|id| serde_json::Value::String(id.clone()))
+            .unwrap_or(serde_json::Value::Null);
+
+        // Keep `compaction_start_message_id` populated for backward
+        // compatibility with older renderers, but it is no longer the primary
+        // anchor. Prefer the resolved start range; fall back to the boundary.
+        let start_row_id = if compacted.original_start_message_id.is_empty() {
+            None
+        } else {
+            self.resolve_local_row_for_opencode_message(conversation_id, &compacted.original_start_message_id)
+                .await?
+        };
+        let start_anchor = match start_row_id {
+            Some(row) => serde_json::Value::String(row),
+            None if !compacted.original_start_message_id.is_empty() => {
+                serde_json::Value::String(compacted.original_start_message_id.clone())
+            }
+            None => end_anchor.clone(),
+        };
+
+        let summary_value = if compacted.summary.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(compacted.summary.clone())
+        };
+
+        self.update_extra(
+            conversation_id,
+            json!({
+                "compaction_start_message_id": start_anchor,
+                "compaction_end_message_id": end_anchor,
+                "compaction_marker_message_id": marker_value,
+                "compaction_summary_message_id": summary_message_value,
+                "compaction_tokens_reclaimed": compacted.tokens_reclaimed,
+                "compaction_summary": summary_value,
+            }),
+        )
+        .await?;
+        self.broadcast_conversation_updated(conversation_id).await?;
+        self.broadcast_opencode_session_compacted(conversation_id, &compacted);
+        Ok(())
+    }
+
+    /// Pull the compaction summary + boundary from the server transcript when
+    /// the `session.compacted` event was bare. Returns
+    /// `(summary_markdown, boundary_opencode_message_id)`.
+    ///
+    /// OpenCode's data model: the compaction is a **user** message carrying a
+    /// part of `type:"compaction"`; the structured summary is the **assistant**
+    /// message whose `info.summary` is set and whose `info.parentID` equals the
+    /// compaction user message id. The summary text is the joined `text` parts.
+    /// The boundary anchor is the compaction user message id (the divider sits
+    /// after it, with the retained tail below). Best-effort: any failure
+    /// returns `None` and the caller falls back to event data.
+    async fn fetch_compaction_from_server(&self, agent: &AgentInstance) -> Option<CompactionTranscript> {
+        let raw = agent.get_v2_messages(None, None).await.ok()?;
+        extract_compaction_transcript(&raw)
+    }
+
+    async fn recv_session_compacted(
+        rx: &mut tokio::sync::broadcast::Receiver<AgentStreamEvent>,
+    ) -> Option<OpencodeSessionCompactedData> {
+        loop {
+            match rx.recv().await {
+                Ok(AgentStreamEvent::OpencodeSessionCompacted(data)) => return Some(data),
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+
+    /// Map an OpenCode `messageID` from `session.compacted` to a local message row id.
+    async fn resolve_local_row_for_opencode_message(
+        &self,
+        conversation_id: &str,
+        opencode_message_id: &str,
+    ) -> Result<Option<String>, AppError> {
+        let mut page = 1u32;
+        const PAGE_SIZE: u32 = 200;
+        loop {
+            let batch = self
+                .conversation_repo()
+                .get_messages(conversation_id, page, PAGE_SIZE, SortOrder::Asc)
+                .await?;
+            if batch.items.is_empty() {
+                return Ok(None);
+            }
+            for row in &batch.items {
+                let content: serde_json::Value = serde_json::from_str(&row.content).unwrap_or_default();
+                if content
+                    .get("_opencode")
+                    .and_then(|o| o.get("message_id"))
+                    .and_then(|v| v.as_str())
+                    == Some(opencode_message_id)
+                {
+                    return Ok(Some(row.id.clone()));
+                }
+            }
+            if batch.items.len() < PAGE_SIZE as usize {
+                return Ok(None);
+            }
+            page += 1;
+        }
+    }
+
+    fn broadcast_opencode_session_compacted(&self, conversation_id: &str, data: &OpencodeSessionCompactedData) {
+        let event = AgentStreamEvent::OpencodeSessionCompacted(data.clone());
+        let mut event_data = match serde_json::to_value(&event) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        aionui_common::normalize_keys_to_snake_case(&mut event_data);
+        let payload = json!({
+            "conversation_id": conversation_id,
+            "msg_id": ConversationService::mint_msg_id(),
+            "type": event_data.get("type").cloned().unwrap_or(json!("opencode_session_compacted")),
+            "data": event_data.get("data").cloned().unwrap_or(json!({})),
+            "hidden": false,
+        });
+        self.broadcaster()
+            .broadcast(WebSocketMessage::new("message.stream", payload));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompactionTranscript {
+    compaction_message_id: String,
+    summary_message_id: Option<String>,
+    summary_markdown: String,
+    previous_visible_message_ids: Vec<String>,
+}
+
+fn extract_compaction_transcript(raw: &Value) -> Option<CompactionTranscript> {
+    let items = raw.get("items").and_then(|v| v.as_array()).or_else(|| raw.as_array())?;
+
+    let mut compaction_index = None;
+    for (index, msg) in items.iter().enumerate() {
+        if role(msg) == Some("user") && has_part_type(msg, "compaction") {
+            compaction_index = Some(index);
+        }
+    }
+    let compaction_index = compaction_index?;
+    let compaction_message_id = message_id(&items[compaction_index])?.to_string();
+
+    let previous_visible_message_ids = items[..compaction_index]
+        .iter()
+        .filter(|msg| has_visible_transcript_part(msg))
+        .filter_map(|msg| message_id(msg).map(str::to_string))
+        .collect::<Vec<_>>();
+
+    let mut fallback_summary = None;
+    let mut parented_summary = None;
+    for msg in &items[compaction_index + 1..] {
+        if role(msg) != Some("assistant") || !has_summary_metadata(msg) {
+            continue;
+        }
+        let summary_markdown = text_parts(msg).concat();
+        if summary_markdown.is_empty() {
+            continue;
+        }
+        let candidate = CompactionTranscript {
+            compaction_message_id: compaction_message_id.clone(),
+            summary_message_id: message_id(msg).map(str::to_string),
+            summary_markdown,
+            previous_visible_message_ids: previous_visible_message_ids.clone(),
+        };
+        if parent_id(msg) == Some(compaction_message_id.as_str()) {
+            parented_summary = Some(candidate);
+            break;
+        }
+        if fallback_summary.is_none() {
+            fallback_summary = Some(candidate);
+        }
+    }
+
+    parented_summary.or(fallback_summary)
+}
+
+fn message_info(msg: &Value) -> &Value {
+    msg.get("info").unwrap_or(msg)
+}
+
+fn message_id(msg: &Value) -> Option<&str> {
+    let info = message_info(msg);
+    info.get("id")
+        .or_else(|| info.get("messageID"))
+        .or_else(|| info.get("messageId"))
+        .or_else(|| info.get("message_id"))
+        .and_then(|v| v.as_str())
+}
+
+fn role(msg: &Value) -> Option<&str> {
+    message_info(msg).get("role").and_then(|v| v.as_str())
+}
+
+fn parent_id(msg: &Value) -> Option<&str> {
+    let info = message_info(msg);
+    info.get("parentID")
+        .or_else(|| info.get("parentId"))
+        .or_else(|| info.get("parent_id"))
+        .and_then(|v| v.as_str())
+}
+
+fn parts(msg: &Value) -> Option<&Vec<Value>> {
+    msg.get("parts").and_then(|v| v.as_array())
+}
+
+fn has_part_type(msg: &Value, part_type: &str) -> bool {
+    parts(msg)
+        .map(|parts| {
+            parts
+                .iter()
+                .any(|part| part.get("type").and_then(|v| v.as_str()) == Some(part_type))
+        })
+        .unwrap_or(false)
+}
+
+fn has_visible_transcript_part(msg: &Value) -> bool {
+    parts(msg)
+        .map(|parts| {
+            parts.iter().any(|part| {
+                matches!(
+                    part.get("type").and_then(|v| v.as_str()),
+                    Some("text" | "reasoning" | "tool" | "retry")
+                )
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn has_summary_metadata(msg: &Value) -> bool {
+    let info = message_info(msg);
+    info.get("summary")
+        .or_else(|| info.get("isSummary"))
+        .or_else(|| info.get("is_summary"))
+        .map(|v| !v.is_null() && v.as_bool() != Some(false))
+        .unwrap_or(false)
+}
+
+fn text_parts(msg: &Value) -> Vec<&str> {
+    parts(msg)
+        .into_iter()
+        .flat_map(|parts| parts.iter())
+        .filter(|part| part.get("type").and_then(|v| v.as_str()) == Some("text"))
+        .filter_map(|part| {
+            part.get("text")
+                .or_else(|| part.get("content"))
+                .and_then(|v| v.as_str())
+        })
+        .filter(|text| !text.is_empty())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extracts_compaction_transcript_from_array_response() {
+        let raw = json!([
+            {
+                "info": { "id": "msg_old", "role": "user" },
+                "parts": [{ "type": "text", "text": "old" }]
+            },
+            {
+                "info": { "id": "msg_compact", "role": "user" },
+                "parts": [{ "type": "compaction" }]
+            },
+            {
+                "info": {
+                    "id": "msg_summary",
+                    "role": "assistant",
+                    "parentID": "msg_compact",
+                    "summary": true
+                },
+                "parts": [
+                    { "type": "text", "text": "# Goal\nKeep exact markdown." },
+                    { "type": "text", "text": "\n# Next Steps\nContinue." }
+                ]
+            },
+            {
+                "info": { "id": "msg_tail", "role": "user" },
+                "parts": [{ "type": "text", "text": "tail" }]
+            }
+        ]);
+
+        let transcript = extract_compaction_transcript(&raw).expect("transcript");
+
+        assert_eq!(transcript.compaction_message_id, "msg_compact");
+        assert_eq!(transcript.summary_message_id.as_deref(), Some("msg_summary"));
+        assert_eq!(
+            transcript.summary_markdown,
+            "# Goal\nKeep exact markdown.\n# Next Steps\nContinue."
+        );
+        assert_eq!(transcript.previous_visible_message_ids, vec!["msg_old"]);
+    }
+
+    #[test]
+    fn extracts_compaction_transcript_from_items_response_and_parent_variants() {
+        let raw = json!({
+            "items": [
+                {
+                    "info": { "id": "msg_old", "role": "assistant" },
+                    "parts": [{ "type": "reasoning", "text": "thinking" }]
+                },
+                {
+                    "info": { "id": "msg_compact", "role": "user" },
+                    "parts": [{ "type": "compaction" }]
+                },
+                {
+                    "info": {
+                        "id": "msg_summary",
+                        "role": "assistant",
+                        "parent_id": "msg_compact",
+                        "is_summary": true
+                    },
+                    "parts": [{ "type": "text", "content": "## Files\n- a.ts" }]
+                }
+            ],
+            "cursor": null
+        });
+
+        let transcript = extract_compaction_transcript(&raw).expect("transcript");
+
+        assert_eq!(transcript.compaction_message_id, "msg_compact");
+        assert_eq!(transcript.summary_message_id.as_deref(), Some("msg_summary"));
+        assert_eq!(transcript.summary_markdown, "## Files\n- a.ts");
+        assert_eq!(transcript.previous_visible_message_ids, vec!["msg_old"]);
+    }
+
+    #[test]
+    fn returns_none_when_summary_missing() {
+        let raw = json!({
+            "items": [
+                {
+                    "info": { "id": "msg_compact", "role": "user" },
+                    "parts": [{ "type": "compaction" }]
+                }
+            ]
+        });
+
+        assert!(extract_compaction_transcript(&raw).is_none());
     }
 }

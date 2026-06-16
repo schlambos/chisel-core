@@ -4,8 +4,8 @@
 //! axum. The routes layer ([`crate::routes`]) handles HTTP/WS adaptation.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
@@ -152,10 +152,7 @@ impl TerminalService {
     /// Kill a terminal session by ID.
     pub fn kill_session(&self, session_id: &str) -> Result<(), TerminalError> {
         // Clone the Arc out first, so we release the DashMap shard lock
-        let session = self
-            .sessions
-            .get(session_id)
-            .map(|entry| entry.value().clone());
+        let session = self.sessions.get(session_id).map(|entry| entry.value().clone());
 
         // Now remove from the map (no ref held)
         self.sessions.remove(session_id);
@@ -193,7 +190,8 @@ impl TerminalService {
         {
             let pty = session.pty.lock().unwrap();
             if let Some(ref pty_session) = *pty {
-                pty_session.resize(cols, rows)
+                pty_session
+                    .resize(cols, rows)
                     .map_err(|e| TerminalError::ResizeFailed(e))?;
             }
         }
@@ -225,12 +223,8 @@ impl TerminalService {
         let size = session.size.lock().unwrap();
 
         // Spawn the PTY session
-        let pty_session = match TerminalSession::new(
-            session.command.clone(),
-            session.cwd.clone(),
-            size.cols,
-            size.rows,
-        ) {
+        let pty_session = match TerminalSession::new(session.command.clone(), session.cwd.clone(), size.cols, size.rows)
+        {
             Ok(s) => s,
             Err(e) => {
                 // Reset attached flag so future attempts can try again
@@ -254,12 +248,10 @@ impl TerminalService {
 
     /// Get a reference to a session's PTY if it exists.
     pub fn get_pty(&self, session_id: &str) -> Option<SharedTerminalSession> {
-        self.sessions
-            .get(session_id)
-            .and_then(|entry| {
-                let pty = entry.pty.lock().unwrap();
-                pty.clone()
-            })
+        self.sessions.get(session_id).and_then(|entry| {
+            let pty = entry.pty.lock().unwrap();
+            pty.clone()
+        })
     }
 }
 
@@ -270,7 +262,7 @@ mod tests {
     #[test]
     fn test_service_create_and_list() {
         let service = TerminalService::new();
-        
+
         let id1 = service
             .create_session(Some("echo hello".to_string()), None, None, None)
             .unwrap();
@@ -280,11 +272,11 @@ mod tests {
 
         let sessions = service.list_sessions();
         assert_eq!(sessions.len(), 2);
-        
+
         let session1 = sessions.iter().find(|s| s.session_id == id1).unwrap();
         assert_eq!(session1.cols, 80);
         assert_eq!(session1.rows, 24);
-        
+
         let session2 = sessions.iter().find(|s| s.session_id == id2).unwrap();
         assert_eq!(session2.cols, 120);
         assert_eq!(session2.rows, 40);
@@ -293,10 +285,8 @@ mod tests {
     #[test]
     fn test_service_kill() {
         let service = TerminalService::new();
-        
-        let id = service
-            .create_session(None, None, None, None)
-            .unwrap();
+
+        let id = service.create_session(None, None, None, None).unwrap();
 
         assert!(service.kill_session(&id).is_ok());
         assert!(service.kill_session(&id).is_err()); // Should fail - already killed
@@ -305,7 +295,7 @@ mod tests {
     #[test]
     fn test_service_kill_nonexistent() {
         let service = TerminalService::new();
-        
+
         let result = service.kill_session("nonexistent");
         assert!(matches!(result, Err(TerminalError::SessionNotFound(_))));
     }
@@ -313,13 +303,11 @@ mod tests {
     #[test]
     fn test_service_resize() {
         let service = TerminalService::new();
-        
-        let id = service
-            .create_session(None, None, Some(80), Some(24))
-            .unwrap();
+
+        let id = service.create_session(None, None, Some(80), Some(24)).unwrap();
 
         assert!(service.resize_session(&id, 120, 40).is_ok());
-        
+
         let sessions = service.list_sessions();
         let session = sessions.iter().find(|s| s.session_id == id).unwrap();
         assert_eq!(session.cols, 120);
@@ -329,7 +317,7 @@ mod tests {
     #[test]
     fn test_service_resize_nonexistent() {
         let service = TerminalService::new();
-        
+
         let result = service.resize_session("nonexistent", 120, 40);
         assert!(matches!(result, Err(TerminalError::SessionNotFound(_))));
     }

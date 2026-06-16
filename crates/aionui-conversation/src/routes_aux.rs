@@ -368,23 +368,12 @@ async fn browse_workspace(
     Ok(Json(ApiResponse::ok(state.service.browse_workspace(&id, query).await?)))
 }
 
-#[derive(serde::Deserialize)]
-struct CompactRequest {
-    #[serde(default)]
-    instructions: Option<String>,
-}
-
 async fn compact_session(
     State(state): State<ConversationRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Path(id): Path<String>,
-    body: Option<Json<CompactRequest>>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    let instructions = body.and_then(|Json(b)| b.instructions);
-    state
-        .service
-        .compact_remote_session(&id, instructions.as_deref())
-        .await?;
+    state.service.compact_remote_session(&id).await?;
     Ok(Json(ApiResponse::success()))
 }
 

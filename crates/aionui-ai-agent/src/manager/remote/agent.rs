@@ -280,6 +280,19 @@ fn unwrap_event(raw: Value) -> Value {
     }
 }
 
+/// D10: strip the trailing version suffix from sync event types.
+/// e.g., "session.created.1" → "session.created", "session.updated" → "session.updated"
+fn strip_sync_version_suffix(event_type: &str) -> String {
+    // If the last dot-separated segment is all digits, it's a version suffix.
+    if let Some(last_dot) = event_type.rfind('.') {
+        let suffix = &event_type[last_dot + 1..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            return event_type[..last_dot].to_string();
+        }
+    }
+    event_type.to_string()
+}
+
 /// OpenCode SSE event types that legitimately arrive on `/global/event` but
 /// require no client-side action in the remote manager (E02 — full event
 /// coverage). Three families live here:
@@ -4191,8 +4204,8 @@ impl RemoteAgentManager {
 
     /// M22 Phase 3: V2 compact the session. Tries V2 `/api/session/{id}/compact`
     /// first; on 404 falls back to V1 `opencode_summarize`. The V2 endpoint does
-    /// not require `providerID`/`modelID` — the server uses the session's model.
-    pub async fn opencode_compact(&self, instructions: Option<&str>) -> Result<(), AppError> {
+    /// not require a body — the server uses the session's model.
+    pub async fn opencode_compact(&self) -> Result<(), AppError> {
         if !is_opencode_protocol(&self.remote_config.protocol) {
             return Err(AppError::BadRequest(
                 "Compact is only available for OpenCode remote connections".into(),
@@ -4206,7 +4219,6 @@ impl RemoteAgentManager {
             &base_url,
             auth_header.as_deref(),
             &session_id,
-            instructions,
             self.v2_location(),
         )
         .await
@@ -4784,6 +4796,7 @@ impl RemoteAgentManager {
     }
 
     /// M20: replay sync events missed during an SSE gap (best-effort).
+    /// D10: dispatch replayed events through the same handler as live SSE.
     async fn backfill_sync_history(&self) -> Result<(), AppError> {
         let since = { self.state.read().await.last_sync_seqs.clone() };
         if since.is_empty() {
@@ -4796,6 +4809,32 @@ impl RemoteAgentManager {
                 return Ok(());
             }
         };
+
+        // D10: dispatch replayed sync events through the SSE handler.
+        // De-dup: only dispatch if seq > current cursor for that aggregate.
+        for ev in &events {
+            let is_new = {
+                let state = self.state.read().await;
+                state
+                    .last_sync_seqs
+                    .get(&ev.aggregate_id)
+                    .map_or(true, |&cursor| ev.seq > cursor)
+            };
+            if is_new {
+                // Reconstruct the SSE envelope the handler expects.
+                // Strip version suffix (e.g., "session.created.1" → "session.created").
+                let event_type = strip_sync_version_suffix(&ev.event_type);
+                let envelope = serde_json::json!({
+                    "type": event_type,
+                    "properties": ev.data
+                });
+                if let Ok(data_str) = serde_json::to_string(&envelope) {
+                    self.handle_opencode_sse_event(&data_str).await;
+                }
+            }
+        }
+
+        // Advance cursors to the latest seq per aggregate.
         let mut state = self.state.write().await;
         for ev in events {
             state

@@ -703,8 +703,7 @@ impl ConversationService {
             .get(conversation_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
-        let extra: serde_json::Value =
-            serde_json::from_str(&row.extra).unwrap_or_else(|_| serde_json::json!({}));
+        let extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap_or_else(|_| serde_json::json!({}));
         let response = row_to_response_with_extra(row, extra, &self.workspace_root)?;
         self.broadcast_list_changed(conversation_id, "updated", response.source.as_ref());
         Ok(())

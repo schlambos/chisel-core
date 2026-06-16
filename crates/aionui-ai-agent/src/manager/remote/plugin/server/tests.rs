@@ -400,8 +400,8 @@ async fn ensure_plugin_server_is_singleton() {
 
 #[test]
 fn plugin_listen_addr_uses_fixed_default_port() {
-    use crate::manager::remote::reachability::{Candidate, Plan};
     use crate::manager::remote::plugin::plugin_listen_addr;
+    use crate::manager::remote::reachability::{Candidate, Plan};
     use aionui_common::constants::DEFAULT_PLUGIN_PORT;
     use std::net::{IpAddr, Ipv4Addr};
 

@@ -43,57 +43,56 @@ pub async fn bridge(socket: WebSocket, pty: SharedTerminalSession) {
                 Ok(data) => {
                     coalescing_buffer.extend(data);
 
-                     // Check if we should flush the coalescing buffer
-                     let now = tokio::time::Instant::now();
-                     if now.duration_since(last_send_time) >= Duration::from_millis(8)
-                         || coalescing_buffer.len() >= 4096
-                     {
-                          if !coalescing_buffer.is_empty() {
-                             let data = std::mem::take(&mut coalescing_buffer);
-                             // Encode as base64 to preserve all bytes exactly (FIX 1: UTF-8 chunk corruption)
-                             let base64_data = STANDARD.encode(&data);
-                             let msg = TerminalOutputMessage {
-                                 message_type: TerminalOutputType::Output,
-                                 data: Some(base64_data),
-                             };
-                             let json_data = serde_json::to_string(&msg).unwrap_or_else(|_| {
-                                 // Fallback to empty string if serialization fails
-                                 String::new()
-                             });
-                             let mut sink = ws_sink_for_reader.lock().await;
-                             if sink.send(Message::Text(json_data.into())).await.is_err() {
-                                 debug!("terminal ws sink closed");
-                                 return;
-                             }
-                             last_send_time = now;
-                         }
-                     }
-                }
-                 Err(TryRecvError::Empty) => {
-                       // Flush any pending buffered output if the coalescing interval has elapsed
-                       let now = tokio::time::Instant::now();
-                        if !coalescing_buffer.is_empty() && now.duration_since(last_send_time) >= Duration::from_millis(8) {
-                           let data = std::mem::take(&mut coalescing_buffer);
-                           // Encode as base64 to preserve all bytes exactly (FIX 1: UTF-8 chunk corruption)
-                           let base64_data = STANDARD.encode(&data);
-                           let msg = TerminalOutputMessage {
-                               message_type: TerminalOutputType::Output,
-                               data: Some(base64_data),
-                           };
-                           let json_data = serde_json::to_string(&msg).unwrap_or_else(|_| {
-                               // Fallback to empty string if serialization fails
-                               String::new()
-                           });
-                           let mut sink = ws_sink_for_reader.lock().await;
-                           if sink.send(Message::Text(json_data.into())).await.is_err() {
-                               debug!("terminal ws sink closed");
-                               return;
-                           }
-                           last_send_time = now;
+                    // Check if we should flush the coalescing buffer
+                    let now = tokio::time::Instant::now();
+                    if now.duration_since(last_send_time) >= Duration::from_millis(8) || coalescing_buffer.len() >= 4096
+                    {
+                        if !coalescing_buffer.is_empty() {
+                            let data = std::mem::take(&mut coalescing_buffer);
+                            // Encode as base64 to preserve all bytes exactly (FIX 1: UTF-8 chunk corruption)
+                            let base64_data = STANDARD.encode(&data);
+                            let msg = TerminalOutputMessage {
+                                message_type: TerminalOutputType::Output,
+                                data: Some(base64_data),
+                            };
+                            let json_data = serde_json::to_string(&msg).unwrap_or_else(|_| {
+                                // Fallback to empty string if serialization fails
+                                String::new()
+                            });
+                            let mut sink = ws_sink_for_reader.lock().await;
+                            if sink.send(Message::Text(json_data.into())).await.is_err() {
+                                debug!("terminal ws sink closed");
+                                return;
+                            }
+                            last_send_time = now;
                         }
-                       tokio::time::sleep(Duration::from_millis(16)).await;
-                   }
-                 Err(TryRecvError::Disconnected) => {
+                    }
+                }
+                Err(TryRecvError::Empty) => {
+                    // Flush any pending buffered output if the coalescing interval has elapsed
+                    let now = tokio::time::Instant::now();
+                    if !coalescing_buffer.is_empty() && now.duration_since(last_send_time) >= Duration::from_millis(8) {
+                        let data = std::mem::take(&mut coalescing_buffer);
+                        // Encode as base64 to preserve all bytes exactly (FIX 1: UTF-8 chunk corruption)
+                        let base64_data = STANDARD.encode(&data);
+                        let msg = TerminalOutputMessage {
+                            message_type: TerminalOutputType::Output,
+                            data: Some(base64_data),
+                        };
+                        let json_data = serde_json::to_string(&msg).unwrap_or_else(|_| {
+                            // Fallback to empty string if serialization fails
+                            String::new()
+                        });
+                        let mut sink = ws_sink_for_reader.lock().await;
+                        if sink.send(Message::Text(json_data.into())).await.is_err() {
+                            debug!("terminal ws sink closed");
+                            return;
+                        }
+                        last_send_time = now;
+                    }
+                    tokio::time::sleep(Duration::from_millis(16)).await;
+                }
+                Err(TryRecvError::Disconnected) => {
                     // PTY reader thread exited, terminal is closed
                     debug!("PTY reader thread exited");
                     // Send exit message before breaking
@@ -101,9 +100,7 @@ pub async fn bridge(socket: WebSocket, pty: SharedTerminalSession) {
                         message_type: TerminalOutputType::Exit,
                         data: Some("0".to_string()),
                     };
-                    let json_data = serde_json::to_string(&msg).unwrap_or_else(|_| {
-                        String::new()
-                    });
+                    let json_data = serde_json::to_string(&msg).unwrap_or_else(|_| String::new());
                     let mut sink = ws_sink_for_reader.lock().await;
                     let _ = sink.send(Message::Text(json_data.into())).await;
                     break;
@@ -112,130 +109,130 @@ pub async fn bridge(socket: WebSocket, pty: SharedTerminalSession) {
         }
     });
 
-     // WS → PTY: receive messages from WebSocket and send to PTY
-     // Race against the reader task exiting
-     let mut reader_task_finished = false;
-     loop {
-         tokio::select! {
-             // PTY reader task exited (PTY is dead)
-             _ = &mut reader_task => {
-                 reader_task_finished = true;
-                 debug!("PTY reader task exited, closing bridge");
-                 break;
-             }
-             // WebSocket message received
-             msg = ws_stream.next() => {
-                 match msg {
-                      Some(Ok(Message::Text(text))) => {
-                          // Handle text messages as JSON control messages
-                          debug!(byte_len = text.len(), "terminal ws received text message");
-                          let text_str = text.to_string();
-                          
-                          // FIX 3: Malformed JSON fallback - heuristic check
-                          if text_str.starts_with('{') {
-                              // Looks like JSON — parse strictly
-                              match serde_json::from_str::<TerminalWebSocketMessage>(&text_str) {
-                                  Ok(msg) => {
-                                      match msg.message_type {
-                                          TerminalMessageType::Input => {
-                                              // Send input data to PTY
-                                              if let Some(data) = msg.data {
-                                                  if let Err(e) = pty.send_input(data.as_bytes().to_vec()) {
-                                                      warn!(error = %e, "terminal failed to send input");
-                                                      break;
-                                                  }
-                                              }
+    // WS → PTY: receive messages from WebSocket and send to PTY
+    // Race against the reader task exiting
+    let mut reader_task_finished = false;
+    loop {
+        tokio::select! {
+            // PTY reader task exited (PTY is dead)
+            _ = &mut reader_task => {
+                reader_task_finished = true;
+                debug!("PTY reader task exited, closing bridge");
+                break;
+            }
+            // WebSocket message received
+            msg = ws_stream.next() => {
+                match msg {
+                     Some(Ok(Message::Text(text))) => {
+                         // Handle text messages as JSON control messages
+                         debug!(byte_len = text.len(), "terminal ws received text message");
+                         let text_str = text.to_string();
+
+                         // FIX 3: Malformed JSON fallback - heuristic check
+                         if text_str.starts_with('{') {
+                             // Looks like JSON — parse strictly
+                             match serde_json::from_str::<TerminalWebSocketMessage>(&text_str) {
+                                 Ok(msg) => {
+                                     match msg.message_type {
+                                         TerminalMessageType::Input => {
+                                             // Send input data to PTY
+                                             if let Some(data) = msg.data {
+                                                 if let Err(e) = pty.send_input(data.as_bytes().to_vec()) {
+                                                     warn!(error = %e, "terminal failed to send input");
+                                                     break;
+                                                 }
+                                             }
+                                         }
+                                         TerminalMessageType::Resize => {
+                                             // Parse cols and rows from data field (format: "cols,rows")
+                                             if let Some(data) = msg.data {
+                                                 let parts: Vec<&str> = data.split(',').collect();
+                                                 if parts.len() == 2 {
+                                                     if let (Ok(cols), Ok(rows)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>()) {
+                                                         if let Err(e) = pty.resize(cols, rows) {
+                                                             warn!(error = %e, "terminal failed to resize");
+                                                             break;
+                                                         }
+                                                     } else {
+                                                         warn!("Invalid resize data format");
+                                                     }
+                                                 } else {
+                                                     warn!("Invalid resize data format");
+                                                 }
+                                             }
+                                         }
+                                          TerminalMessageType::Ping => {
+                                              // Send pong response as JSON
+                                              debug!("terminal ws received ping");
+                                              let pong_msg = TerminalOutputMessage {
+                                                  message_type: TerminalOutputType::Pong,
+                                                  data: None,
+                                              };
+                                              let json_data = serde_json::to_string(&pong_msg).unwrap_or_else(|_| {
+                                                  String::new()
+                                              });
+                                              let mut sink = ws_sink.lock().await;
+                                              let _ = sink.send(Message::Text(json_data.into())).await;
                                           }
-                                          TerminalMessageType::Resize => {
-                                              // Parse cols and rows from data field (format: "cols,rows")
-                                              if let Some(data) = msg.data {
-                                                  let parts: Vec<&str> = data.split(',').collect();
-                                                  if parts.len() == 2 {
-                                                      if let (Ok(cols), Ok(rows)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>()) {
-                                                          if let Err(e) = pty.resize(cols, rows) {
-                                                              warn!(error = %e, "terminal failed to resize");
-                                                              break;
-                                                          }
-                                                      } else {
-                                                          warn!("Invalid resize data format");
-                                                      }
-                                                  } else {
-                                                      warn!("Invalid resize data format");
-                                                  }
-                                              }
-                                          }
-                                           TerminalMessageType::Ping => {
-                                               // Send pong response as JSON
-                                               debug!("terminal ws received ping");
-                                               let pong_msg = TerminalOutputMessage {
-                                                   message_type: TerminalOutputType::Pong,
-                                                   data: None,
-                                               };
-                                               let json_data = serde_json::to_string(&pong_msg).unwrap_or_else(|_| {
-                                                   String::new()
-                                               });
-                                               let mut sink = ws_sink.lock().await;
-                                               let _ = sink.send(Message::Text(json_data.into())).await;
-                                           }
-                                      }
-                                  }
-                                  Err(e) => {
-                                      // Looks like JSON but failed to parse — send error, do NOT write to PTY
-                                      warn!(error = %e, "malformed JSON message from client");
-                                      let err_msg = TerminalOutputMessage {
-                                          message_type: TerminalOutputType::Error,
-                                          data: Some(format!("invalid message: {}", e)),
-                                      };
-                                      let json_data = serde_json::to_string(&err_msg).unwrap_or_else(|_| {
-                                          String::new()
-                                      });
-                                      let mut sink = ws_sink.lock().await;
-                                      let _ = sink.send(Message::Text(json_data.into())).await;
-                                  }
-                              }
-                          } else {
-                              // Not JSON — raw terminal input (backward compat)
-                              debug!(byte_len = text_str.len(), "treating as raw input");
-                              if let Err(e) = pty.send_input(text_str.as_bytes().to_vec()) {
-                                  warn!(error = %e, "terminal failed to send input");
-                                  break;
-                              }
-                          }
-                     }
-                      Some(Ok(Message::Binary(data))) => {
-                          // Handle binary messages (raw terminal input) for backward compatibility
-                          debug!(byte_len = data.len(), "terminal ws received binary message");
-                          if let Err(e) = pty.send_input(data.to_vec()) {
-                             warn!(error = %e, "terminal failed to send binary input");
-                             break;
+                                     }
+                                 }
+                                 Err(e) => {
+                                     // Looks like JSON but failed to parse — send error, do NOT write to PTY
+                                     warn!(error = %e, "malformed JSON message from client");
+                                     let err_msg = TerminalOutputMessage {
+                                         message_type: TerminalOutputType::Error,
+                                         data: Some(format!("invalid message: {}", e)),
+                                     };
+                                     let json_data = serde_json::to_string(&err_msg).unwrap_or_else(|_| {
+                                         String::new()
+                                     });
+                                     let mut sink = ws_sink.lock().await;
+                                     let _ = sink.send(Message::Text(json_data.into())).await;
+                                 }
+                             }
+                         } else {
+                             // Not JSON — raw terminal input (backward compat)
+                             debug!(byte_len = text_str.len(), "treating as raw input");
+                             if let Err(e) = pty.send_input(text_str.as_bytes().to_vec()) {
+                                 warn!(error = %e, "terminal failed to send input");
+                                 break;
+                             }
                          }
-                     }
-                     Some(Ok(Message::Close(_))) => {
-                         debug!("terminal ws received close");
-                         break;
-                     }
-                       Some(Ok(Message::Ping(payload))) => {
-                           // FIX 4: WebSocket protocol-level Ping — respond with Pong control frame
-                           debug!("terminal ws received protocol-level ping");
-                           let mut sink = ws_sink.lock().await;
-                           let _ = sink.send(Message::Pong(payload)).await;
-                       }
-                     Some(Ok(Message::Pong(_))) => {
-                         debug!("terminal ws received pong");
-                     }
-                     Some(Err(e)) => {
-                         debug!(error = %e, "terminal ws recv error");
-                         break;
-                     }
-                     None => {
-                         // WebSocket stream ended
-                         debug!("terminal ws stream ended");
-                         break;
-                     }
-                 }
-             }
-         }
-     }
+                    }
+                     Some(Ok(Message::Binary(data))) => {
+                         // Handle binary messages (raw terminal input) for backward compatibility
+                         debug!(byte_len = data.len(), "terminal ws received binary message");
+                         if let Err(e) = pty.send_input(data.to_vec()) {
+                            warn!(error = %e, "terminal failed to send binary input");
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) => {
+                        debug!("terminal ws received close");
+                        break;
+                    }
+                      Some(Ok(Message::Ping(payload))) => {
+                          // FIX 4: WebSocket protocol-level Ping — respond with Pong control frame
+                          debug!("terminal ws received protocol-level ping");
+                          let mut sink = ws_sink.lock().await;
+                          let _ = sink.send(Message::Pong(payload)).await;
+                      }
+                    Some(Ok(Message::Pong(_))) => {
+                        debug!("terminal ws received pong");
+                    }
+                    Some(Err(e)) => {
+                        debug!(error = %e, "terminal ws recv error");
+                        break;
+                    }
+                    None => {
+                        // WebSocket stream ended
+                        debug!("terminal ws stream ended");
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     // Clean up: abort reader task if it's still running
     if !reader_task_finished {
@@ -256,14 +253,9 @@ pub async fn bridge(socket: WebSocket, pty: SharedTerminalSession) {
 ///
 /// This function is called when a WebSocket upgrade request is received.
 /// Authentication is already validated in routes.rs before upgrade.
-pub async fn ws_upgrade_handler(
-    socket: WebSocket,
-    pty: SharedTerminalSession,
-) -> Result<(), String> {
+pub async fn ws_upgrade_handler(socket: WebSocket, pty: SharedTerminalSession) -> Result<(), String> {
     // Start the bridge
     bridge(socket, pty).await;
-    
+
     Ok(())
 }
-
-

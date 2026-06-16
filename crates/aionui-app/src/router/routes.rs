@@ -170,8 +170,8 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
     // Terminal control-plane routes protected by auth middleware. The transport
     // WebSocket (states.terminal passed into terminal_ws_routes) is mounted
     // alongside /ws below — exempt from CSRF, same as other WS routes.
-    let terminal_authenticated =
-        terminal_routes(states.terminal.clone()).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+    let terminal_authenticated = terminal_routes(states.terminal.clone())
+        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
     // MCP routes protected by auth middleware
     let mcp_authenticated =
@@ -292,10 +292,10 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
             csrf_middleware,
         ))
     }
-        .merge(ws_routes)
-        .merge(lsp_ws)
-        .merge(terminal_ws)
-        .merge(office_proxy)
+    .merge(ws_routes)
+    .merge(lsp_ws)
+    .merge(terminal_ws)
+    .merge(office_proxy)
     .merge(sidecar_proxy)
     .merge(public_assets)
     .layer(middleware::from_fn(security_headers_middleware));

@@ -541,9 +541,9 @@ impl AgentInstance {
     }
 
     /// M22: compact the remote OpenCode session using V2 (with V1 fallback).
-    pub async fn compact_remote_session(&self, instructions: Option<&str>) -> Result<(), AppError> {
+    pub async fn compact_remote_session(&self) -> Result<(), AppError> {
         match self {
-            Self::Remote(m) => m.opencode_compact(instructions).await,
+            Self::Remote(m) => m.opencode_compact().await,
             _ => Err(AppError::BadRequest(
                 "Compact is only supported for OpenCode remote conversations".into(),
             )),

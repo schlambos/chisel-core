@@ -1424,10 +1424,7 @@ mod tests {
         )
         .await;
         assert!(err, "delete_file without approver must error");
-        assert!(
-            out.contains("no approval channel"),
-            "unexpected message: {out}"
-        );
+        assert!(out.contains("no approval channel"), "unexpected message: {out}");
     }
 
     #[tokio::test]
@@ -1447,10 +1444,7 @@ mod tests {
         )
         .await;
         assert!(err, "rename without approver must error");
-        assert!(
-            out.contains("no approval channel"),
-            "unexpected message: {out}"
-        );
+        assert!(out.contains("no approval channel"), "unexpected message: {out}");
     }
 
     #[tokio::test]
@@ -1488,10 +1482,7 @@ mod tests {
         // read/write tools — the three approval-gated tools must be
         // omitted from the list so a model with no approval channel can
         // never even see them.
-        let names: Vec<&str> = tool_descriptors_for_state(false)
-            .iter()
-            .map(|d| d.name)
-            .collect();
+        let names: Vec<&str> = tool_descriptors_for_state(false).iter().map(|d| d.name).collect();
         assert!(
             !names.contains(&"run_shell"),
             "run_shell must be hidden when no approver is wired: {names:?}"
@@ -1513,10 +1504,7 @@ mod tests {
         }
 
         // With an approver, all seven tools are advertised.
-        let names_full: Vec<&str> = tool_descriptors_for_state(true)
-            .iter()
-            .map(|d| d.name)
-            .collect();
+        let names_full: Vec<&str> = tool_descriptors_for_state(true).iter().map(|d| d.name).collect();
         for required in [
             "read_file",
             "write_file",

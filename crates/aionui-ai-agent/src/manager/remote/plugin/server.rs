@@ -324,9 +324,7 @@ pub fn plugin_listen_addr(plan: &crate::manager::remote::reachability::Plan) -> 
     let port = super::port::resolve_plugin_port();
 
     match plan {
-        crate::manager::remote::reachability::Plan::Override { .. } => {
-            SocketAddr::from(([127, 0, 0, 1], port))
-        }
+        crate::manager::remote::reachability::Plan::Override { .. } => SocketAddr::from(([127, 0, 0, 1], port)),
         crate::manager::remote::reachability::Plan::Auto { .. } => SocketAddr::from(([0, 0, 0, 0], port)),
     }
 }

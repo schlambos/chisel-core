@@ -109,9 +109,7 @@ mod tests {
     static PLUGIN_PORT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock_plugin_port_env() -> MutexGuard<'static, ()> {
-        PLUGIN_PORT_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        PLUGIN_PORT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Pick a random free TCP port. We bind to `127.0.0.1:0`, let the
@@ -129,8 +127,7 @@ mod tests {
     #[tokio::test]
     async fn register_and_resolve_plugin_token() {
         let db = init_database_memory().await.unwrap();
-        let repo: Arc<dyn IRemoteAgentRepository> =
-            Arc::new(SqliteRemoteAgentRepository::new(db.pool().clone()));
+        let repo: Arc<dyn IRemoteAgentRepository> = Arc::new(SqliteRemoteAgentRepository::new(db.pool().clone()));
 
         let token = "local-test-token-abc";
         let agent_id = register_local_agent(&repo, "Test Local", token).await.unwrap();
@@ -156,15 +153,11 @@ mod tests {
         // SAFETY: test-only env mutation; serialised by
         // `PLUGIN_PORT_ENV_LOCK`. Restored before return.
         unsafe {
-            std::env::set_var(
-                crate::manager::remote::plugin::PLUGIN_PORT_ENV,
-                test_port.to_string(),
-            );
+            std::env::set_var(crate::manager::remote::plugin::PLUGIN_PORT_ENV, test_port.to_string());
         }
 
         let db = init_database_memory().await.unwrap();
-        let repo: Arc<dyn IRemoteAgentRepository> =
-            Arc::new(SqliteRemoteAgentRepository::new(db.pool().clone()));
+        let repo: Arc<dyn IRemoteAgentRepository> = Arc::new(SqliteRemoteAgentRepository::new(db.pool().clone()));
 
         let url = ensure_loopback_plugin_endpoint(repo).await.unwrap();
         assert!(url.starts_with("http://127.0.0.1:"));

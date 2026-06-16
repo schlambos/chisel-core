@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use aionui_auth::JwtService;
 use crate::service::TerminalService;
+use aionui_auth::JwtService;
 
 #[derive(Clone)]
 pub struct TerminalRouterState {

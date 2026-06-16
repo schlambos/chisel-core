@@ -95,6 +95,16 @@ The agent **must stop and ask** the user when:
 - If the agent made a judgment call the user didn't ask for, flag it.
 - End-of-task summary must answer: **what changed, what was verified, what wasn't, and what the operator should test.**
 
+## No i18n / Localization Work
+
+Do not spend time on i18n, localization, translation dictionaries, locale routing, language switchers, or abstraction layers for display strings unless I explicitly request it.
+
+For now, the app is English-only. Use plain English UI copy directly where appropriate. Do not create locale files, i18n providers, translation hooks, or string-key systems.
+
+The only acceptable consideration is avoiding obviously hostile future design choices, such as deeply coupling business logic to user-facing prose. But do not proactively implement i18n infrastructure.
+
+Prioritize functional correctness, UX behavior, state management, architecture, bug fixing, and code maintainability over theoretical future localization.
+
 ## High-Priority Rules
 
 ### Do NOT add fields to `AcpAgentManager` unless every alternative is exhausted

@@ -27,7 +27,6 @@ use aionui_extension::{
 };
 use aionui_file::{FileRouterState, FileService, FileWatchService, SnapshotService};
 use aionui_lsp::{LspRouterState, LspService};
-use aionui_terminal::{TerminalRouterState, TerminalService};
 use aionui_mcp::{
     AionrsAdapter, AionuiAdapter, ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, GeminiAdapter, McpAgentAdapter,
     McpConfigService, McpConnectionTestService, McpRouterState, McpSyncService, OpencodeAdapter, QwenAdapter,
@@ -43,6 +42,7 @@ use aionui_system::{
     ProviderService, SettingsService, SystemRouterState, VersionCheckService,
 };
 use aionui_team::{TeamRouterState, TeamSessionService};
+use aionui_terminal::{TerminalRouterState, TerminalService};
 
 use crate::config::derive_encryption_key;
 use crate::services::AppServices;

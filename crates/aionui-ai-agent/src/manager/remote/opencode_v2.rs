@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use super::agent::RemoteAgentConfig;
 use super::opencode_context::append_v2_location;
-use super::opencode_payloads::{OpencodeV2CompactRequest, OpencodeV2PromptRequest, OpencodeV2PromptText};
+use super::opencode_payloads::{OpencodeV2PromptRequest, OpencodeV2PromptText};
 
 /// Optional server-tools location scoping for V2 routes.
 pub type V2Location<'a> = Option<(&'a RemoteAgentConfig, &'a str)>;
@@ -76,30 +76,18 @@ fn v2_session_url(base_url: &str, session_id: &str, subpath: &str, location: V2L
 
 /// V2 compact the session (`POST /api/session/{sessionID}/compact`).
 /// Replaces V1 `POST /session/{id}/summarize`. The V2 endpoint does not
-/// require `providerID`/`modelID` in the body — the server uses the
-/// session's current model.
+/// require a body — the server uses the session's current model.
 pub async fn v2_compact(
     http_client: &reqwest::Client,
     base_url: &str,
     auth_header: Option<&str>,
     session_id: &str,
-    instructions: Option<&str>,
     location: V2Location<'_>,
 ) -> Result<(), AppError> {
-    let body = OpencodeV2CompactRequest {
-        instructions: instructions.map(String::from),
-    };
     let url = v2_session_url(base_url, session_id, "/compact", location);
-    v2_session_request(
-        http_client,
-        &url,
-        auth_header,
-        reqwest::Method::POST,
-        Some(serde_json::to_value(&body).unwrap()),
-        120,
-    )
-    .await
-    .map(|_| ())
+    v2_session_request(http_client, &url, auth_header, reqwest::Method::POST, None, 120)
+        .await
+        .map(|_| ())
 }
 
 /// V2 get session context (`GET /api/session/{sessionID}/context`).

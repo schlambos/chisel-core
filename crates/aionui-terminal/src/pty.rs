@@ -4,7 +4,7 @@
 //! and managing pseudo-terminal sessions.
 
 use std::io::{Read, Write};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -79,13 +79,13 @@ impl TerminalSession {
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "sh".into())
             });
-        
+
         // Build the command with aionui_runtime's env sanitization
         let mut cmd_builder = CommandBuilder::new(&shell_path);
-        
+
         // Apply same env sanitization as aionui_runtime::Builder
         strip_pollution(&mut cmd_builder);
-        
+
         // Set the shell command if provided
         if let Some(cmd) = command {
             cmd_builder.arg("-c");
@@ -97,17 +97,17 @@ impl TerminalSession {
             cmd_builder.cwd(dir);
         }
 
-         // Spawn the command in the slave PTY
-         let mut child = slave
-             .spawn_command(cmd_builder)
-             .map_err(|e| format!("failed to spawn shell: {}", e))?;
+        // Spawn the command in the slave PTY
+        let mut child = slave
+            .spawn_command(cmd_builder)
+            .map_err(|e| format!("failed to spawn shell: {}", e))?;
 
-         // Create channels for bidirectional communication
-         let (output_tx, output_rx) = channel();
-         let (input_tx, input_rx) = channel();
+        // Create channels for bidirectional communication
+        let (output_tx, output_rx) = channel();
+        let (input_tx, input_rx) = channel();
 
-         // Clone the master for the reader thread
-         let master_reader = match master.try_clone_reader() {
+        // Clone the master for the reader thread
+        let master_reader = match master.try_clone_reader() {
             Ok(r) => r,
             Err(e) => {
                 let _ = child.kill();
@@ -116,8 +116,8 @@ impl TerminalSession {
             }
         };
 
-         // Clone the master for the writer thread
-         let master_writer = match master.try_clone_writer() {
+        // Clone the master for the writer thread
+        let master_writer = match master.try_clone_writer() {
             Ok(w) => w,
             Err(e) => {
                 let _ = child.kill();
@@ -126,25 +126,25 @@ impl TerminalSession {
             }
         };
 
-         // Wrap child in Arc for sharing with reader thread
-         let child_arc = Arc::new(Mutex::new(Some(child)));
-         let child_for_reader = child_arc.clone();
+        // Wrap child in Arc for sharing with reader thread
+        let child_arc = Arc::new(Mutex::new(Some(child)));
+        let child_for_reader = child_arc.clone();
 
-         // Spawn reader thread with ring buffer and coalescing
-          let reader_handle = Self::spawn_reader_thread(master_reader, output_tx, child_for_reader);
+        // Spawn reader thread with ring buffer and coalescing
+        let reader_handle = Self::spawn_reader_thread(master_reader, output_tx, child_for_reader);
 
-          // Spawn writer thread
-          let writer_handle = Self::spawn_writer_thread(master_writer, input_rx);
+        // Spawn writer thread
+        let writer_handle = Self::spawn_writer_thread(master_writer, input_rx);
 
-           Ok(Self {
-               master: Mutex::new(Some(master)),
-               child: child_arc,
-               output_rx,
-               input_tx: Mutex::new(Some(input_tx)),
-               reader_handle,
-               writer_handle,
-               size,
-           })
+        Ok(Self {
+            master: Mutex::new(Some(master)),
+            child: child_arc,
+            output_rx,
+            input_tx: Mutex::new(Some(input_tx)),
+            reader_handle,
+            writer_handle,
+            size,
+        })
     }
 
     /// Spawn the PTY reader thread with ring buffer and output coalescing.
@@ -205,7 +205,10 @@ impl TerminalSession {
     }
 
     /// Spawn the PTY writer thread.
-    fn spawn_writer_thread(mut master: Box<dyn std::io::Write + Send>, input_rx: Receiver<Vec<u8>>) -> thread::JoinHandle<()> {
+    fn spawn_writer_thread(
+        mut master: Box<dyn std::io::Write + Send>,
+        input_rx: Receiver<Vec<u8>>,
+    ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             loop {
                 match input_rx.recv() {
@@ -239,8 +242,7 @@ impl TerminalSession {
     pub fn send_input(&self, data: Vec<u8>) -> Result<(), String> {
         let guard = self.input_tx.lock().map_err(|_| "input_tx lock poisoned".to_string())?;
         if let Some(tx) = guard.as_ref() {
-            tx.send(data)
-                .map_err(|e| format!("failed to send input: {}", e))?;
+            tx.send(data).map_err(|e| format!("failed to send input: {}", e))?;
         }
         Ok(())
     }
@@ -250,19 +252,20 @@ impl TerminalSession {
         self.output_rx.try_recv()
     }
 
-     /// Resize the terminal.
+    /// Resize the terminal.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), String> {
         self.size.cols = cols;
         self.size.rows = rows;
         let guard = self.master.lock().map_err(|_| "master lock poisoned".to_string())?;
-        guard.as_ref()
+        guard
+            .as_ref()
             .ok_or_else(|| "master PTY already closed".to_string())?
             .resize(self.size)
             .map_err(|e| format!("failed to resize PTY: {}", e))?;
         Ok(())
     }
 
-     /// Kill the terminal session.
+    /// Kill the terminal session.
     pub fn kill(&self) {
         // 1. Close the master PTY first — this unblocks the reader thread
         //    (master.read() will return an error)
@@ -289,7 +292,7 @@ impl TerminalSession {
         // Drop the sender to allow the reader thread to exit
         // We can't drop self.output_tx and self.input_tx directly as they're not Copy
         // Instead, we'll just wait for the threads to finish
-        
+
         // For now, we'll just let the Drop implementation handle cleanup
         // The threads will exit when the channels are closed
     }
@@ -377,7 +380,10 @@ impl SharedTerminalSession {
     }
 
     pub fn try_recv_output(&self) -> Result<Vec<u8>, std::sync::mpsc::TryRecvError> {
-        let guard = self.inner.lock().map_err(|_| std::sync::mpsc::TryRecvError::Disconnected)?;
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| std::sync::mpsc::TryRecvError::Disconnected)?;
         guard.try_recv_output()
     }
 
@@ -426,7 +432,7 @@ mod tests {
     fn test_ring_buffer_overflow() {
         let mut rb = RingBuffer::new(5);
         rb.write(&[1, 2, 3, 4, 5, 6, 7]);
-        
+
         // Buffer should contain [3, 4, 5, 6, 7] (oldest 2 bytes overwritten)
         assert_eq!(rb.len(), 5);
 
@@ -441,7 +447,7 @@ mod tests {
         rb.write(&[1, 2, 3]);
         rb.write(&[4, 5, 6]);
         rb.write(&[7, 8]);
-        
+
         // Should contain [5, 6, 7, 8, 3] or similar depending on implementation
         // The key is we can read back what we wrote (within capacity)
         let mut output = vec![0u8; 5];
