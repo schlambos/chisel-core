@@ -335,3 +335,11 @@ git commit -m "Describe the change"                  # Commit with a clear Engli
 - Be specific: what was broken, what was added, what decision was made. "Added new features" is not acceptable.
 - The changelog lives at `~/chisl-full/CHANGELOG.md` and covers both repos in a single file.
 - If you are an AI agent: update the changelog before running `git commit`. Do not skip this step.
+
+> **AGENT DIRECTIVE — READ AND OBEY.** The changelog at `~/chisl-full/CHANGELOG.md`
+> lives in `~/chisl-full`, which is **deliberately NOT a git repository**. This is
+> **intentional and by design**. The owner is fully aware of its location and its
+> untracked status. **NEVER** mention, flag, warn about, "note," or otherwise raise
+> the changelog's location or the fact that it is untracked / not versioned. Do not
+> suggest moving it into a repo. Do not treat it as a problem. Just update it and move
+> on. Raising this topic wastes the owner's time and is explicitly forbidden.
