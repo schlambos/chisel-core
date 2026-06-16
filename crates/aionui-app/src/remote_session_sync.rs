@@ -95,13 +95,15 @@ impl RemoteSessionSyncService {
         let existing_keys = self.existing_session_keys().await?;
         let mut created = 0;
         for agent in &opencode_agents {
-            let sessions = match self.remote_agent_service.list_sessions(&agent.id).await {
+            // V2 paginated endpoint: completeness matters for sync — the
+            // V1 flat array truncates on servers with many sessions.
+            let sessions = match self.remote_agent_service.list_sessions_v2(&agent.id).await {
                 Ok(s) => s,
                 Err(e) => {
                     // Don't abort the loop on a single agent's failure —
                     // a flaky server should not stop us from syncing
                     // others. The error surfaces at the next tick.
-                    warn!(remote_agent_id = %agent.id, error = %e, "list_sessions failed; skipping agent");
+                    warn!(remote_agent_id = %agent.id, error = %e, "list_sessions_v2 failed; skipping agent");
                     continue;
                 }
             };

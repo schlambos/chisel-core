@@ -341,6 +341,31 @@ impl RemoteAgentService {
         fetch_opencode_sessions(&row.url, auth_type, auth_token.as_deref(), row.allow_insecure).await
     }
 
+    /// List active sessions on a remote OpenCode agent using the V2
+    /// paginated endpoint. Mirrors [`list_sessions`] but hits
+    /// `GET /api/session?limit=N&cursor=C` so large session sets are not
+    /// truncated. Used by the background sync loop where completeness
+    /// matters more than the Attach picker's latency.
+    pub async fn list_sessions_v2(&self, id: &str) -> Result<Vec<RemoteSessionInfo>, AppError> {
+        let row = self
+            .repo
+            .find_by_id(id)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::NotFound(format!("Remote agent '{id}' not found")))?;
+
+        let protocol = parse_protocol(&row.protocol);
+        if protocol != RemoteAgentProtocol::OpenCode {
+            return Err(AppError::BadRequest(
+                "Session list is only supported for OpenCode remote agents".into(),
+            ));
+        }
+
+        let auth_type = parse_auth_type(&row.auth_type);
+        let auth_token = decrypt_optional_token(row.auth_token.as_deref(), &self.encryption_key)?;
+        fetch_opencode_sessions_v2(&row.url, auth_type, auth_token.as_deref(), row.allow_insecure).await
+    }
+
     /// Fetch the historical message transcript of a remote OpenCode
     /// session and convert it into Chisl `MessageRow` entries ready to
     /// insert under `conversation_id`. Phase 4b backfill: the first
@@ -1235,6 +1260,74 @@ async fn fetch_opencode_model_info(
         current_model_label,
         available_models,
     })
+}
+
+/// Fetch the OpenCode `/api/session` listing with V2 cursor-based
+/// pagination and normalise it into `RemoteSessionInfo` rows. Mirrors
+/// [`fetch_opencode_sessions`] but hits the paginated V2 endpoint so
+/// servers with many sessions don't truncate the response.
+///
+/// Uses `V2Location::None` — workspace scoping is a per-conversation
+/// concern, not a sync-time one.
+async fn fetch_opencode_sessions_v2(
+    url: &str,
+    auth_type: RemoteAgentAuthType,
+    auth_token: Option<&str>,
+    allow_insecure: bool,
+) -> Result<Vec<RemoteSessionInfo>, AppError> {
+    use crate::manager::remote::opencode_v2::{v2_list_sessions, V2Location};
+
+    const PAGE_LIMIT: u32 = 200;
+    const MAX_PAGES: usize = 50; // safety net against runaway pagination
+
+    let base_url = normalize_opencode_base_url(url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .danger_accept_invalid_certs(allow_insecure)
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))?;
+    let mut all_sessions: Vec<RemoteSessionInfo> = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    for page in 0..MAX_PAGES {
+        // Build the auth header once — `v2_list_sessions` accepts Option<&str>.
+    let auth_header = auth_token.filter(|t| !t.is_empty()).map(|t| match auth_type {
+        RemoteAgentAuthType::Bearer => format!("Bearer {t}"),
+        RemoteAgentAuthType::Basic => format!("Basic {}", BASE64.encode(t)),
+        RemoteAgentAuthType::Password => format!("Basic {}", BASE64.encode(format!("opencode:{t}"))),
+        RemoteAgentAuthType::None => String::new(),
+    });
+    let auth_header_ref = auth_header.as_deref();
+
+    let raw = v2_list_sessions(&client, &base_url, auth_header_ref, Some(PAGE_LIMIT), cursor.as_deref(), V2Location::None)
+            .await?;
+
+        let items = raw
+            .get("items")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| AppError::BadGateway("OpenCode V2 session list missing `items` array".into()))?;
+
+        all_sessions.extend(items.iter().filter_map(parse_opencode_session));
+
+        let next_cursor = raw
+            .get("cursor")
+            .and_then(|c| c.get("next"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let Some(next) = next_cursor.filter(|s| !s.is_empty()) else {
+            break; // pagination exhausted
+        };
+        cursor = Some(next);
+
+        if page == MAX_PAGES - 1 {
+            warn!("fetch_opencode_sessions_v2 hit MAX_PAGES ({MAX_PAGES}) — pagination truncated");
+        }
+    }
+
+    // Most recent first — same ordering V1 uses.
+    all_sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at.unwrap_or(0)));
+    Ok(all_sessions)
 }
 
 /// Fetch the OpenCode `/session` listing and normalise it into
