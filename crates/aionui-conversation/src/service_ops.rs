@@ -132,16 +132,39 @@ impl ConversationService {
     }
 
     /// M02: revert the remote session to a local message row id.
+    ///
+    /// Persists `extra.is_reverted` / `extra.revert_message_id` (local row id,
+    /// same key the renderer uses in `computeRevertedRegion`) and broadcasts
+    /// `conversation.listChanged(updated)` so the open chat refetches `extra`
+    /// without a separate renderer PATCH.
     pub async fn revert_remote_session(&self, conversation_id: &str, row_id: &str) -> Result<(), AppError> {
         let message_id = self.resolve_opencode_message_id(conversation_id, row_id).await?;
         self.task(conversation_id)?
             .revert_remote_session(&message_id, None)
-            .await
+            .await?;
+        self.update_extra(
+            conversation_id,
+            serde_json::json!({
+                "is_reverted": true,
+                "revert_message_id": row_id,
+            }),
+        )
+        .await?;
+        self.broadcast_conversation_updated(conversation_id).await
     }
 
     /// M02: restore all reverted messages on the remote session.
     pub async fn unrevert_remote_session(&self, conversation_id: &str) -> Result<(), AppError> {
-        self.task(conversation_id)?.unrevert_remote_session().await
+        self.task(conversation_id)?.unrevert_remote_session().await?;
+        self.update_extra(
+            conversation_id,
+            serde_json::json!({
+                "is_reverted": false,
+                "revert_message_id": serde_json::Value::Null,
+            }),
+        )
+        .await?;
+        self.broadcast_conversation_updated(conversation_id).await
     }
 
     /// M04: summarize/compact the remote session.

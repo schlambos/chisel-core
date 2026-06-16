@@ -694,6 +694,22 @@ impl ConversationService {
         Ok(())
     }
 
+    /// Re-fetch the conversation row and emit `conversation.listChanged(updated)`.
+    /// Used after internal `extra` patches (e.g. M02 revert) so open clients
+    /// refetch `GET /api/conversations/:id` without a renderer-side PATCH.
+    pub(crate) async fn broadcast_conversation_updated(&self, conversation_id: &str) -> Result<(), AppError> {
+        let row = self
+            .conversation_repo
+            .get(conversation_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+        let extra: serde_json::Value =
+            serde_json::from_str(&row.extra).unwrap_or_else(|_| serde_json::json!({}));
+        let response = row_to_response_with_extra(row, extra, &self.workspace_root)?;
+        self.broadcast_list_changed(conversation_id, "updated", response.source.as_ref());
+        Ok(())
+    }
+
     pub async fn save_acp_runtime_mode(&self, conversation_id: &str, mode: &str) -> Result<(), AppError> {
         let params = SaveRuntimeStateParams {
             current_mode_id: Some(Some(mode)),
