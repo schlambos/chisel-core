@@ -26,7 +26,7 @@ use aionui_extension::{
     resolve_scan_paths_for_data_dir, resolve_state_file_path,
 };
 use aionui_file::{FileRouterState, FileService, FileWatchService, SnapshotService};
-use aionui_lsp::{LspRouterState, LspService};
+use aionui_lsp::LspRouterState;
 use aionui_mcp::{
     AionrsAdapter, AionuiAdapter, ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, GeminiAdapter, McpAgentAdapter,
     McpConfigService, McpConnectionTestService, McpRouterState, McpSyncService, OpencodeAdapter, QwenAdapter,
@@ -339,12 +339,12 @@ pub fn build_file_state(services: &AppServices) -> FileRouterState {
     }
 }
 
-/// Build the default `LspRouterState`. The LSP service is stateful (session
-/// map) but holds no dependency on `AppServices`; we still take `_services`
-/// to keep the builder signature uniform with the rest of the module.
-pub fn build_lsp_state(_services: &AppServices) -> LspRouterState {
+/// Build the default `LspRouterState`. Reuses the `Arc<LspService>` from
+/// `AppServices` so the server shutdown path can call `shutdown_all()` on
+/// the same instance the router handlers use.
+pub fn build_lsp_state(services: &AppServices) -> LspRouterState {
     LspRouterState {
-        service: Arc::new(LspService::new()),
+        service: services.lsp_service.clone(),
     }
 }
 

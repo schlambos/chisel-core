@@ -1,6 +1,6 @@
 //! Per-language server configuration. The "vertical slice" implementation
 //! covers TypeScript end-to-end via `typescript-language-server`; the other
-//! five entries are wired into the table so `/api/lsp/sessions` returns a
+//! four entries are wired into the table so `/api/lsp/sessions` returns a
 //! consistent answer regardless of whether the binary is actually installed.
 
 use std::path::PathBuf;
@@ -52,12 +52,9 @@ pub const LANGUAGES: &[LanguageConfig] = &[
         args: &[],
         install_hint: "Install via `go install golang.org/x/tools/gopls@latest`",
     },
-    LanguageConfig {
-        language: "powershell",
-        command: "pwsh",
-        args: &[],
-        install_hint: "Install PowerShell + PowerShell Editor Services",
-    },
+    // PowerShell omitted: PSES requires Start-EditorServices -Stdio with dynamic module
+    // discovery + session/log temp paths that static command/args cannot express.
+    // Advertising it would spawn an interactive pwsh that hangs the LSP bridge.
 ];
 
 pub fn find(language: &str) -> Option<&'static LanguageConfig> {

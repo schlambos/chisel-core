@@ -16,6 +16,7 @@ use aionui_db::{
     IUserRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteConversationRepository,
     SqliteMcpServerRepository, SqliteProviderRepository, SqliteRemoteAgentRepository, SqliteUserRepository,
 };
+use aionui_lsp::LspService;
 use aionui_realtime::{BroadcastEventBus, WebSocketManager};
 use aionui_team::GuideMcpServer;
 
@@ -62,6 +63,9 @@ pub struct AppServices {
     pub guide_mcp_config: Option<GuideMcpConfig>,
     /// Guide MCP server instance kept alive for the app lifetime.
     pub(crate) _guide_server: Option<GuideMcpServer>,
+    /// LSP session manager — constructed once here so the server shutdown
+    /// path can call `shutdown_all()` without reaching through the router.
+    pub lsp_service: Arc<LspService>,
 }
 
 impl AppServices {
@@ -224,6 +228,7 @@ impl AppServices {
             skill_paths,
             guide_mcp_config: guide_mcp_config.clone(),
             _guide_server: guide_server,
+            lsp_service: Arc::new(LspService::new()),
         })
     }
 }

@@ -42,6 +42,8 @@ pub async fn run_server(env: ServerEnvironment, services: AppServices) -> Result
     let idle_scanner_handle =
         aionui_ai_agent::start_idle_scanner(services.worker_task_manager.clone(), shutdown_rx, None, None);
 
+    let lsp_service = services.lsp_service.clone();
+
     let app = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -49,6 +51,12 @@ pub async fn run_server(env: ServerEnvironment, services: AppServices) -> Result
             let _ = shutdown_tx.send(true);
         })
         .await?;
+
+    // Gracefully tear down all LSP sessions (sends kill signals to running
+    // language-server children, clears the session map). Placed alongside
+    // the other child-reaping calls so LSP processes are torn down during
+    // graceful shutdown rather than left for `kill_on_drop` backstop.
+    lsp_service.shutdown_all().await;
 
     // Reap any background processes the OpenCode plugin may
     // have started. This is a backstop — the per-conversation
