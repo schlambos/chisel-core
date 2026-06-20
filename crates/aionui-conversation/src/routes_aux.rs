@@ -1,7 +1,8 @@
 use crate::state::ConversationRouterState;
 use aionui_api_types::{
-    AgentModeResponse, ApiResponse, GetModelInfoResponse, RemoteSkillInfo, SetModeRequest, SetModelRequest,
-    SideQuestionRequest, SideQuestionResponse, SlashCommandItem, WorkspaceBrowseQuery, WorkspaceEntry,
+    AgentModeResponse, ApiResponse, GetModelInfoResponse, RemoteSkillInfo, ResubmitShellRequest, ResubmitShellResponse,
+    SetModeRequest, SetModelRequest, SideQuestionRequest, SideQuestionResponse, SlashCommandItem,
+    SyncPermissionsRequest, SyncPermissionsResponse, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 use aionui_auth::CurrentUser;
 use aionui_common::AppError;
@@ -62,6 +63,11 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
         .route(
             "/api/conversations/{id}/opencode/find/symbols",
             get(find_remote_symbols),
+        )
+        .route("/api/conversations/{id}/resubmit-shell", post(resubmit_shell))
+        .route(
+            "/api/conversations/{conversation_id}/config/permissions/sync",
+            post(sync_permissions),
         )
         .with_state(state)
 }
@@ -511,4 +517,48 @@ async fn find_remote_symbols(
     Ok(Json(ApiResponse::ok(
         state.service.remote_find_symbols(&id, &query.query).await?,
     )))
+}
+
+async fn resubmit_shell(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<ResubmitShellRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<ResubmitShellResponse>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    if req.modified_command.trim().is_empty() {
+        return Err(AppError::BadRequest("modified_command must not be empty".into()));
+    }
+    state
+        .service
+        .resubmit_shell(
+            &user.id,
+            &id,
+            &req.original_call_id,
+            &req.modified_command,
+            &state.task_manager,
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(ResubmitShellResponse { success: true })))
+}
+
+/// Sync permission rules to the connected OpenCode server's global config.
+/// `conversation_id` identifies the conversation whose remote-agent session
+/// receives the updated permissions.
+async fn sync_permissions(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(conversation_id): Path<String>,
+    body: Result<Json<SyncPermissionsRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<SyncPermissionsResponse>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let synced_rules = state
+        .service
+        .sync_permissions_to_opencode(&user.id, &conversation_id, &req.permissions, &state.task_manager)
+        .await?;
+    Ok(Json(ApiResponse::ok(SyncPermissionsResponse {
+        success: true,
+        synced_rules,
+        error: None,
+    })))
 }

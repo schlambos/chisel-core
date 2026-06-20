@@ -61,6 +61,20 @@ pub struct SendMessageResponse {
     pub msg_id: String,
 }
 
+/// Body for `POST /api/conversations/:id/resubmit-shell`.
+#[derive(Debug, Deserialize)]
+pub struct ResubmitShellRequest {
+    pub session_id: String,
+    pub original_call_id: String,
+    pub modified_command: String,
+}
+
+/// Response for `POST /api/conversations/:id/resubmit-shell`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResubmitShellResponse {
+    pub success: bool,
+}
+
 // ── Query types ────────────────────────────────────────────────────
 
 /// Query parameters for `GET /api/conversations`.

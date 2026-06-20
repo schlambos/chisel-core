@@ -234,6 +234,21 @@ pub struct RemoteAgentPluginInfoResponse {
     pub status: RemoteAgentPluginStatus,
 }
 
+/// Body for `POST /api/remote-agents/{agent_id}/config/permissions/sync`.
+#[derive(Debug, Deserialize)]
+pub struct SyncPermissionsRequest {
+    pub permissions: serde_json::Value,
+}
+
+/// Response for `POST /api/remote-agents/{agent_id}/config/permissions/sync`.
+#[derive(Debug, Serialize)]
+pub struct SyncPermissionsResponse {
+    pub success: bool,
+    pub synced_rules: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Deserialize `Option<Option<T>>`:
 /// - JSON field absent → `None` (keep current value)
 /// - JSON `null` → `Some(None)` (clear the value)

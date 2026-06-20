@@ -64,8 +64,8 @@ pub use conversation::{
     ActiveCountResponse, CloneConversationRequest, ConversationArtifactKind, ConversationArtifactListResponse,
     ConversationArtifactResponse, ConversationArtifactStatus, ConversationListResponse, ConversationResponse,
     CreateConversationRequest, ListConversationsQuery, ListMessagesQuery, MessageListResponse, MessageResponse,
-    MessageSearchItem, MessageSearchResponse, SearchMessagesQuery, SendMessageRequest, SendMessageResponse,
-    UpdateConversationArtifactRequest, UpdateConversationRequest,
+    MessageSearchItem, MessageSearchResponse, ResubmitShellRequest, ResubmitShellResponse, SearchMessagesQuery,
+    SendMessageRequest, SendMessageResponse, UpdateConversationArtifactRequest, UpdateConversationRequest,
 };
 pub use cron::{
     CreateCronJobRequest, CronAgentConfigDto, CronJobExecutedEvent, CronJobMetadataDto, CronJobPayloadDto,
@@ -117,7 +117,7 @@ pub use provider::{
 pub use remote_agent::{
     CreateRemoteAgentRequest, HandshakeResponse, RemoteAgentHealthResponse, RemoteAgentListItem,
     RemoteAgentPluginInfoResponse, RemoteAgentPluginStatus, RemoteAgentResponse, RemoteSessionInfo,
-    TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
+    SyncPermissionsRequest, SyncPermissionsResponse, TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
 };
 pub use response::{ApiResponse, ErrorResponse};
 pub use shell::{

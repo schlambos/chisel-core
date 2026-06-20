@@ -1064,6 +1064,118 @@ impl ConversationService {
 
         Ok(ApprovalCheckResponse { approved })
     }
+
+    /// Reject the original shell approval and send the modified command as a
+    /// new user message. This powers the "Edit & Resend" UX on shell-command
+    /// approval cards.
+    ///
+    /// 1. Verifies the conversation exists and belongs to the user.
+    /// 2. Rejects the pending shell approval via `confirm` (unblocks the
+    ///    parked MCP tool call).
+    /// 3. Sends the modified command as a new user message via `send_message`.
+    #[tracing::instrument(skip_all, fields(user_id = %user_id, conversation_id = %conversation_id, original_call_id = %original_call_id))]
+    pub async fn resubmit_shell(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        original_call_id: &str,
+        modified_command: &str,
+        task_manager: &Arc<dyn IWorkerTaskManager>,
+    ) -> Result<(), AppError> {
+        self.conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|r| r.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+
+        let agent = task_manager
+            .get_task(conversation_id)
+            .ok_or_else(|| AppError::NotFound("No active agent for this conversation".into()))?;
+
+        // Reject the original shell approval — this wakes the parked oneshot
+        // with `ShellApproval::Reject` so the MCP tool call fails cleanly.
+        agent.confirm("", original_call_id, serde_json::json!("reject"), false)?;
+
+        // Broadcast removal of the confirmation card.
+        let conf_id = agent
+            .get_confirmations()
+            .iter()
+            .find(|c| c.call_id == original_call_id)
+            .map(|c| c.id.clone());
+        if let Some(conf_id) = conf_id {
+            let payload = serde_json::json!({
+                "conversation_id": conversation_id,
+                "id": conf_id,
+            });
+            self.broadcaster
+                .broadcast(WebSocketMessage::new("confirmation.remove", payload));
+        }
+
+        // Send the modified command as a new user message.
+        let send_req = SendMessageRequest {
+            content: modified_command.to_string(),
+            files: vec![],
+            inject_skills: vec![],
+            hidden: false,
+        };
+        self.send_message(user_id, conversation_id, send_req, task_manager)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Sync permission rules to the connected OpenCode server's global
+    /// config (`PATCH /global/config`). The path param is the conversation
+    /// id — `IWorkerTaskManager` keys tasks by conversation id, matching
+    /// the conversation-scoped route `/api/conversations/{conversation_id}/config/permissions/sync`.
+    ///
+    /// The OpenCode server shallow-merges the partial, so only the
+    /// `permission` block is sent.
+    #[tracing::instrument(skip_all, fields(user_id = %user_id, conversation_id = %conversation_id))]
+    pub async fn sync_permissions_to_opencode(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        permissions: &serde_json::Value,
+        task_manager: &Arc<dyn IWorkerTaskManager>,
+    ) -> Result<u32, AppError> {
+        self.conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|r| r.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+
+        if !permissions.is_object() {
+            warn!(
+                conversation_id = %conversation_id,
+                "sync_permissions received non-object permissions"
+            );
+            return Err(AppError::BadRequest("permissions must be a JSON object".into()));
+        }
+
+        let agent = task_manager
+            .get_task(conversation_id)
+            .ok_or_else(|| AppError::NotFound("No active agent for this conversation".into()))?;
+
+        let rule_count = permissions
+            .as_object()
+            .map(|obj| obj.values().map(|v| v.as_array().map_or(1, Vec::len)).sum::<usize>() as u32)
+            .unwrap_or(0);
+
+        info!(conversation_id = %conversation_id, rule_count, "Syncing permission rules to OpenCode");
+
+        let partial = serde_json::json!({ "permission": permissions });
+        if let Err(e) = agent.patch_global_config(partial).await {
+            error!(
+                conversation_id = %conversation_id,
+                error = %ErrorChain(&e),
+                "Failed to patch OpenCode global config with permissions"
+            );
+            return Err(e);
+        }
+
+        Ok(rule_count)
+    }
 }
 
 // ── Per-Tool-Call Snapshot Revert (Task 14.3) ──────────────────────
