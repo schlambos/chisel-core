@@ -20,8 +20,8 @@ use aionui_common::{
 use aionui_db::models::MessageRow;
 use aionui_db::{
     ConversationFilters, ConversationRowUpdate, CreateAcpSessionParams, IAcpSessionRepository,
-    IAgentMetadataRepository, IConversationRepository, IOpencodeToolSnapshotRepository, SaveRuntimeStateParams,
-    SortOrder,
+    IAgentMetadataRepository, IConversationRepository, IEditInverseRepository, IOpencodeToolSnapshotRepository,
+    SaveRuntimeStateParams, SortOrder,
 };
 use aionui_file::SnapshotService;
 use aionui_realtime::EventBroadcaster;
@@ -70,6 +70,7 @@ pub struct ConversationService {
     // tests that want to swap the deps without touching the global.
     snapshot_service: Arc<RwLock<Option<Arc<SnapshotService>>>>,
     tool_snapshot_repo: Arc<RwLock<Option<Arc<dyn IOpencodeToolSnapshotRepository>>>>,
+    edit_inverse_repo: Arc<RwLock<Option<Arc<dyn IEditInverseRepository>>>>,
 }
 
 // ── Construction & Dependency Injection ──────────────────────────────
@@ -100,6 +101,7 @@ impl ConversationService {
 
             snapshot_service: Arc::new(RwLock::new(None)),
             tool_snapshot_repo: Arc::new(RwLock::new(None)),
+            edit_inverse_repo: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -121,6 +123,14 @@ impl ConversationService {
     /// actually revert anything.
     pub fn with_tool_snapshot_repo(&self, repo: Arc<dyn IOpencodeToolSnapshotRepository>) {
         if let Ok(mut guard) = self.tool_snapshot_repo.write() {
+            *guard = Some(repo);
+        }
+    }
+
+    /// Register the edit-inverse ledger repo. Powers the
+    /// `GET /api/conversations/{id}/edit-inverses` and revert routes.
+    pub fn with_edit_inverse_repo(&self, repo: Arc<dyn IEditInverseRepository>) {
+        if let Ok(mut guard) = self.edit_inverse_repo.write() {
             *guard = Some(repo);
         }
     }
@@ -2243,6 +2253,271 @@ mod tests {
     }
 }
 
+// ── Edit Inverse Service Methods ────────────────────────────────────
+
+impl ConversationService {
+    /// List all edit inverses for a conversation.
+    pub async fn list_edit_inverses(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<aionui_db::EditInverseRow>, AppError> {
+        // Ownership + existence — mirrors revert_tool_call.
+        let _conv = self
+            .conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|r| r.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+
+        let repo = self.edit_inverse_repo.read().ok().and_then(|g| g.clone());
+        let repo = repo.ok_or_else(|| {
+            AppError::Internal(
+                "edit_inverse_repo not configured; cannot list edit inverses. \
+                 The composition root must call \
+                 ConversationService::with_edit_inverse_repo at startup."
+                    .into(),
+            )
+        })?;
+        let rows = repo.list_by_conversation(conversation_id).await?;
+        Ok(rows)
+    }
+
+    /// Revert a single hunk from an edit inverse.
+    pub async fn revert_hunk(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        tool_call_id: &str,
+        hunk_index: usize,
+    ) -> Result<RevertHunkResponse, AppError> {
+        // Ownership + existence — mirrors revert_tool_call.
+        let _conv = self
+            .conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|r| r.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+
+        let repo = self.edit_inverse_repo.read().ok().and_then(|g| g.clone());
+        let repo = repo.ok_or_else(|| {
+            AppError::Internal(
+                "edit_inverse_repo not configured; cannot revert hunk. \
+                 The composition root must call \
+                 ConversationService::with_edit_inverse_repo at startup."
+                    .into(),
+            )
+        })?;
+        let row = repo
+            .get_by_tool_call_id(tool_call_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("edit inverse not found: {tool_call_id}")))?;
+        if row.conversation_id != conversation_id {
+            return Err(AppError::NotFound(format!("edit inverse not found: {tool_call_id}")));
+        }
+
+        // Validate hunk index before touching the filesystem.
+        let total_hunks = aionui_ai_agent::manager::remote::diff_invert::parse_hunks(&row.patch)?.len();
+        if hunk_index >= total_hunks {
+            return Err(AppError::NotFound(format!(
+                "hunk index {hunk_index} out of range; patch has {total_hunks} hunks"
+            )));
+        }
+
+        let abs_path = self.resolve_workspace_path(&row.file_path)?;
+        let content = tokio::fs::read_to_string(&abs_path)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to read {}: {e}", row.file_path)))?;
+
+        let new_content = aionui_ai_agent::manager::remote::diff_invert::revert_single_hunk(
+            &row.patch,
+            hunk_index,
+            &content,
+            &row.file_path,
+        )?;
+
+        tokio::fs::write(&abs_path, new_content)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to write {}: {e}", row.file_path)))?;
+
+        let remaining_hunks = total_hunks.saturating_sub(1);
+
+        // When the last hunk is reverted, the edit-inverse row is fully
+        // resolved and should be removed. For multi-hunk patches we cannot
+        // currently track which individual hunks have been reverted (the
+        // row stores the full forward patch with no per-hunk resolved-state
+        // column), so we only delete when total_hunks <= 1. Re-reverting
+        // an already-reverted hunk against a drifted file will fail loudly
+        // via the diffy apply — acceptable until a schema change adds
+        // per-hunk tracking.
+        if total_hunks <= 1 {
+            repo.delete_by_tool_call_id(tool_call_id).await?;
+        }
+
+        info!(tool_call_id, hunk_index, file = %row.file_path, "Reverted single hunk");
+
+        Ok(RevertHunkResponse {
+            success: true,
+            reverted_hunk_index: hunk_index,
+            remaining_hunks,
+        })
+    }
+
+    /// Revert an entire file's changes from an edit inverse.
+    pub async fn revert_file(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        tool_call_id: &str,
+    ) -> Result<RevertFileResponse, AppError> {
+        // Ownership + existence — mirrors revert_tool_call.
+        let _conv = self
+            .conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|r| r.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+
+        let repo = self.edit_inverse_repo.read().ok().and_then(|g| g.clone());
+        let repo = repo.ok_or_else(|| {
+            AppError::Internal(
+                "edit_inverse_repo not configured; cannot revert file. \
+                 The composition root must call \
+                 ConversationService::with_edit_inverse_repo at startup."
+                    .into(),
+            )
+        })?;
+        let row = repo
+            .get_by_tool_call_id(tool_call_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("edit inverse not found: {tool_call_id}")))?;
+        if row.conversation_id != conversation_id {
+            return Err(AppError::NotFound(format!("edit inverse not found: {tool_call_id}")));
+        }
+
+        // Resolve snapshot deps using the same two-tier resolution as
+        // `revert_tool_call`: per-service slot → process-global → error.
+        let per_service_svc = self.snapshot_service.read().ok().and_then(|g| g.clone());
+        let per_service_repo = self.tool_snapshot_repo.read().ok().and_then(|g| g.clone());
+        let global = crate::snapshot_deps::get();
+        let snapshot_service = per_service_svc
+            .or_else(|| global.as_ref().map(|d| d.snapshot_service.clone()))
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "Snapshot service not configured; cannot revert file. \
+                     The composition root must call \
+                     aionui_conversation::snapshot_deps_set(...) (or the per-service \
+                     ConversationService::with_snapshot_service) at startup."
+                        .into(),
+                )
+            })?;
+        let tool_snapshot_repo = per_service_repo
+            .or_else(|| global.map(|d| d.tool_snapshot_repo))
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "opencode_tool_snapshots repo not configured; cannot revert file. \
+                     The composition root must call \
+                     aionui_conversation::snapshot_deps_set(...) (or the per-service \
+                     ConversationService::with_tool_snapshot_repo) at startup."
+                        .into(),
+                )
+            })?;
+
+        // Look up the snapshot ledger row by the same tool_call_id.
+        let snapshot_row = tool_snapshot_repo
+            .get_by_tool_call_id(tool_call_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("snapshot ledger lookup failed: {e}")))?
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "no snapshot available for file revert; per-file revert requires snapshot service".into(),
+                )
+            })?;
+
+        if snapshot_row.conversation_id != conversation_id {
+            return Err(AppError::NotFound(format!(
+                "No tool-call snapshot for tool_call_id '{tool_call_id}' in this conversation"
+            )));
+        }
+
+        let files: Vec<String> = serde_json::from_str(&snapshot_row.files_changed_json).map_err(|e| {
+            AppError::Internal(format!(
+                "ledger row for tool_call_id '{tool_call_id}' has invalid files_changed_json: {e}"
+            ))
+        })?;
+
+        snapshot_service
+            .revert_to_tool_snapshot(&snapshot_row.commit_sha, &files)
+            .await?;
+
+        // The whole file is restored — the edit-inverse row is fully resolved.
+        repo.delete_by_tool_call_id(tool_call_id).await?;
+
+        info!(tool_call_id, file = %row.file_path, "Reverted file via snapshot");
+
+        Ok(RevertFileResponse {
+            success: true,
+            file_path: row.file_path,
+        })
+    }
+
+    /// Resolve a relative path against the workspace root, rejecting any
+    /// path that escapes the workspace (absolute paths, `..` components,
+    /// Windows drive prefixes). Returns the canonicalized absolute path.
+    ///
+    /// `rel` comes from agent-supplied diff headers and is untrusted.
+    fn resolve_workspace_path(&self, rel: &str) -> Result<std::path::PathBuf, AppError> {
+        // Reject absolute paths (Unix and Windows drive-letter / UNC prefixes).
+        if rel.starts_with('/') || rel.starts_with('\\') {
+            return Err(AppError::Internal(
+                "edit-inverse file path escapes workspace root: absolute path rejected".into(),
+            ));
+        }
+        if rel.len() >= 2 && rel.as_bytes()[1] == b':' && rel.as_bytes()[0].is_ascii_alphabetic() {
+            return Err(AppError::Internal(
+                "edit-inverse file path escapes workspace root: Windows path prefix rejected".into(),
+            ));
+        }
+        if rel.starts_with(r"\\") {
+            return Err(AppError::Internal(
+                "edit-inverse file path escapes workspace root: UNC path prefix rejected".into(),
+            ));
+        }
+
+        // Reject any component that traverses upward.
+        for component in std::path::Path::new(rel).components() {
+            if matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::RootDir
+            ) {
+                return Err(AppError::Internal(
+                    "edit-inverse file path escapes workspace root: path traversal rejected".into(),
+                ));
+            }
+        }
+
+        let resolved = self.workspace_root.join(rel);
+
+        // Canonicalize both sides and verify the target stays within the workspace.
+        // The file being reverted already exists on disk, so canonicalize will succeed.
+        let canonical_root = self
+            .workspace_root
+            .canonicalize()
+            .map_err(|e| AppError::Internal(format!("failed to canonicalize workspace root: {e}")))?;
+        let canonical_target = resolved
+            .canonicalize()
+            .map_err(|e| AppError::Internal(format!("failed to canonicalize target path: {e}")))?;
+
+        if !canonical_target.starts_with(&canonical_root) {
+            return Err(AppError::Internal(
+                "edit-inverse file path escapes workspace root".into(),
+            ));
+        }
+
+        Ok(canonical_target)
+    }
+}
+
 // ── Per-Tool-Call Revert Response Type (Task 14.3) ─────────────────
 
 /// Response body for `POST /api/conversations/{id}/opencode/revert-tool-call`.
@@ -2255,4 +2530,19 @@ pub struct RevertToolCallResponse {
     pub tool_call_id: String,
     pub commit_sha: String,
     pub files_reverted: usize,
+}
+
+/// Response from reverting a single hunk within an edit inverse.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RevertHunkResponse {
+    pub success: bool,
+    pub reverted_hunk_index: usize,
+    pub remaining_hunks: usize,
+}
+
+/// Response from reverting an entire file's changes from an edit inverse.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RevertFileResponse {
+    pub success: bool,
+    pub file_path: String,
 }

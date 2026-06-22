@@ -16,9 +16,10 @@ use aionui_conversation::{ConversationRouterState, ConversationService};
 use aionui_cron::{CronEventEmitter, CronRouterState};
 use aionui_db::{
     IAcpSessionRepository, IAgentMetadataRepository, IAssistantOverrideRepository, IAssistantRepository,
-    IProviderRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAssistantOverrideRepository,
-    SqliteAssistantRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
-    SqliteProviderRepository, SqliteRemoteAgentRepository, SqliteSettingsRepository,
+    IEditInverseRepository, IProviderRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
+    SqliteAssistantOverrideRepository, SqliteAssistantRepository, SqliteClientPreferenceRepository,
+    SqliteConversationRepository, SqliteEditInverseRepository, SqliteProviderRepository, SqliteRemoteAgentRepository,
+    SqliteSettingsRepository,
 };
 use aionui_extension::{
     AssistantRuleDispatcher, ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, ExternalPathsManager,
@@ -260,6 +261,11 @@ pub fn build_conversation_state(
         ));
         conversation_service.with_update_hook(hook);
     }
+    {
+        let edit_inverse_repo: Arc<dyn IEditInverseRepository> =
+            Arc::new(SqliteEditInverseRepository::new(services.database.pool().clone()));
+        conversation_service.with_edit_inverse_repo(edit_inverse_repo);
+    }
     ConversationRouterState {
         service: conversation_service,
         task_manager: services.worker_task_manager.clone(),
@@ -310,6 +316,11 @@ pub fn build_file_state(services: &AppServices) -> FileRouterState {
     let file_service = Arc::new(FileService::new(broadcaster.clone(), allowed_roots.clone()));
     let watch_service = Arc::new(FileWatchService::new(broadcaster).expect("file watch service initialization"));
     let snapshot_service = Arc::new(SnapshotService::new());
+
+    // T1 Interactive Diff: register the DB pool used by capture_edit_inverse
+    // to persist per-tool-call inverse patches. Independent of the tool-snapshot
+    // auto-commit ledger, so it is not gated by AIONUI_DISABLE_TOOL_SNAPSHOT.
+    aionui_ai_agent::manager::remote::edit_inverse::set_pool(services.database.pool().clone());
 
     // Per-tool-call auto-commit ledger is opt-in; desktop GitService owns SCM UI.
     let tool_snapshot_disabled =
@@ -456,6 +467,11 @@ pub async fn build_channel_state(
     if let Some(hook) = services.task_manager_delete_hook.clone() {
         conversation_svc.with_delete_hook(hook);
     }
+    {
+        let edit_inverse_repo: Arc<dyn IEditInverseRepository> =
+            Arc::new(SqliteEditInverseRepository::new(services.database.pool().clone()));
+        conversation_svc.with_edit_inverse_repo(edit_inverse_repo);
+    }
 
     let owner_user_id = services
         .user_repo
@@ -538,6 +554,11 @@ pub fn build_team_state(
         conv_service.with_delete_hook(cron_service.clone());
         conv_service.with_cron_service(Some(cron_service));
     }
+    {
+        let edit_inverse_repo: Arc<dyn IEditInverseRepository> =
+            Arc::new(SqliteEditInverseRepository::new(services.database.pool().clone()));
+        conv_service.with_edit_inverse_repo(edit_inverse_repo);
+    }
     let service = TeamSessionService::new(
         team_repo,
         Arc::new(SqliteAgentMetadataRepository::new(services.database.pool().clone())),
@@ -573,6 +594,11 @@ pub fn build_cron_state(services: &AppServices) -> CronRouterState {
         agent_metadata_repo,
         acp_session_repo,
     );
+    {
+        let edit_inverse_repo: Arc<dyn IEditInverseRepository> =
+            Arc::new(SqliteEditInverseRepository::new(services.database.pool().clone()));
+        conv_service.with_edit_inverse_repo(edit_inverse_repo);
+    }
 
     let busy_guard = Arc::new(aionui_cron::busy_guard::CronBusyGuard::new());
     let executor = Arc::new(aionui_cron::executor::JobExecutor::new(

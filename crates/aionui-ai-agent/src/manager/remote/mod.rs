@@ -1,4 +1,6 @@
 pub mod agent;
+pub mod diff_invert;
+pub mod edit_inverse;
 pub mod local_fs_mcp;
 pub mod opencode_commands;
 pub mod opencode_context;
@@ -17,5 +19,7 @@ pub mod opencode_v2;
 pub mod plugin;
 pub mod reachability;
 pub mod subagent;
+pub mod verify_hook;
 
 pub use agent::{RemoteAgentConfig, RemoteAgentManager};
+pub use edit_inverse::{capture_edit_inverse, compute_inverse, extract_file_path_from_patch, get_pool, set_pool};

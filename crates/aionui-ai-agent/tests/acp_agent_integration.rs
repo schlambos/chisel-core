@@ -199,6 +199,7 @@ fn event_type_name(event: &AgentStreamEvent) -> &'static str {
         AgentStreamEvent::SessionIdle(_) => "SessionIdle",
         AgentStreamEvent::Retry(_) => "Retry",
         AgentStreamEvent::SessionErrorRecovered(_) => "SessionErrorRecovered",
+        AgentStreamEvent::VerifyResult(_) => "VerifyResult",
     }
 }
 

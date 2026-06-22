@@ -2635,6 +2635,12 @@ impl RemoteAgentManager {
                                     is_child = is_child,
                                     "Forwarding OpenCode tool part update"
                                 );
+
+                                // Capture owned copies of values needed after emit
+                                // (emit moves the event).
+                                let tool_call_id_owned = event.update.tool_call_id.clone();
+                                let conv_id_owned = self.runtime.conversation_id().to_string();
+
                                 self.runtime.emit(AgentStreamEvent::AcpToolCall(event));
 
                                 // For child sessions, also tick the rolling
@@ -2652,6 +2658,58 @@ impl RemoteAgentManager {
                                         part.get("tool").and_then(|v| v.as_str()),
                                     )
                                     .await;
+                                }
+
+                                // Inverse-edit capture (T1): when an edit-type
+                                // tool completes with a non-empty patch in
+                                // metadata, compute and persist the inverse so
+                                // the working tree can be reverted per-tool-call.
+                                let tool_name = part.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+                                if opencode_tool_call::is_edit_tool(tool_name) {
+                                    // Clone values for the verify-hook spawn
+                                    // before the edit-inverse spawn potentially
+                                    // moves them.
+                                    let verify_conv_id = conv_id_owned.clone();
+                                    let verify_tool_call_id = tool_call_id_owned.clone();
+
+                                    if let Some(patch) = opencode_tool_call::extract_patch_from_completed(props) {
+                                        tokio::spawn(async move {
+                                            if let Err(err) = super::edit_inverse::capture_edit_inverse(
+                                                &conv_id_owned,
+                                                &tool_call_id_owned,
+                                                &patch,
+                                            )
+                                            .await
+                                            {
+                                                error!(error = %err, "capture_edit_inverse failed");
+                                            }
+                                        });
+                                    }
+
+                                    // Verify hook (T1 Unit 5): after an edit
+                                    // completes, optionally run a project-defined
+                                    // verification command and emit the result so
+                                    // the frontend can display a pass/fail toast.
+                                    {
+                                        let runtime = self.runtime.clone();
+                                        let workspace_root = PathBuf::from(self.runtime.workspace());
+                                        tokio::spawn(async move {
+                                            match super::verify_hook::load_verify_config(&workspace_root).await {
+                                                Some(cfg) if cfg.auto_run => {
+                                                    let result = super::verify_hook::run_verification(
+                                                        &cfg,
+                                                        &workspace_root,
+                                                        &verify_conv_id,
+                                                        Some(&verify_tool_call_id),
+                                                    )
+                                                    .await;
+                                                    runtime.emit(AgentStreamEvent::VerifyResult(result));
+                                                }
+                                                Some(_) => { /* auto_run disabled — skip */ }
+                                                None => { /* no config — normal, skip */ }
+                                            }
+                                        });
+                                    }
                                 }
                             }
                         }

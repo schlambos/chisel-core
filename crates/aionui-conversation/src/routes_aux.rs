@@ -6,6 +6,7 @@ use aionui_api_types::{
 };
 use aionui_auth::CurrentUser;
 use aionui_common::AppError;
+use aionui_db::EditInverseRow;
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, Query, State};
@@ -68,6 +69,15 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
         .route(
             "/api/conversations/{conversation_id}/config/permissions/sync",
             post(sync_permissions),
+        )
+        .route("/api/conversations/{id}/edit-inverses", get(list_edit_inverses_handler))
+        .route(
+            "/api/conversations/{id}/edit-inverses/{tool_call_id}/revert-hunk",
+            post(revert_hunk_handler),
+        )
+        .route(
+            "/api/conversations/{id}/edit-inverses/{tool_call_id}/revert-file",
+            post(revert_file_handler),
         )
         .with_state(state)
 }
@@ -561,4 +571,49 @@ async fn sync_permissions(
         synced_rules,
         error: None,
     })))
+}
+
+// ── Edit inverse routes ────────────────────────────────────────────
+
+/// Request to revert a single hunk within an edit inverse.
+#[derive(serde::Deserialize)]
+struct RevertHunkRequest {
+    hunk_index: usize,
+}
+
+/// GET /api/conversations/:id/edit-inverses
+/// Lists all edit inverses for a conversation.
+async fn list_edit_inverses_handler(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<EditInverseRow>>, AppError> {
+    let inverses = state.service.list_edit_inverses(&user.id, &id).await?;
+    Ok(Json(inverses))
+}
+
+/// POST /api/conversations/:id/edit-inverses/:tool_call_id/revert-hunk
+/// Reverts a single hunk from an edit inverse.
+async fn revert_hunk_handler(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path((id, tool_call_id)): Path<(String, String)>,
+    Json(body): Json<RevertHunkRequest>,
+) -> Result<Json<crate::service::RevertHunkResponse>, AppError> {
+    let response = state
+        .service
+        .revert_hunk(&user.id, &id, &tool_call_id, body.hunk_index)
+        .await?;
+    Ok(Json(response))
+}
+
+/// POST /api/conversations/:id/edit-inverses/:tool_call_id/revert-file
+/// Reverts an entire file's changes from an edit inverse.
+async fn revert_file_handler(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path((id, tool_call_id)): Path<(String, String)>,
+) -> Result<Json<crate::service::RevertFileResponse>, AppError> {
+    let response = state.service.revert_file(&user.id, &id, &tool_call_id).await?;
+    Ok(Json(response))
 }

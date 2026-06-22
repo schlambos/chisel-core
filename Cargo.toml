@@ -128,6 +128,9 @@ dirs = "6"
 # Regex
 regex = "1"
 
+# Diff/Patch
+diffy = "0.5"
+
 # File system
 include_dir = "0.7"
 notify = "8"

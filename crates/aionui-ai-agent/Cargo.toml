@@ -16,6 +16,7 @@ aionui-api-types.workspace = true
 aionui-system.workspace = true
 axum.workspace = true
 base64.workspace = true
+chrono.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 ed25519-dalek.workspace = true
@@ -51,6 +52,7 @@ agent-client-protocol = { version = "0.11.1", features = [
 ] }
 tokio-util = { version = "0.7", features = ["compat"] }
 rusqlite.workspace = true
+diffy.workspace = true
 
 [features]
 # Enables the `AgentInstance::Mock` variant used by downstream test harnesses

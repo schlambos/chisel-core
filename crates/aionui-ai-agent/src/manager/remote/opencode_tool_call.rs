@@ -19,6 +19,38 @@ use crate::protocol::events::{
     AcpToolCallTextBlock, AcpToolCallTextBlockType, AcpToolCallUpdateData,
 };
 
+/// Edit-type tool names that produce file mutations and should have their
+/// patches captured for inverse-edit revert.
+const EDIT_TOOL_NAMES: &[&str] = &["write", "edit", "multiedit", "patch", "delete", "mv", "move"];
+
+/// Returns `true` if the tool name is an edit-type tool that produces
+/// file mutations and should have its patch captured for inverse revert.
+pub fn is_edit_tool(tool_name: &str) -> bool {
+    let bare = strip_mcp_prefix(tool_name).to_ascii_lowercase();
+    EDIT_TOOL_NAMES.contains(&bare.as_str())
+}
+
+/// Extract the unified-diff patch from a completed tool-call's
+/// `state.metadata.patch` field. Returns `None` if the patch is absent
+/// or empty.
+///
+/// `props` is the `properties` object of the SSE event (same input as
+/// [`translate_message_part_updated`]).
+pub fn extract_patch_from_completed(props: &Value) -> Option<String> {
+    let part = props.get("part")?;
+    let state = part.get("state")?;
+    let status = state.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    if status != "completed" {
+        return None;
+    }
+    let patch = state
+        .get("metadata")
+        .and_then(|m| m.get("patch"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?;
+    Some(patch.to_string())
+}
+
 /// Translate a `message.part.updated` SSE payload (the `properties` object)
 /// into an `AcpToolCallEventData` ready to be emitted on the agent runtime.
 ///

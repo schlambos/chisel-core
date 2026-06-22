@@ -205,7 +205,8 @@ impl ChannelMessageService {
             | AgentStreamEvent::SessionStatus(_)
             | AgentStreamEvent::SessionIdle(_)
             | AgentStreamEvent::Retry(_)
-            | AgentStreamEvent::SessionErrorRecovered(_) => None,
+            | AgentStreamEvent::SessionErrorRecovered(_)
+            | AgentStreamEvent::VerifyResult(_) => None,
         }
     }
 

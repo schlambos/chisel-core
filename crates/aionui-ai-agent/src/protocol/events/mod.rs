@@ -73,6 +73,10 @@ pub enum AgentStreamEvent {
     SessionIdle(SessionIdleEventData),
     Retry(RetryEventData),
     SessionErrorRecovered(SessionErrorRecoveredEventData),
+    /// Verification command result — emitted after an edit-type tool
+    /// completes when `.chisl/verify.json` is present and `auto_run` is
+    /// true. The frontend uses this to display a pass/fail toast.
+    VerifyResult(VerifyResultEventData),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +123,21 @@ pub struct SessionErrorRecoveredEventData {
     pub part_id: String,
     pub error: TypedErrorData,
     pub recovery_action: String,
+}
+
+/// Data for the `VerifyResult` event — the outcome of a project-defined
+/// verification command run after an edit-type tool completes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyResultEventData {
+    pub success: bool,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub output: String,
+    pub duration_ms: u64,
+    pub conversation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 /// Data for the `OpencodeSessionCompacted` event.
@@ -467,5 +486,53 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "thinking");
         assert_eq!(json["data"]["duration"], 1500);
+    }
+
+    #[test]
+    fn verify_result_event_roundtrip() {
+        let event = AgentStreamEvent::VerifyResult(VerifyResultEventData {
+            success: true,
+            command: "cargo build".into(),
+            exit_code: Some(0),
+            output: "Compiling...".into(),
+            duration_ms: 1234,
+            conversation_id: "conv-1".into(),
+            tool_call_id: Some("tc-1".into()),
+        });
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "verify_result");
+        assert_eq!(json["data"]["success"], true);
+        assert_eq!(json["data"]["command"], "cargo build");
+        assert_eq!(json["data"]["exit_code"], 0);
+        assert_eq!(json["data"]["output"], "Compiling...");
+        assert_eq!(json["data"]["duration_ms"], 1234);
+        assert_eq!(json["data"]["conversation_id"], "conv-1");
+        assert_eq!(json["data"]["tool_call_id"], "tc-1");
+
+        let parsed: AgentStreamEvent = serde_json::from_value(json).unwrap();
+        if let AgentStreamEvent::VerifyResult(data) = parsed {
+            assert!(data.success);
+            assert_eq!(data.command, "cargo build");
+            assert_eq!(data.exit_code, Some(0));
+        } else {
+            panic!("Expected VerifyResult event");
+        }
+    }
+
+    #[test]
+    fn verify_result_event_omits_none_fields() {
+        let event = AgentStreamEvent::VerifyResult(VerifyResultEventData {
+            success: false,
+            command: "npm test".into(),
+            exit_code: None,
+            output: "failed to launch shell".into(),
+            duration_ms: 0,
+            conversation_id: "conv-2".into(),
+            tool_call_id: None,
+        });
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "verify_result");
+        assert!(json["data"].get("exit_code").is_none());
+        assert!(json["data"].get("tool_call_id").is_none());
     }
 }
