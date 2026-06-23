@@ -577,3 +577,7 @@ graphify-out/
 
 # OpenCode config backups may contain auth tokens — never commit
 opencode-backup.json
+
+# Local one-off patch scripts (never committed)
+patch_types.py
+patch_*.py
