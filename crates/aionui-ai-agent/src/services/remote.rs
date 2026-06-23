@@ -1275,7 +1275,7 @@ async fn fetch_opencode_sessions_v2(
     auth_token: Option<&str>,
     allow_insecure: bool,
 ) -> Result<Vec<RemoteSessionInfo>, AppError> {
-    use crate::manager::remote::opencode_v2::{v2_list_sessions, V2Location};
+    use crate::manager::remote::opencode_v2::{V2Location, v2_list_sessions};
 
     const PAGE_LIMIT: u32 = 200;
     const MAX_PAGES: usize = 50; // safety net against runaway pagination
@@ -1291,16 +1291,23 @@ async fn fetch_opencode_sessions_v2(
 
     for page in 0..MAX_PAGES {
         // Build the auth header once — `v2_list_sessions` accepts Option<&str>.
-    let auth_header = auth_token.filter(|t| !t.is_empty()).map(|t| match auth_type {
-        RemoteAgentAuthType::Bearer => format!("Bearer {t}"),
-        RemoteAgentAuthType::Basic => format!("Basic {}", BASE64.encode(t)),
-        RemoteAgentAuthType::Password => format!("Basic {}", BASE64.encode(format!("opencode:{t}"))),
-        RemoteAgentAuthType::None => String::new(),
-    });
-    let auth_header_ref = auth_header.as_deref();
+        let auth_header = auth_token.filter(|t| !t.is_empty()).map(|t| match auth_type {
+            RemoteAgentAuthType::Bearer => format!("Bearer {t}"),
+            RemoteAgentAuthType::Basic => format!("Basic {}", BASE64.encode(t)),
+            RemoteAgentAuthType::Password => format!("Basic {}", BASE64.encode(format!("opencode:{t}"))),
+            RemoteAgentAuthType::None => String::new(),
+        });
+        let auth_header_ref = auth_header.as_deref();
 
-    let raw = v2_list_sessions(&client, &base_url, auth_header_ref, Some(PAGE_LIMIT), cursor.as_deref(), V2Location::None)
-            .await?;
+        let raw = v2_list_sessions(
+            &client,
+            &base_url,
+            auth_header_ref,
+            Some(PAGE_LIMIT),
+            cursor.as_deref(),
+            V2Location::None,
+        )
+        .await?;
 
         let items = raw
             .get("items")
