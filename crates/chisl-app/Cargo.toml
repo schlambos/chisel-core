@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "aioncore"
+name = "chislcore"
 path = "src/main.rs"
 
 [features]

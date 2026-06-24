@@ -5,7 +5,7 @@ use chisl_common::constants::DEFAULT_PLUGIN_PORT;
 
 /// Env var to override the plugin webserver listen port. Operators set
 /// this when the default `64921` is already in use (e.g. a dev
-/// `aioncore` instance holding the port); tests use it to bind on an
+/// `chislcore` instance holding the port); tests use it to bind on an
 /// ephemeral port so they don't fight whatever else is listening on
 /// `DEFAULT_PLUGIN_PORT` on the host.
 pub const PLUGIN_PORT_ENV: &str = "AIONUI_PLUGIN_PORT";

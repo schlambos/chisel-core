@@ -1,4 +1,4 @@
-//! `aioncore` (no subcommand): the main HTTP server.
+//! `chislcore` (no subcommand): the main HTTP server.
 
 use std::process::ExitCode;
 use std::time::Instant;

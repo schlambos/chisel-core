@@ -9,7 +9,7 @@ use tracing::debug;
 
 use crate::protocol::events::{AcpPermissionEventData, AgentStreamEvent, ToolCallEventData, ToolCallStatus};
 
-/// Implements `ProtocolEmitter` for the aioncore context.
+/// Implements `ProtocolEmitter` for the chislcore context.
 ///
 /// Bridges aionrs `ProtocolEvent` emissions to `AgentStreamEvent` on a
 /// broadcast channel. Only handles events relevant to the approval flow;

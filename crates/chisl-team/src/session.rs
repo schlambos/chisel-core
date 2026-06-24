@@ -880,7 +880,7 @@ mod tests {
     }
 
     fn backend_path() -> Arc<PathBuf> {
-        Arc::new(PathBuf::from("/tmp/aioncore-test"))
+        Arc::new(PathBuf::from("/tmp/chislcore-test"))
     }
 
     /// Mock agent whose `send_message` pushes the received payload into a
@@ -1130,7 +1130,7 @@ mod tests {
         let session = start_session().await;
         let spec = session.stdio_spec("lead-1");
         assert_eq!(spec.name, crate::mcp::TEAM_MCP_SERVER_NAME);
-        assert_eq!(spec.command, "/tmp/aioncore-test");
+        assert_eq!(spec.command, "/tmp/chislcore-test");
         assert_eq!(spec.args, vec!["mcp-bridge".to_string()]);
         assert!(spec.env.iter().any(|(k, v)| k == "TEAM_AGENT_SLOT_ID" && v == "lead-1"));
         session.stop();

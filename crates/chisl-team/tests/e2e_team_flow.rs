@@ -325,7 +325,7 @@ fn mcp_text(resp: &Value) -> &str {
 // ---------------------------------------------------------------------------
 
 fn backend_path() -> Arc<PathBuf> {
-    Arc::new(PathBuf::from("/tmp/aioncore-e2e-test"))
+    Arc::new(PathBuf::from("/tmp/chislcore-e2e-test"))
 }
 
 /// Two-agent team definition: one Lead + one Worker.

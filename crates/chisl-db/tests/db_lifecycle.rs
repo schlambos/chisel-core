@@ -395,7 +395,7 @@ async fn copy_legacy_then_init_database_works() {
 // Repro for the Sentry secondary symptom: two processes opening the same
 // SQLite DB on first start (e.g. Electron auto-update spawning the new
 // version while the old one is still finalising shutdown, or
-// `aioncore doctor` racing the server) both decide to apply the same
+// `chislcore doctor` racing the server) both decide to apply the same
 // migration version. sqlx-sqlite's lock()/unlock() are no-ops, so without
 // the advisory file lock and retry-on-UNIQUE the slower process used to
 // blow up with `UNIQUE constraint failed: _sqlx_migrations.version`.

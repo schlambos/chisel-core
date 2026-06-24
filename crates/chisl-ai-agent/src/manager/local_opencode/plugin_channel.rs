@@ -141,7 +141,7 @@ mod tests {
     async fn ensure_loopback_plugin_endpoint_returns_loopback_url() {
         // The plugin webserver's listen port is fixed at
         // `DEFAULT_PLUGIN_PORT` in production so remote Docker installs
-        // have a stable dial-back target. A dev `aioncore` instance
+        // have a stable dial-back target. A dev `chislcore` instance
         // running on the same host is therefore holding that port when
         // these tests execute — bind an ephemeral port via the
         // `AIONUI_PLUGIN_PORT` env override so the test can succeed

@@ -34,7 +34,7 @@ pub struct TeamMcpStdioServerSpec {
 impl TeamMcpStdioServerSpec {
     /// Build the spec from the persisted stdio config plus runtime context.
     ///
-    /// `backend_binary_path` is the absolute path to the `aioncore`
+    /// `backend_binary_path` is the absolute path to the `chislcore`
     /// executable (phase1 single-binary constraint — no standalone bridge).
     pub fn from_config(backend_binary_path: &str, cfg: &TeamMcpStdioConfig) -> Self {
         // `cfg.team_id` is intentionally not embedded in the server name — see
@@ -80,16 +80,16 @@ mod tests {
             port: 12345,
             token: "tok-abc".into(),
             slot_id: "slot-1".into(),
-            binary_path: "/usr/bin/aioncore".into(),
+            binary_path: "/usr/bin/chislcore".into(),
         }
     }
 
     #[test]
     fn from_config_fills_all_fields() {
-        let spec = TeamMcpStdioServerSpec::from_config("/usr/bin/aioncore", &sample_cfg());
+        let spec = TeamMcpStdioServerSpec::from_config("/usr/bin/chislcore", &sample_cfg());
 
         assert_eq!(spec.name, TEAM_MCP_SERVER_NAME);
-        assert_eq!(spec.command, "/usr/bin/aioncore");
+        assert_eq!(spec.command, "/usr/bin/chislcore");
         assert_eq!(spec.args, vec!["mcp-bridge".to_owned()]);
         assert_eq!(spec.env.len(), 3);
     }
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn into_sdk_serializes_as_stdio_variant() {
-        let spec = TeamMcpStdioServerSpec::from_config("/bin/aioncore", &sample_cfg());
+        let spec = TeamMcpStdioServerSpec::from_config("/bin/chislcore", &sample_cfg());
         let sdk = spec.into_sdk();
 
         let json = serde_json::to_value(&sdk).expect("serialize");
@@ -120,7 +120,7 @@ mod tests {
         // `Stdio` variant is `#[serde(untagged)]` inside `McpServer`, so the
         // JSON is the raw `McpServerStdio` shape — no `"type":"stdio"` tag.
         assert_eq!(json["name"], TEAM_MCP_SERVER_NAME);
-        assert_eq!(json["command"], "/bin/aioncore");
+        assert_eq!(json["command"], "/bin/chislcore");
         assert_eq!(json["args"], serde_json::json!(["mcp-bridge"]));
 
         let env = json["env"].as_array().expect("env array");

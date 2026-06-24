@@ -124,7 +124,7 @@ static TURN_SIGNALS: OnceLock<StdMutex<HashMap<String, Arc<TurnSignal>>>> = Once
 
 /// Process-wide set: which OpenCode `base_url`s have had their stale
 /// `aionui-local-fs*` registrations swept already. Prevents repeating the
-/// `GET /mcp` + per-entry disconnect work on every conversation. An aioncore
+/// `GET /mcp` + per-entry disconnect work on every conversation. An chislcore
 /// upgrade leaves legacy `aionui-local-fs-{conv_id}` and prior-process
 /// `aionui-local-fs` entries on the LAN OpenCode; without this sweep the
 /// model in a fresh session sees those stale tool names in its catalog and
@@ -321,7 +321,7 @@ pub async fn release_turn(base_url: &str, conversation_id: &str) {
 /// given OpenCode instance. Runs once per `base_url` per AionCore process
 /// (idempotent thereafter).
 ///
-/// **Why this exists:** an aioncore restart or upgrade leaves the
+/// **Why this exists:** an chislcore restart or upgrade leaves the
 /// previous process's MCP registrations live on the LAN OpenCode. The
 /// model in a fresh session sees those stale tool names — both
 /// legacy per-conversation `aionui-local-fs-{conv_id}_*` and any prior
@@ -466,7 +466,7 @@ pub async fn start_and_register(
     snapshot_hook: Option<SnapshotHook>,
 ) -> Result<LocalFsMcpServer, String> {
     // First-touch-per-process: clear any aionui-local-fs* leftovers from a
-    // prior aioncore run before registering ours. Idempotent across
+    // prior chislcore run before registering ours. Idempotent across
     // conversations on the same OpenCode.
     sweep_stale_registrations(http_client, base_url, auth_header).await;
 

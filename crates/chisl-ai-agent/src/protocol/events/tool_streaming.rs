@@ -40,7 +40,7 @@ pub enum ToolInputPhase {
 /// Data for the `ToolProgress` event — a transient progress update emitted by
 /// long-running tools (`bash`, `grep`, `read`/`write`, MCP). Maps OpenCode's
 /// `EventSessionNextToolProgress`. The `progress` payload shape is
-/// tool-specific; aioncore normalizes well-known shapes via
+/// tool-specific; chislcore normalizes well-known shapes via
 /// `normalize_progress_payload`, otherwise it forwards the raw JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolProgressEventData {
