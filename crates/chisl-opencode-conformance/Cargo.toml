@@ -1,0 +1,32 @@
+[package]
+name = "chisl-opencode-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+# Reads <chisl-root>/opencode-sdk-version.json at build time and emits
+# OUT_DIR/version.rs with the `OPENCODE_SDK_VERSION` constant the
+# conformance suite re-exports. Rerun-if-changed is declared inside the
+# script.
+build = "build.rs"
+description = "Test-only crate that pins the OpenCode SSE protocol surface Chisl's remote-OpenCode adapter assumes. Recorded JSONL fixtures + a forward-compatible parser test gated in CI."
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+serde_json = { workspace = true }
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+# Outbound-payload conformance tests need to import the typed request
+# structs from the agent crate so they can serialize them and assert the
+# resulting wire shape matches the expected SDK shape. The lib itself does
+# not depend on `chisl-ai-agent` — only the integration tests in
+# `tests/` do — so the conformance crate stays a pure parser/test
+# harness at the lib level.
+chisl-ai-agent = { workspace = true }

@@ -1,0 +1,25 @@
+[package]
+name = "chisl-terminal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chisl-api-types.workspace = true
+chisl-common = { workspace = true, features = ["axum"] }
+chisl-runtime.workspace = true
+chisl-auth.workspace = true
+axum.workspace = true
+dashmap.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+uuid.workspace = true
+portable-pty = "0.6"
+base64.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,28 @@
+[package]
+name = "chisl-channel"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+telegram = ["dep:reqwest"]
+
+[dependencies]
+chisl-common = { workspace = true, features = ["axum"] }
+chisl-db.workspace = true
+chisl-api-types.workspace = true
+chisl-realtime.workspace = true
+chisl-conversation.workspace = true
+chisl-ai-agent.workspace = true
+chisl-extension.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+getrandom.workspace = true
+dashmap.workspace = true
+regex.workspace = true
+reqwest = { workspace = true, optional = true }

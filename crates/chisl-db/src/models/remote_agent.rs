@@ -1,0 +1,55 @@
+use chisl_common::TimestampMs;
+use serde::{Deserialize, Serialize};
+
+/// Row mapping for the `remote_agents` table.
+///
+/// Enum-like fields (`protocol`, `auth_type`, `status`) are stored as TEXT.
+/// The service layer converts them to/from `chisl_common` enums
+/// (`RemoteAgentProtocol`, `RemoteAgentAuthType`, `RemoteAgentStatus`).
+///
+/// Sensitive fields (`auth_token`, `device_public_key`, `device_private_key`,
+/// `device_token`) are stored AES-encrypted; callers handle encryption/decryption.
+///
+/// `plugin_token` is intentionally stored as **plaintext** — see migration
+/// 010. The plugin webserver needs to resolve an incoming bearer token to
+/// the owning agent row via SQL equality, which the random-nonce AES-GCM
+/// scheme used for `auth_token` does not support. The token is a locally
+/// generated UUID that only authorises dial-back to the loopback-bound
+/// plugin webserver, so the residual risk of plaintext-on-disk is local
+/// read access to the SQLite file (which is already a full compromise).
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct RemoteAgentRow {
+    pub id: String,
+    pub name: String,
+    /// One of: "openClaw", "zeroClaw", "acp".
+    pub protocol: String,
+    pub url: String,
+    /// One of: "bearer", "password", "none".
+    pub auth_type: String,
+    /// AES-encrypted authentication token.
+    pub auth_token: Option<String>,
+    /// Whether insecure (non-TLS) connections are allowed.
+    pub allow_insecure: bool,
+    pub avatar: Option<String>,
+    pub description: Option<String>,
+    /// OpenClaw device identifier.
+    pub device_id: Option<String>,
+    /// AES-encrypted Ed25519 public key.
+    pub device_public_key: Option<String>,
+    /// AES-encrypted Ed25519 private key.
+    pub device_private_key: Option<String>,
+    /// AES-encrypted device token.
+    pub device_token: Option<String>,
+    /// One of: "unknown", "connected", "pending", "error".
+    pub status: String,
+    /// Tool-host mode for OpenCode remote agents. One of "local" (default —
+    /// inject client-side fs MCP, deny server tools) or "server" (use the
+    /// OpenCode server's own tools). Ignored by non-opencode protocols.
+    pub tool_host: String,
+    /// Plaintext plugin-channel bearer token (see migration 010). `None`
+    /// means the agent has never asked the service to mint a plugin token.
+    pub plugin_token: Option<String>,
+    pub last_connected_at: Option<TimestampMs>,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
