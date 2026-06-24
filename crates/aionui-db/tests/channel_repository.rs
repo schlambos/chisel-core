@@ -81,7 +81,7 @@ async fn plugin_full_lifecycle() {
 
     // Create two plugins.
     repo.upsert_plugin(&make_plugin("tg-1", "telegram")).await.unwrap();
-    repo.upsert_plugin(&make_plugin("lark-1", "lark")).await.unwrap();
+    repo.upsert_plugin(&make_plugin("slack-1", "slack")).await.unwrap();
     assert_eq!(repo.get_all_plugins().await.unwrap().len(), 2);
 
     // Update status.
@@ -101,7 +101,7 @@ async fn plugin_full_lifecycle() {
     assert_eq!(tg.status.as_deref(), Some("running"));
 
     // Delete one.
-    repo.delete_plugin("lark-1").await.unwrap();
+    repo.delete_plugin("slack-1").await.unwrap();
     assert_eq!(repo.get_all_plugins().await.unwrap().len(), 1);
 }
 

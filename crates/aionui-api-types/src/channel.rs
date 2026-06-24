@@ -24,9 +24,7 @@ pub struct DisablePluginRequest {
 
 /// Request body for `POST /api/channel/plugins/test`.
 ///
-/// Tests plugin credentials without persisting. For platforms that need
-/// additional config (e.g., Lark requires `appId` + `appSecret`),
-/// pass them in `extra_config`.
+/// Tests plugin credentials without persisting.
 #[derive(Debug, Deserialize)]
 pub struct TestPluginRequest {
     pub plugin_id: String,
@@ -37,8 +35,7 @@ pub struct TestPluginRequest {
 
 /// Extra configuration fields for plugin credential testing.
 ///
-/// Used by platforms that require more than a single token
-/// (e.g., Lark needs `app_id` + `app_secret`).
+/// Used by platforms that require more than a single token.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TestPluginExtraConfig {
     #[serde(default)]
@@ -278,9 +275,9 @@ mod tests {
 
     #[test]
     fn test_disable_plugin_request_deserialize() {
-        let raw = json!({ "plugin_id": "lark" });
+        let raw = json!({ "plugin_id": "slack" });
         let req: DisablePluginRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.plugin_id, "lark");
+        assert_eq!(req.plugin_id, "slack");
     }
 
     #[test]
@@ -303,9 +300,9 @@ mod tests {
     }
 
     #[test]
-    fn test_test_plugin_request_lark_with_extra_config() {
+    fn test_test_plugin_request_slack_with_extra_config() {
         let raw = json!({
-            "plugin_id": "lark",
+            "plugin_id": "slack",
             "token": "xxx",
             "extra_config": {
                 "app_id": "cli_abc",
@@ -313,7 +310,7 @@ mod tests {
             }
         });
         let req: TestPluginRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.plugin_id, "lark");
+        assert_eq!(req.plugin_id, "slack");
         let extra = req.extra_config.unwrap();
         assert_eq!(extra.app_id.as_deref(), Some("cli_abc"));
         assert_eq!(extra.app_secret.as_deref(), Some("secret123"));
@@ -329,7 +326,7 @@ mod tests {
     #[test]
     fn test_test_plugin_extra_config_partial() {
         let raw = json!({
-            "plugin_id": "lark",
+            "plugin_id": "slack",
             "token": "xxx",
             "extra_config": { "app_id": "cli_abc" }
         });
@@ -430,9 +427,9 @@ mod tests {
     #[test]
     fn test_plugin_status_response_optional_fields_omitted() {
         let resp = PluginStatusResponse {
-            plugin_id: "lark".into(),
-            plugin_type: "lark".into(),
-            name: "Lark Bot".into(),
+            plugin_id: "slack".into(),
+            plugin_type: "slack".into(),
+            name: "Slack Bot".into(),
             enabled: false,
             status: None,
             last_connected: None,
@@ -544,7 +541,7 @@ mod tests {
         let resp = PairingRequestResponse {
             code: "999999".into(),
             platform_user_id: "user_1".into(),
-            platform_type: "lark".into(),
+            platform_type: "slack".into(),
             display_name: None,
             requested_at: 1700000000000,
             expires_at: 1700000600000,
@@ -578,8 +575,8 @@ mod tests {
     fn test_channel_user_response_optional_fields_omitted() {
         let resp = ChannelUserResponse {
             id: "usr_2".into(),
-            platform_user_id: "lark_1".into(),
-            platform_type: "lark".into(),
+            platform_user_id: "slack_1".into(),
+            platform_type: "slack".into(),
             display_name: None,
             authorized_at: 1700000000000,
             last_active: None,
@@ -656,7 +653,7 @@ mod tests {
         let payload = PairingRequestedPayload {
             code: "000001".into(),
             platform_user_id: "u1".into(),
-            platform_type: "dingtalk".into(),
+            platform_type: "discord".into(),
             display_name: None,
             expires_at: 1700000600000,
         };
@@ -710,7 +707,7 @@ mod tests {
         let payload = UserAuthorizedPayload {
             id: "usr_2".into(),
             platform_user_id: "lk_1".into(),
-            platform_type: "lark".into(),
+            platform_type: "slack".into(),
             display_name: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
@@ -722,9 +719,9 @@ mod tests {
     #[test]
     fn test_plugin_status_response_roundtrip() {
         let resp = PluginStatusResponse {
-            plugin_id: "dingtalk".into(),
-            plugin_type: "dingtalk".into(),
-            name: "DingTalk Bot".into(),
+            plugin_id: "discord".into(),
+            plugin_type: "discord".into(),
+            name: "Discord Bot".into(),
             enabled: true,
             status: Some("ready".into()),
             last_connected: None,

@@ -69,16 +69,6 @@ pub fn channel_routes(state: ChannelRouterState) -> Router {
         .with_state(state)
 }
 
-/// Build the WeChat login SSE route (feature-gated).
-///
-/// Separated from `channel_routes` because it's behind the `weixin` feature.
-#[cfg(feature = "weixin")]
-pub fn weixin_login_route(state: ChannelRouterState) -> Router {
-    Router::new()
-        .route("/api/channel/weixin/login", get(weixin_login_sse))
-        .with_state(state)
-}
-
 // ---------------------------------------------------------------------------
 // Plugin management handlers
 // ---------------------------------------------------------------------------
@@ -95,15 +85,7 @@ async fn get_plugin_status(
         .map(|plugin| (plugin.id.clone(), plugin))
         .collect();
 
-    let builtin_names: [(&str, &str); 7] = [
-        ("telegram", "Telegram"),
-        ("lark", "Lark"),
-        ("dingtalk", "DingTalk"),
-        ("slack", "Slack"),
-        ("discord", "Discord"),
-        ("weixin", "WeChat"),
-        ("wecom", "WeCom"),
-    ];
+    let builtin_names: [(&str, &str); 3] = [("telegram", "Telegram"), ("slack", "Slack"), ("discord", "Discord")];
     let builtin_types: std::collections::HashSet<&str> = builtin_names.iter().map(|(id, _)| *id).collect();
 
     let mut status_map: HashMap<String, ChannelPluginStatusView> = HashMap::new();
@@ -534,37 +516,6 @@ async fn sync_channel_settings(
 }
 
 // ---------------------------------------------------------------------------
-// WeChat login SSE handler
-// ---------------------------------------------------------------------------
-
-/// `GET /api/channel/weixin/login` — start WeChat QR code login SSE stream.
-#[cfg(feature = "weixin")]
-async fn weixin_login_sse(State(_state): State<ChannelRouterState>) -> impl axum::response::IntoResponse {
-    use std::convert::Infallible;
-
-    use axum::response::sse::{Event, KeepAlive, Sse};
-
-    use tokio::sync::mpsc;
-
-    use crate::plugins::weixin::WeixinLoginEvent;
-    use crate::plugins::weixin::weixin_login_stream;
-
-    let rx = weixin_login_stream();
-
-    let sse_stream = futures_util::stream::unfold(rx, |mut rx: mpsc::Receiver<WeixinLoginEvent>| async move {
-        match rx.recv().await {
-            Some(event) => {
-                let sse_event = Event::default().event(event.event_name()).data(event.to_json_data());
-                Some((Ok::<_, Infallible>(sse_event), rx))
-            }
-            None => None,
-        }
-    });
-
-    Sse::new(sse_stream).keep_alive(KeepAlive::default())
-}
-
-// ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
 
@@ -587,25 +538,6 @@ fn build_test_config(req: &TestPluginRequest) -> PluginConfig {
     };
 
     match req.plugin_id.as_str() {
-        "lark" => {
-            if let Some(ref extra) = req.extra_config {
-                credentials.app_id = extra.app_id.clone();
-                credentials.app_secret = extra.app_secret.clone();
-            }
-            credentials.token = Some(req.token.clone());
-        }
-        "dingtalk" => {
-            credentials.client_id = Some(req.token.clone());
-            if let Some(ref extra) = req.extra_config {
-                credentials.client_secret = extra.app_secret.clone();
-            }
-        }
-        "weixin" => {
-            credentials.bot_token = Some(req.token.clone());
-            if let Some(ref extra) = req.extra_config {
-                credentials.account_id = extra.app_id.clone();
-            }
-        }
         _ => {
             // Default: use token field (Telegram)
             credentials.token = Some(req.token.clone());
@@ -724,7 +656,6 @@ fn field_default_entry(value: &serde_json::Value) -> Option<(&str, serde_json::V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aionui_api_types::TestPluginExtraConfig;
 
     #[test]
     fn build_test_config_telegram() {
@@ -735,51 +666,5 @@ mod tests {
         };
         let config = build_test_config(&req);
         assert_eq!(config.credentials.token.as_deref(), Some("bot123:ABC"));
-    }
-
-    #[test]
-    fn build_test_config_lark() {
-        let req = TestPluginRequest {
-            plugin_id: "lark".into(),
-            token: "xxx".into(),
-            extra_config: Some(TestPluginExtraConfig {
-                app_id: Some("cli_abc".into()),
-                app_secret: Some("secret".into()),
-            }),
-        };
-        let config = build_test_config(&req);
-        assert_eq!(config.credentials.app_id.as_deref(), Some("cli_abc"));
-        assert_eq!(config.credentials.app_secret.as_deref(), Some("secret"));
-        assert_eq!(config.credentials.token.as_deref(), Some("xxx"));
-    }
-
-    #[test]
-    fn build_test_config_dingtalk() {
-        let req = TestPluginRequest {
-            plugin_id: "dingtalk".into(),
-            token: "client_id_123".into(),
-            extra_config: Some(TestPluginExtraConfig {
-                app_id: None,
-                app_secret: Some("client_secret_456".into()),
-            }),
-        };
-        let config = build_test_config(&req);
-        assert_eq!(config.credentials.client_id.as_deref(), Some("client_id_123"));
-        assert_eq!(config.credentials.client_secret.as_deref(), Some("client_secret_456"));
-    }
-
-    #[test]
-    fn build_test_config_weixin() {
-        let req = TestPluginRequest {
-            plugin_id: "weixin".into(),
-            token: "bot_token_xyz".into(),
-            extra_config: Some(TestPluginExtraConfig {
-                app_id: Some("account_abc".into()),
-                app_secret: None,
-            }),
-        };
-        let config = build_test_config(&req);
-        assert_eq!(config.credentials.bot_token.as_deref(), Some("bot_token_xyz"));
-        assert_eq!(config.credentials.account_id.as_deref(), Some("account_abc"));
     }
 }

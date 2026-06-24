@@ -52,7 +52,7 @@ The desktop client lives in [`chisel-ui`](https://github.com/schlambos/chisel-ui
 | Tool turns & MCP       | Serializes tool turns per server, bridges the client filesystem over MCP, and manages server-side MCP definitions and OAuth.                        |
 | Approvals & questions  | Surfaces tool-permission and `/question` requests to the client and relays replies back to the agent.                                              |
 | Sub-agents             | Tracks OpenCode child sessions and forwards their lifecycle as subtask events.                                                                     |
-| Channels               | Inbound/outbound integration with WeChat, DingTalk, Lark, and Telegram through a plugin system with pairing sessions.                              |
+| Channels               | Inbound/outbound messaging integration through a plugin system with pairing sessions.                                                               |
 | Team & cron            | Multi-agent team scheduling with a mailbox system, plus a cron engine for scheduled job execution and event triggering.                            |
 | Files & office         | File operations, watching, snapshots, git operations, compression, and Office document preview/conversion (Excel, PPT, Word).                       |
 | Extensions & skills    | Extension registry and hub, plus skill discovery, import, and installation.                                                                        |
@@ -87,10 +87,9 @@ Chislcore can drive agents from messaging platforms through a channel plugin sys
 
 | Channel  | Plugin     |
 | -------- | ---------- |
-| WeChat   | `weixin`   |
-| DingTalk | `dingtalk` |
-| Lark     | `lark`     |
 | Telegram | `telegram` |
+| Slack    | `slack`    |
+| Discord  | `discord`  |
 
 ## Security
 

@@ -532,7 +532,7 @@ mod tests {
     async fn request_pairing_sets_correct_expiry() {
         let (svc, repo, _bc) = make_service();
         let before = now_ms();
-        svc.request_pairing("u1", "lark", None).await.unwrap();
+        svc.request_pairing("u1", "slack", None).await.unwrap();
         let after = now_ms();
 
         let p = &repo.get_pairings()[0];
@@ -560,7 +560,7 @@ mod tests {
     #[tokio::test]
     async fn request_pairing_no_display_name() {
         let (svc, repo, _bc) = make_service();
-        svc.request_pairing("u1", "dingtalk", None).await.unwrap();
+        svc.request_pairing("u1", "discord", None).await.unwrap();
 
         let pairings = repo.get_pairings();
         assert!(pairings[0].display_name.is_none());
@@ -685,7 +685,7 @@ mod tests {
         let expired_row = PairingCodeRow {
             code: "000001".into(),
             platform_user_id: "u2".into(),
-            platform_type: "lark".into(),
+            platform_type: "slack".into(),
             display_name: None,
             requested_at: 1000,
             expires_at: 1001,
@@ -743,7 +743,7 @@ mod tests {
         repo.pairings.lock().unwrap().push(expired_row);
 
         // Insert valid pending code
-        svc.request_pairing("u2", "lark", None).await.unwrap();
+        svc.request_pairing("u2", "slack", None).await.unwrap();
 
         let count = repo.cleanup_expired_pairings(now_ms()).await.unwrap();
         assert_eq!(count, 1);

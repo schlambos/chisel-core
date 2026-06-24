@@ -1,0 +1,42 @@
+Task 8: remove retired China channel plugins from AionCore
+Date: 2026-06-23
+
+Implementation evidence:
+- Removed built-in app/channel feature flags for the removed platforms; default app features now only include telegram.
+- Removed removed-platform plugin modules from aionui-channel and their plugin factory wiring.
+- Removed removed-platform route/listing/test-config wiring; built-in channel status now returns telegram/slack/discord only.
+- Removed removed PluginType and ConversationSource variants and associated formatter/message-service/stream-relay/default-name arms.
+- Deleted removed-platform integration tests and rewrote generic channel fixtures to use slack/discord.
+- Legacy removed-platform plugin rows now skip runtime restore; unparseable conversation source rows parse to None.
+- Removed stale removed-platform references from code/docs under ripgrep's default search set.
+
+Verification commands:
+1. cargo check --workspace
+   Result: PASS (exit 0)
+   Last observed output: Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.25s
+
+2. cargo fmt --all -- --check
+   Result: PASS (exit 0)
+
+3. Removed-name ripgrep scan with the task-specified pattern, followed by exit-code normalization for zero matches.
+   Result: PASS (exit 0; no matches)
+
+4. cargo test -p aionui-channel -p aionui-db -p aionui-conversation
+   Result: PASS (exit 0)
+   Summary observed: aionui-channel/aionui-db/aionui-conversation unit, integration, and doc tests passed.
+
+5. cargo test -p aionui-app --test channel_e2e
+   Result: PASS (exit 0)
+   Summary observed: 23 passed; 0 failed.
+
+6. Required four-package clippy command with warnings denied
+   Result: FAIL outside task scope
+   Symptom: clippy reaches transitive path dependency aionui-terminal through aionui-app and fails on pre-existing warnings in crates/aionui-terminal/src/pty.rs, service.rs, and transport.rs (collapsible_if, needless_range_loop, redundant_closure). No failures were reported in changed channel/db/conversation code before the dependency failure stopped the run.
+
+7. Required four-package cargo test command
+   Result: FAIL outside task scope
+   Symptom: aionui-app auxiliary_e2e::slash_commands_no_active_task expected 404 but got 400. Channel-specific app E2E passed separately after updating expected plugin count from 7 to 3.
+
+8. lsp_diagnostics
+   Result: unavailable
+   Symptom: LSP tool returned "Not connected" for changed source files and lsp_status returned "Not connected".

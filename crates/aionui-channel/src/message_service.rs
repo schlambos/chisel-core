@@ -333,9 +333,6 @@ pub enum StreamAction {
 fn platform_to_source(platform: PluginType) -> ConversationSource {
     match platform {
         PluginType::Telegram => ConversationSource::Telegram,
-        PluginType::Lark => ConversationSource::Lark,
-        PluginType::Dingtalk => ConversationSource::Dingtalk,
-        PluginType::Weixin => ConversationSource::Weixin,
         // Reserved variants default to Aionui
         PluginType::Slack | PluginType::Discord => ConversationSource::Aionui,
     }
@@ -366,9 +363,6 @@ fn channel_conversation_name(
 ) -> String {
     let short = match platform {
         PluginType::Telegram => "tg",
-        PluginType::Lark => "lark",
-        PluginType::Dingtalk => "ding",
-        PluginType::Weixin => "wx",
         PluginType::Slack => "slack",
         PluginType::Discord => "discord",
     };
@@ -403,21 +397,6 @@ mod tests {
     #[test]
     fn platform_to_source_telegram() {
         assert_eq!(platform_to_source(PluginType::Telegram), ConversationSource::Telegram);
-    }
-
-    #[test]
-    fn platform_to_source_lark() {
-        assert_eq!(platform_to_source(PluginType::Lark), ConversationSource::Lark);
-    }
-
-    #[test]
-    fn platform_to_source_dingtalk() {
-        assert_eq!(platform_to_source(PluginType::Dingtalk), ConversationSource::Dingtalk);
-    }
-
-    #[test]
-    fn platform_to_source_weixin() {
-        assert_eq!(platform_to_source(PluginType::Weixin), ConversationSource::Weixin);
     }
 
     #[test]
@@ -646,24 +625,6 @@ mod tests {
     fn conv_name_telegram_aionrs() {
         let name = channel_conversation_name(PluginType::Telegram, "aionrs", None, Some("70880480"));
         assert_eq!(name, "tg-aionrs-70880480");
-    }
-
-    #[test]
-    fn conv_name_lark_acp_no_backend() {
-        let name = channel_conversation_name(PluginType::Lark, "acp", None, Some("abcdef12"));
-        assert_eq!(name, "lark-acp-abcdef12");
-    }
-
-    #[test]
-    fn conv_name_dingtalk_truncates_long_chat_id() {
-        let name = channel_conversation_name(PluginType::Dingtalk, "acp", Some("vertex"), Some("123456789abcdef"));
-        assert_eq!(name, "ding-acp-vertex-12345678");
-    }
-
-    #[test]
-    fn conv_name_weixin_no_chat_id() {
-        let name = channel_conversation_name(PluginType::Weixin, "acp", Some("gemini"), None);
-        assert_eq!(name, "wx-acp-gemini");
     }
 
     #[test]

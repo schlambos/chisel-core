@@ -69,7 +69,7 @@ Each crate owns an independent business domain. They remain loosely coupled from
 | Crate                 | Responsibility                                                                      |
 | --------------------- | ----------------------------------------------------------------------------------- |
 | `aionui-conversation` | Conversation management, messaging, confirmations, streaming responses              |
-| `aionui-channel`      | Multi-channel integration (WeChat, DingTalk, Lark), plugin system, pairing sessions |
+| `aionui-channel`      | Multi-channel plugin system, pairing sessions                                      |
 | `aionui-team`         | Team collaboration, task scheduling, mailbox system                                 |
 | `aionui-cron`         | Scheduled job execution, cron expressions, event triggering                         |
 | `aionui-file`         | File operations, watching, snapshots, git operations, compression                   |

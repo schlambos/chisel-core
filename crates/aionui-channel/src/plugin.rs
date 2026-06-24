@@ -18,8 +18,8 @@ pub struct PluginCallbacks {
 
 /// Abstraction over a platform-specific channel plugin.
 ///
-/// Each IM platform (Telegram, Lark, DingTalk, WeChat) implements this
-/// trait behind a feature flag. The `ChannelManager` holds plugins as
+/// Each IM platform implements this trait behind a feature flag.
+/// The `ChannelManager` holds plugins as
 /// `Box<dyn ChannelPlugin>` for runtime polymorphism.
 ///
 /// ## Lifecycle
@@ -249,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_message_ok() {
-        let mut plugin = MockPlugin::new(PluginType::Lark);
+        let mut plugin = MockPlugin::new(PluginType::Slack);
         let config = make_test_config(Some("token:xyz"));
         plugin.initialize(config, make_test_callbacks()).await.unwrap();
         plugin.start().await.unwrap();
@@ -260,13 +260,13 @@ mod tests {
 
     #[test]
     fn plugin_type_accessor() {
-        let plugin = MockPlugin::new(PluginType::Dingtalk);
-        assert_eq!(plugin.plugin_type(), PluginType::Dingtalk);
+        let plugin = MockPlugin::new(PluginType::Discord);
+        assert_eq!(plugin.plugin_type(), PluginType::Discord);
     }
 
     #[test]
     fn active_user_count_default() {
-        let plugin = MockPlugin::new(PluginType::Weixin);
+        let plugin = MockPlugin::new(PluginType::Slack);
         assert_eq!(plugin.active_user_count(), 0);
     }
 

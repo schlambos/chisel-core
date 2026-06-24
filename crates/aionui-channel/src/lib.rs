@@ -15,6 +15,4 @@ pub mod session;
 pub mod stream_relay;
 pub mod types;
 
-#[cfg(feature = "weixin")]
-pub use routes::weixin_login_route;
 pub use routes::{ChannelRouterState, channel_routes};

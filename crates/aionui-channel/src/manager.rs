@@ -384,8 +384,15 @@ impl ChannelManager {
 
     /// Restores a single plugin from its DB row.
     async fn restore_single_plugin(&self, row: &ChannelPluginRow, factory: &PluginFactory) -> Result<(), ChannelError> {
-        let plugin_type =
-            PluginType::from_str_opt(&row.r#type).ok_or_else(|| ChannelError::InvalidPluginType(row.r#type.clone()))?;
+        let Some(plugin_type) = PluginType::from_str_opt(&row.r#type) else {
+            info!(
+                plugin_id = %row.id,
+                plugin_type = %row.r#type,
+                "skipping extension plugin runtime restore; metadata-only mode"
+            );
+            self.broadcast_status_change(&row.id).await;
+            return Ok(());
+        };
 
         // Decrypt config
         let config_json = decrypt_string(&row.config, &self.encryption_key)
@@ -494,9 +501,6 @@ impl ChannelManager {
     fn default_plugin_name(&self, plugin_type: PluginType) -> String {
         match plugin_type {
             PluginType::Telegram => "Telegram Bot".into(),
-            PluginType::Lark => "Lark Bot".into(),
-            PluginType::Dingtalk => "DingTalk Bot".into(),
-            PluginType::Weixin => "WeChat Bot".into(),
             PluginType::Slack => "Slack Bot".into(),
             PluginType::Discord => "Discord Bot".into(),
         }
@@ -1245,9 +1249,9 @@ mod tests {
                 updated_at: now_ms(),
             });
             plugins.push(ChannelPluginRow {
-                id: "lark".into(),
-                r#type: "lark".into(),
-                name: "Lark Bot".into(),
+                id: "discord".into(),
+                r#type: "discord".into(),
+                name: "Discord Bot".into(),
                 enabled: true,
                 config: "invalid-encrypted-data".into(),
                 status: None,
@@ -1260,15 +1264,13 @@ mod tests {
         let factory = make_factory();
         mgr.restore_plugins(&factory).await.unwrap();
 
-        // Telegram should have started, Lark should have failed
         assert_eq!(mgr.active_plugin_count(), 1);
         assert!(mgr.is_plugin_running("telegram"));
-        assert!(!mgr.is_plugin_running("lark"));
+        assert!(!mgr.is_plugin_running("discord"));
 
-        // Lark should have error status in DB
         let plugins = repo.get_plugins();
-        let lark = plugins.iter().find(|p| p.id == "lark").unwrap();
-        assert_eq!(lark.status.as_deref(), Some("error"));
+        let discord = plugins.iter().find(|p| p.id == "discord").unwrap();
+        assert_eq!(discord.status.as_deref(), Some("error"));
     }
 
     #[tokio::test]
@@ -1290,13 +1292,12 @@ mod tests {
             .await
             .unwrap();
 
-        let lark_config = serde_json::json!({
+        let discord_config = serde_json::json!({
             "credentials": {
-                "appId": "cli_abc",
-                "appSecret": "secret"
+                "token": "discord-token"
             }
         });
-        mgr.enable_plugin("lark", &lark_config, &factory).await.unwrap();
+        mgr.enable_plugin("discord", &discord_config, &factory).await.unwrap();
 
         assert_eq!(mgr.active_plugin_count(), 2);
 
@@ -1384,9 +1385,6 @@ mod tests {
     fn default_plugin_names() {
         let (mgr, _repo, _bc) = make_manager();
         assert_eq!(mgr.default_plugin_name(PluginType::Telegram), "Telegram Bot");
-        assert_eq!(mgr.default_plugin_name(PluginType::Lark), "Lark Bot");
-        assert_eq!(mgr.default_plugin_name(PluginType::Dingtalk), "DingTalk Bot");
-        assert_eq!(mgr.default_plugin_name(PluginType::Weixin), "WeChat Bot");
         assert_eq!(mgr.default_plugin_name(PluginType::Slack), "Slack Bot");
         assert_eq!(mgr.default_plugin_name(PluginType::Discord), "Discord Bot");
     }

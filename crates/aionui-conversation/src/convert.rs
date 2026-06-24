@@ -65,7 +65,7 @@ pub fn row_to_response_with_extra(
         Some(s) => string_to_enum(s)?,
     };
 
-    let source: Option<ConversationSource> = row.source.as_deref().map(string_to_enum).transpose()?;
+    let source: Option<ConversationSource> = row.source.as_deref().and_then(|source| string_to_enum(source).ok());
 
     let model: Option<ProviderWithModel> = row.model.as_deref().map(parse_provider_with_model).transpose()?;
 

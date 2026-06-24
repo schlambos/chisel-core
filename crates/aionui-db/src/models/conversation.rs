@@ -23,7 +23,6 @@ pub struct ConversationRow {
     pub model: Option<String>,
     /// One of: "pending", "running", "finished". NULL in legacy rows.
     pub status: Option<String>,
-    /// One of: "aionui", "telegram", "lark", "dingtalk", "weixin".
     pub source: Option<String>,
     /// Channel isolation ID (e.g. "user:xxx", "group:xxx").
     pub channel_chat_id: Option<String>,

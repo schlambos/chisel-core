@@ -8,16 +8,13 @@ use std::fmt;
 
 /// Platform type identifier for channel plugins.
 ///
-/// Includes the four supported IM platforms and reserved variants
+/// Includes the supported IM platform (Telegram) and reserved variants
 /// for future platforms (`slack`/`discord` per the `assistant_plugins.type`
 /// CHECK constraint in the DB schema).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginType {
     Telegram,
-    Lark,
-    Dingtalk,
-    Weixin,
     /// Reserved variant for future Slack integration.
     Slack,
     /// Reserved variant for future Discord integration.
@@ -28,9 +25,6 @@ impl fmt::Display for PluginType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Telegram => write!(f, "telegram"),
-            Self::Lark => write!(f, "lark"),
-            Self::Dingtalk => write!(f, "dingtalk"),
-            Self::Weixin => write!(f, "weixin"),
             Self::Slack => write!(f, "slack"),
             Self::Discord => write!(f, "discord"),
         }
@@ -42,9 +36,6 @@ impl PluginType {
     pub fn from_str_opt(s: &str) -> Option<Self> {
         match s {
             "telegram" => Some(Self::Telegram),
-            "lark" => Some(Self::Lark),
-            "dingtalk" => Some(Self::Dingtalk),
-            "weixin" => Some(Self::Weixin),
             "slack" => Some(Self::Slack),
             "discord" => Some(Self::Discord),
             _ => None,
@@ -153,21 +144,14 @@ impl PairingStatus {
 
 /// Platform-specific plugin credentials.
 ///
-/// Each platform uses a subset of fields:
-/// - Telegram: `token`
-/// - Lark: `app_id` + `app_secret` + optional `encrypt_key`/`verification_token`
-/// - DingTalk: `client_id` + `client_secret`
-/// - WeChat: `account_id` + `bot_token`
-///
-/// Remaining fields are captured in `extra` for extensibility
+/// Telegram uses `token`; other platforms use their respective fields
+/// or the `extra` map for extensibility
 /// (API Spec `[key: string]: unknown`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginCredentials {
-    // Telegram
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 
-    // Lark
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,19 +161,16 @@ pub struct PluginCredentials {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification_token: Option<String>,
 
-    // DingTalk
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
 
-    // WeChat (iLink Bot)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bot_token: Option<String>,
 
-    // Extensibility
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -467,9 +448,6 @@ mod tests {
     fn plugin_type_serde_roundtrip() {
         let cases = [
             (PluginType::Telegram, "\"telegram\""),
-            (PluginType::Lark, "\"lark\""),
-            (PluginType::Dingtalk, "\"dingtalk\""),
-            (PluginType::Weixin, "\"weixin\""),
             (PluginType::Slack, "\"slack\""),
             (PluginType::Discord, "\"discord\""),
         ];
@@ -484,9 +462,6 @@ mod tests {
     #[test]
     fn plugin_type_display() {
         assert_eq!(PluginType::Telegram.to_string(), "telegram");
-        assert_eq!(PluginType::Lark.to_string(), "lark");
-        assert_eq!(PluginType::Dingtalk.to_string(), "dingtalk");
-        assert_eq!(PluginType::Weixin.to_string(), "weixin");
         assert_eq!(PluginType::Slack.to_string(), "slack");
         assert_eq!(PluginType::Discord.to_string(), "discord");
     }
@@ -494,7 +469,7 @@ mod tests {
     #[test]
     fn plugin_type_from_str_opt() {
         assert_eq!(PluginType::from_str_opt("telegram"), Some(PluginType::Telegram));
-        assert_eq!(PluginType::from_str_opt("lark"), Some(PluginType::Lark));
+        assert_eq!(PluginType::from_str_opt("slack"), Some(PluginType::Slack));
         assert_eq!(PluginType::from_str_opt("unknown"), None);
     }
 
@@ -592,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_credentials_lark() {
+    fn plugin_credentials_extra_fields() {
         let creds = PluginCredentials {
             token: None,
             app_id: Some("cli_abc".into()),
@@ -950,7 +925,7 @@ mod tests {
     fn incoming_message_roundtrip() {
         let msg = UnifiedIncomingMessage {
             id: "m1".into(),
-            platform: PluginType::Lark,
+            platform: PluginType::Slack,
             chat_id: "c1".into(),
             user: UnifiedUser {
                 id: "u1".into(),

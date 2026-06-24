@@ -150,9 +150,8 @@ mod telegram_tests {
     #[test]
     fn factory_returns_none_for_other_types() {
         let factory = telegram_factory();
-        assert!(factory(PluginType::Lark).is_none());
-        assert!(factory(PluginType::Dingtalk).is_none());
-        assert!(factory(PluginType::Weixin).is_none());
+        assert!(factory(PluginType::Slack).is_none());
+        assert!(factory(PluginType::Discord).is_none());
     }
 
     // -- TP-2: Test invalid token -------------------------------------------

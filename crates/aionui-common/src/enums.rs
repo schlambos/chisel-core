@@ -117,9 +117,6 @@ pub enum ConversationStatus {
 pub enum ConversationSource {
     Aionui,
     Telegram,
-    Lark,
-    Dingtalk,
-    Weixin,
 }
 
 /// Type discriminant for messages in a conversation.

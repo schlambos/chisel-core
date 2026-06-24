@@ -171,12 +171,9 @@ fn make_telegram_config() -> serde_json::Value {
     })
 }
 
-fn make_lark_config() -> serde_json::Value {
+fn make_slack_config() -> serde_json::Value {
     serde_json::json!({
-        "credentials": {
-            "app_id": "cli_abc",
-            "app_secret": "secret123"
-        }
+        "credentials": { "token": "slack:valid123" }
     })
 }
 
@@ -550,11 +547,13 @@ async fn enable_multiple_plugins() {
     mgr.enable_plugin("telegram", &make_telegram_config(), &factory)
         .await
         .unwrap();
-    mgr.enable_plugin("lark", &make_lark_config(), &factory).await.unwrap();
+    mgr.enable_plugin("slack", &make_slack_config(), &factory)
+        .await
+        .unwrap();
 
     assert_eq!(mgr.active_plugin_count(), 2);
     assert!(mgr.is_plugin_running("telegram"));
-    assert!(mgr.is_plugin_running("lark"));
+    assert!(mgr.is_plugin_running("slack"));
 
     let statuses = mgr.get_plugin_status().await.unwrap();
     assert_eq!(statuses.len(), 2);
@@ -570,7 +569,9 @@ async fn shutdown_stops_all() {
     mgr.enable_plugin("telegram", &make_telegram_config(), &factory)
         .await
         .unwrap();
-    mgr.enable_plugin("lark", &make_lark_config(), &factory).await.unwrap();
+    mgr.enable_plugin("slack", &make_slack_config(), &factory)
+        .await
+        .unwrap();
 
     mgr.shutdown().await;
     assert_eq!(mgr.active_plugin_count(), 0);

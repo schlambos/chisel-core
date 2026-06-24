@@ -298,12 +298,12 @@ mod tests {
     #[tokio::test]
     async fn agent_config_aionrs_has_no_backend() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "assistant.lark.agent",
+            "assistant.slack.agent",
             r#"{"backend":"aionrs","name":"Aion CLI"}"#,
         )]));
         let svc = ChannelSettingsService::new(repo);
 
-        let config = svc.get_agent_config(PluginType::Lark).await.unwrap();
+        let config = svc.get_agent_config(PluginType::Slack).await.unwrap();
         assert_eq!(config.agent_type, "aionrs");
         assert!(config.backend.is_none());
     }
@@ -326,12 +326,12 @@ mod tests {
     #[tokio::test]
     async fn agent_config_reads_new_format_aionrs() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "assistant.lark.agent",
+            "assistant.slack.agent",
             r#"{"agent_type":"aionrs","name":"Aion CLI"}"#,
         )]));
         let svc = ChannelSettingsService::new(repo);
 
-        let config = svc.get_agent_config(PluginType::Lark).await.unwrap();
+        let config = svc.get_agent_config(PluginType::Slack).await.unwrap();
         assert_eq!(config.agent_type, "aionrs");
         assert!(config.backend.is_none());
     }
@@ -339,12 +339,12 @@ mod tests {
     #[tokio::test]
     async fn agent_config_reads_new_format_openclaw() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "assistant.weixin.agent",
+            "assistant.discord.agent",
             r#"{"agent_type":"openclaw-gateway","name":"OpenClaw"}"#,
         )]));
         let svc = ChannelSettingsService::new(repo);
 
-        let config = svc.get_agent_config(PluginType::Weixin).await.unwrap();
+        let config = svc.get_agent_config(PluginType::Discord).await.unwrap();
         assert_eq!(config.agent_type, "openclaw-gateway");
         assert!(config.backend.is_none());
     }
@@ -363,12 +363,12 @@ mod tests {
     #[tokio::test]
     async fn model_config_reads_from_preferences() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "assistant.weixin.defaultModel",
+            "assistant.discord.defaultModel",
             r#"{"id":"490fdb4e","use_model":"global.anthropic.claude-opus-4-6-v1"}"#,
         )]));
         let svc = ChannelSettingsService::new(repo);
 
-        let config = svc.get_model_config(PluginType::Weixin).await.unwrap().unwrap();
+        let config = svc.get_model_config(PluginType::Discord).await.unwrap().unwrap();
         assert_eq!(config.provider_id, "490fdb4e");
         assert_eq!(config.use_model.as_deref(), Some("global.anthropic.claude-opus-4-6-v1"));
     }

@@ -37,66 +37,6 @@ fn telegram_link() {
     );
 }
 
-// ── Lark / DingTalk: HTML tags → markdown syntax ─────────────────
-
-#[test]
-fn lark_bold_and_code() {
-    let input = "<b>bold</b> and <code>code</code>";
-    let result = format_text_for_platform(input, PluginType::Lark);
-    assert!(result.contains("**bold**"), "got: {result}");
-    assert!(result.contains("`code`"), "got: {result}");
-}
-
-#[test]
-fn lark_link_with_protocol_whitelist() {
-    let input = r#"<a href="https://ok.com">safe</a> <a href="javascript:void(0)">evil</a>"#;
-    let result = format_text_for_platform(input, PluginType::Lark);
-    assert!(result.contains("[safe](https://ok.com)"), "got: {result}");
-    assert!(!result.contains("javascript:"), "got: {result}");
-}
-
-#[test]
-fn lark_strips_unknown_tags() {
-    let input = "<div><b>bold</b></div>";
-    let result = format_text_for_platform(input, PluginType::Lark);
-    assert!(result.contains("**bold**"), "got: {result}");
-    assert!(!result.contains("<div>"), "got: {result}");
-}
-
-#[test]
-fn dingtalk_same_output_as_lark() {
-    let input = "<b>bold</b> and <i>italic</i>";
-    let lark = format_text_for_platform(input, PluginType::Lark);
-    let ding = format_text_for_platform(input, PluginType::Dingtalk);
-    assert_eq!(lark, ding);
-}
-
-// ── WeChat: strip all HTML ───────────────────────────────────────
-
-#[test]
-fn weixin_strips_all_html() {
-    let input = "<b>bold</b> and <a href=\"url\">link</a>";
-    let result = format_text_for_platform(input, PluginType::Weixin);
-    assert!(!result.contains('<'), "got: {result}");
-    assert!(!result.contains('>'), "got: {result}");
-    assert!(result.contains("bold"), "got: {result}");
-    assert!(result.contains("link"), "got: {result}");
-}
-
-#[test]
-fn weixin_decodes_entities() {
-    let input = "&amp; &lt;tag&gt;";
-    let result = format_text_for_platform(input, PluginType::Weixin);
-    assert_eq!(result.trim(), "& tag");
-}
-
-#[test]
-fn weixin_nested_tags() {
-    let input = "<scr<script>ipt>alert(1)</scr</script>ipt>";
-    let result = format_text_for_platform(input, PluginType::Weixin);
-    assert!(!result.contains('<'), "got: {result}");
-}
-
 // ── Fallback: escape HTML ────────────────────────────────────────
 
 #[test]

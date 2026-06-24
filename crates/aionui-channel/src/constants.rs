@@ -31,12 +31,6 @@ pub const TOOL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum characters per Telegram message.
 pub const TELEGRAM_MESSAGE_LIMIT: usize = 4096;
 
-/// Maximum characters per Lark (Feishu) message.
-pub const LARK_MESSAGE_LIMIT: usize = 4000;
-
-/// Maximum characters per DingTalk message.
-pub const DINGTALK_MESSAGE_LIMIT: usize = 4000;
-
 // ---------------------------------------------------------------------------
 // Reconnection (Telegram long-polling)
 // ---------------------------------------------------------------------------
@@ -46,53 +40,6 @@ pub const TELEGRAM_MAX_RECONNECT_ATTEMPTS: u32 = 10;
 
 /// Maximum delay between reconnection attempts (exponential backoff cap).
 pub const TELEGRAM_MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
-
-// ---------------------------------------------------------------------------
-// Lark
-// ---------------------------------------------------------------------------
-
-/// TTL for Lark event deduplication cache.
-pub const LARK_EVENT_DEDUP_TTL: Duration = Duration::from_secs(5 * 60);
-
-// ---------------------------------------------------------------------------
-// DingTalk
-// ---------------------------------------------------------------------------
-
-/// Maximum reconnection attempts for DingTalk WebSocket Stream.
-pub const DINGTALK_MAX_RECONNECT_ATTEMPTS: u32 = 10;
-
-/// Maximum delay between DingTalk reconnection attempts (exponential backoff cap).
-pub const DINGTALK_MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
-
-/// DingTalk access token TTL refresh margin (5 minutes before expiry).
-/// Used by `DingtalkApi` for proactive token refresh.
-#[allow(dead_code)]
-pub const DINGTALK_TOKEN_REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
-
-// ---------------------------------------------------------------------------
-// WeChat (iLink Bot)
-// ---------------------------------------------------------------------------
-
-/// Response timeout for WeChat message processing.
-pub const WEIXIN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-
-/// Maximum file size for WeChat file handling (200 MB).
-pub const WEIXIN_MAX_FILE_SIZE: u64 = 200 * 1024 * 1024;
-
-/// Maximum consecutive failures before WeChat applies longer backoff.
-pub const WEIXIN_MAX_RETRIES: u32 = 3;
-
-/// Short retry delay between WeChat poll attempts on failure.
-pub const WEIXIN_RETRY_DELAY: Duration = Duration::from_secs(2);
-
-/// Longer backoff delay after max consecutive failures.
-pub const WEIXIN_BACKOFF_DELAY: Duration = Duration::from_secs(30);
-
-/// Long-polling timeout for WeChat getupdates (matches iLink API).
-pub const WEIXIN_POLL_TIMEOUT: Duration = Duration::from_secs(35);
-
-/// Timeout for non-polling WeChat API calls.
-pub const WEIXIN_API_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[cfg(test)]
 mod tests {
@@ -129,45 +76,8 @@ mod tests {
     }
 
     #[test]
-    fn lark_message_limit() {
-        assert_eq!(LARK_MESSAGE_LIMIT, 4000);
-    }
-
-    #[test]
-    fn dingtalk_message_limit() {
-        assert_eq!(DINGTALK_MESSAGE_LIMIT, 4000);
-    }
-
-    #[test]
     fn telegram_reconnect_limits() {
         assert_eq!(TELEGRAM_MAX_RECONNECT_ATTEMPTS, 10);
         assert_eq!(TELEGRAM_MAX_RECONNECT_DELAY, Duration::from_secs(30));
-    }
-
-    #[test]
-    fn lark_event_dedup_ttl_is_five_minutes() {
-        assert_eq!(LARK_EVENT_DEDUP_TTL, Duration::from_secs(300));
-    }
-
-    #[test]
-    fn dingtalk_reconnect_limits() {
-        assert_eq!(DINGTALK_MAX_RECONNECT_ATTEMPTS, 10);
-        assert_eq!(DINGTALK_MAX_RECONNECT_DELAY, Duration::from_secs(30));
-    }
-
-    #[test]
-    fn dingtalk_token_refresh_margin() {
-        assert_eq!(DINGTALK_TOKEN_REFRESH_MARGIN, Duration::from_secs(300));
-    }
-
-    #[test]
-    fn weixin_constants() {
-        assert_eq!(WEIXIN_RESPONSE_TIMEOUT, Duration::from_secs(300));
-        assert_eq!(WEIXIN_MAX_FILE_SIZE, 200 * 1024 * 1024);
-        assert_eq!(WEIXIN_MAX_RETRIES, 3);
-        assert_eq!(WEIXIN_RETRY_DELAY, Duration::from_secs(2));
-        assert_eq!(WEIXIN_BACKOFF_DELAY, Duration::from_secs(30));
-        assert_eq!(WEIXIN_POLL_TIMEOUT, Duration::from_secs(35));
-        assert_eq!(WEIXIN_API_TIMEOUT, Duration::from_secs(15));
     }
 }

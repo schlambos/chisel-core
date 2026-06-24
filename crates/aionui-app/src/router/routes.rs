@@ -16,8 +16,6 @@ use aionui_auth::{
     AuthRouterState, AuthState, auth_middleware, auth_routes, csrf_middleware, security_headers_middleware,
 };
 use aionui_channel::channel_routes;
-#[cfg(feature = "weixin")]
-use aionui_channel::weixin_login_route;
 use aionui_conversation::{conversation_ops_routes, conversation_routes};
 use aionui_cron::cron_routes;
 use aionui_extension::{extension_routes, hub_routes, skill_routes};
@@ -190,9 +188,6 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
         skill_routes(states.skill).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
     // Channel routes protected by auth middleware
-    #[cfg(feature = "weixin")]
-    let weixin_login_authenticated = weixin_login_route(states.channel.clone())
-        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
     let channel_authenticated =
         channel_routes(states.channel).route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
@@ -279,10 +274,6 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
         .merge(assistant_authenticated)
         .merge(guide_mcp_authenticated)
         .merge(sidecar_authenticated);
-
-    // Conditionally merge WeChat login SSE route (feature-gated)
-    #[cfg(feature = "weixin")]
-    let router = router.merge(weixin_login_authenticated);
 
     let router = if services.local {
         router

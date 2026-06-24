@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ChannelPluginRow {
     pub id: String,
-    /// Platform type (telegram, lark, dingtalk, weixin, slack, discord).
     #[sqlx(rename = "type")]
     pub r#type: String,
     pub name: String,

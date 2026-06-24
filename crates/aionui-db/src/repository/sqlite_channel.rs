@@ -527,10 +527,10 @@ mod tests {
         repo.upsert_plugin(&sample_plugin()).await.unwrap();
 
         let now = aionui_common::now_ms();
-        let lark = ChannelPluginRow {
-            id: "lark-1".into(),
-            r#type: "lark".into(),
-            name: "Lark Bot".into(),
+        let slack = ChannelPluginRow {
+            id: "slack-1".into(),
+            r#type: "slack".into(),
+            name: "Slack Bot".into(),
             enabled: true,
             config: "{}".into(),
             status: Some("running".into()),
@@ -538,7 +538,7 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        repo.upsert_plugin(&lark).await.unwrap();
+        repo.upsert_plugin(&slack).await.unwrap();
 
         let all = repo.get_all_plugins().await.unwrap();
         assert_eq!(all.len(), 2);

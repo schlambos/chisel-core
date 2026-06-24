@@ -107,7 +107,7 @@ async fn pp1_no_pending_returns_empty() {
 async fn pp2_multiple_pending_returned() {
     let (svc, _repo, _bc) = setup().await;
     svc.request_pairing("u1", "telegram", Some("Alice")).await.unwrap();
-    svc.request_pairing("u2", "lark", Some("Bob")).await.unwrap();
+    svc.request_pairing("u2", "slack", Some("Bob")).await.unwrap();
 
     let pending = svc.get_pending_pairings().await.unwrap();
     assert_eq!(pending.len(), 2);
@@ -124,7 +124,7 @@ async fn pp3_expired_not_in_pending() {
     let expired_row = PairingCodeRow {
         code: "000001".into(),
         platform_user_id: "u2".into(),
-        platform_type: "lark".into(),
+        platform_type: "slack".into(),
         display_name: None,
         requested_at: 1000,
         expires_at: 1001,
@@ -380,5 +380,5 @@ async fn is_user_authorized_different_platform_false() {
     svc.approve_pairing(&code).await.unwrap();
 
     // Same user ID but different platform
-    assert!(!svc.is_user_authorized("tg_42", "lark").await.unwrap());
+    assert!(!svc.is_user_authorized("tg_42", "slack").await.unwrap());
 }
