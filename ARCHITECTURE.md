@@ -1,7 +1,7 @@
 # Architecture
 
-AionCore is the backend server for AionUi, built with Rust (Axum + Tokio + SQLite).
-It provides HTTP REST APIs and WebSocket real-time events for the AionUi desktop client.
+Chislcore is the backend server for Chisl, built with Rust (Axum + Tokio + SQLite).
+It provides HTTP REST APIs and WebSocket real-time events for the Chisl desktop client.
 
 ## Tech Stack
 
@@ -17,25 +17,25 @@ It provides HTTP REST APIs and WebSocket real-time events for the AionUi desktop
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                  aionui-app                      │
+│                  chisl-app                        │
 │         (binary entry, router assembly)          │
 ├──────────┬──────────┬──────────┬────────────────┤
 │conversa- │ channel  │  team    │  ... (domain)  │
 │  tion    │          │          │                 │
 ├──────────┴──────────┴──────────┴────────────────┤
-│   aionui-auth          aionui-realtime           │
-│  (JWT, CSRF, middleware) (WebSocket, events)     │
+│   chisl-auth          chisl-realtime             │
+│  (JWT, CSRF, middleware) (WebSocket, events)      │
 ├─────────────────────────────────────────────────┤
-│  aionui-db    aionui-api-types   aionui-runtime  │
-│ (repositories) (API contracts)  (subprocess/bun) │
+│  chisl-db    chisl-api-types   chisl-runtime      │
+│ (repositories) (API contracts)  (subprocess/bun)  │
 ├─────────────────────────────────────────────────┤
-│       aionui-common          aionui-assets       │
-│  (error types, enums, crypto)  (embedded data)   │
+│       chisl-common          chisl-assets          │
+│  (error types, enums, crypto)  (embedded data)    │
 └─────────────────────────────────────────────────┘
 ```
 
-Dependencies flow strictly downward. Domain crates must not depend on aionui-app,
-and aionui-common has zero internal dependencies.
+Dependencies flow strictly downward. Domain crates must not depend on chisl-app,
+and chisl-common has zero internal dependencies.
 
 ## Crate Hierarchy
 
@@ -45,47 +45,47 @@ The project is organized as a Cargo workspace with 20 crates across four layers:
 
 Depended on by nearly all other crates. Changes require careful impact assessment.
 
-| Crate              | Responsibility                                                                                |
+| Crate             | Responsibility                                                                                |
 | ------------------ | --------------------------------------------------------------------------------------------- |
-| `aionui-common`    | Shared error types (AppError), enums, ID generation, crypto utilities, timestamps, pagination |
-| `aionui-api-types` | All HTTP/WebSocket request and response types — the single source of truth for API contracts  |
-| `aionui-db`        | SQLite database layer, defines Repository traits and implementations                          |
-| `aionui-assets`    | Embedded static assets (agent metadata, prompts)                                              |
-| `aionui-runtime`   | Subprocess spawning, bun runtime resolution, PATH enhancement                                 |
+| `chisl-common`     | Shared error types (AppError), enums, ID generation, crypto utilities, timestamps, pagination |
+| `chisl-api-types`  | All HTTP/WebSocket request and response types — the single source of truth for API contracts  |
+| `chisl-db`          | SQLite database layer, defines Repository traits and implementations                          |
+| `chisl-assets`      | Embedded static assets (agent metadata, prompts)                                              |
+| `chisl-runtime`     | Subprocess spawning, bun runtime resolution, PATH enhancement                                 |
 
 ### Capability
 
 Cross-cutting capabilities used by domain crates.
 
-| Crate             | Responsibility                                                                            |
+| Crate            | Responsibility                                                                            |
 | ----------------- | ----------------------------------------------------------------------------------------- |
-| `aionui-auth`     | JWT authentication, password hashing, CSRF protection, cookie management, auth middleware |
-| `aionui-realtime` | WebSocket connection management, event broadcasting (BroadcastEventBus), message routing  |
+| `chisl-auth`      | JWT authentication, password hashing, CSRF protection, cookie management, auth middleware |
+| `chisl-realtime`  | WebSocket connection management, event broadcasting (BroadcastEventBus), message routing  |
 
 ### Domain
 
 Each crate owns an independent business domain. They remain loosely coupled from each other.
 
-| Crate                 | Responsibility                                                                      |
+| Crate                | Responsibility                                                                      |
 | --------------------- | ----------------------------------------------------------------------------------- |
-| `aionui-conversation` | Conversation management, messaging, confirmations, streaming responses              |
-| `aionui-channel`      | Multi-channel plugin system, pairing sessions                                      |
-| `aionui-team`         | Team collaboration, task scheduling, mailbox system                                 |
-| `aionui-cron`         | Scheduled job execution, cron expressions, event triggering                         |
-| `aionui-file`         | File operations, watching, snapshots, git operations, compression                   |
-| `aionui-office`       | Office document handling (Excel, PPT, Word), preview, conversion                    |
-| `aionui-system`       | System settings, provider management, version checking, model fetching              |
-| `aionui-mcp`          | MCP protocol integration, OAuth, multi-platform adapters                            |
-| `aionui-ai-agent`     | Agent lifecycle management, worker task queues, ACP/auxiliary skills                |
-| `aionui-extension`    | Extension registry, hub management, skill discovery and installation                |
-| `aionui-shell`        | Shell command execution, speech-to-text                                             |
-| `aionui-assistant`    | Assistant configuration and management                                              |
+| `chisl-conversation`  | Conversation management, messaging, confirmations, streaming responses              |
+| `chisl-channel`       | Multi-channel plugin system, pairing sessions                                      |
+| `chisl-team`           | Team collaboration, task scheduling, mailbox system                                 |
+| `chisl-cron`           | Scheduled job execution, cron expressions, event triggering                         |
+| `chisl-file`           | File operations, watching, snapshots, git operations, compression                   |
+| `chisl-office`         | Office document handling (Excel, PPT, Word), preview, conversion                    |
+| `chisl-system`         | System settings, provider management, version checking, model fetching              |
+| `chisl-mcp`            | MCP protocol integration, OAuth, multi-platform adapters                            |
+| `chisl-ai-agent`       | Agent lifecycle management, worker task queues, ACP/auxiliary skills                |
+| `chisl-extension`      | Extension registry, hub management, skill discovery and installation                |
+| `chisl-shell`          | Shell command execution, speech-to-text                                             |
+| `chisl-assistant`      | Assistant configuration and management                                              |
 
 ### Composition
 
-| Crate        | Responsibility                                                          |
-| ------------ | ----------------------------------------------------------------------- |
-| `aionui-app` | Top-level binary entry point, assembles all crates into the Axum server |
+| Crate       | Responsibility                                                          |
+| ----------- | ----------------------------------------------------------------------- |
+| `chisl-app` | Top-level binary entry point, assembles all crates into the Axum server |
 
 ### Dependency Direction Rules
 
@@ -101,12 +101,12 @@ Composition → Domain → Capability → Foundation
 
 ## Domain Crate Anatomy
 
-Every domain crate follows a consistent internal organization. Using aionui-conversation as a reference:
+Every domain crate follows a consistent internal organization. Using chisl-conversation as a reference:
 
 ### Standard Directory Structure
 
 ```
-crates/aionui-conversation/src/
+crates/chisl-conversation/src/
 ├── lib.rs       # Module exports, defines the crate's public API
 ├── routes.rs    # HTTP route handlers
 ├── service.rs   # Business logic layer
@@ -207,7 +207,7 @@ Both `data` and `message` are optional fields, omitted from serialization when n
 }
 ```
 
-All response types are defined in `aionui-api-types` — the single source of truth for API contracts.
+All response types are defined in `chisl-api-types` — the single source of truth for API contracts.
 
 ### HTTP Status Code Mapping
 
@@ -273,7 +273,7 @@ Existing inconsistencies will be unified incrementally during related module ite
 
 ### Repository Trait Pattern
 
-All database access goes through trait abstractions defined in `aionui-db`:
+All database access goes through trait abstractions defined in `chisl-db`:
 
 ```rust
 #[async_trait]
@@ -299,21 +299,21 @@ The project has three categories of data types, each with its own home:
 
 | Type                   | Location                    | Purpose                       | Example                                             |
 | ---------------------- | --------------------------- | ----------------------------- | --------------------------------------------------- |
-| Row models             | `aionui-db/src/models/`     | Database row mapping          | `ConversationRow`                                   |
-| Params objects         | `aionui-db/src/repository/` | Database write parameters     | `UpdateConversationParams`                          |
-| Request/response types | `aionui-api-types`          | API contracts and shared DTOs | `CreateConversationRequest`, `ConversationResponse` |
+| Row models             | `chisl-db/src/models/`      | Database row mapping          | `ConversationRow`                                   |
+| Params objects         | `chisl-db/src/repository/`  | Database write parameters     | `UpdateConversationParams`                          |
+| Request/response types | `chisl-api-types`           | API contracts and shared DTOs | `CreateConversationRequest`, `ConversationResponse` |
 
-**The service layer may directly use types from `aionui-api-types`.** This crate contains
+**The service layer may directly use types from `chisl-api-types`.** This crate contains
 pure data structure definitions with no HTTP framework dependencies, essentially serving as a shared DTO layer.
 
-⚠️ **Critical constraint: `aionui-api-types` must not depend on axum, tower, or any HTTP framework.
+⚠️ **Critical constraint: `chisl-api-types` must not depend on axum, tower, or any HTTP framework.
 Only serde and basic type dependencies are allowed.** This is the prerequisite for services to safely use it.
 
 ### Responsibility Boundaries
 
 - **Handler (routes.rs):** Request validation, parameter extraction, error mapping, constructing `ApiResponse`
 - **Service (service.rs):** Business logic, rule validation, orchestrating Repository calls, Row ↔ Response conversion
-- **Repository (aionui-db):** Pure database operations, no business logic
+- **Repository (chisl-db):** Pure database operations, no business logic
 
 The boundary between Handler and Service is defined by **responsibility**, not by types —
 Handlers do not make business decisions, Services do not handle HTTP concerns.
@@ -322,7 +322,7 @@ Handlers do not make business decisions, Services do not handle HTTP concerns.
 
 Using sqlx's embedded migrations (`sqlx::migrate!()`):
 
-- Migration files are located in `crates/aionui-db/migrations/`
+- Migration files are located in `crates/chisl-db/migrations/`
 - Naming format: `NNN_descriptive_name.sql` (sequential numbering)
 - Migrations run automatically on application startup
 - New tables or schema changes must go through migration files — manual database modifications are forbidden
@@ -332,7 +332,7 @@ Using sqlx's embedded migrations (`sqlx::migrate!()`):
 
 ```
 DbError (database layer)
-  ↓ From trait implementation (aionui-db/src/error.rs)
+  ↓ From trait implementation (chisl-db/src/error.rs)
 AppError (unified error type)
   ↓ IntoResponse implementation
 HTTP response (status code + ErrorResponse JSON)
@@ -352,7 +352,7 @@ The application uses Axum's `with_state()` pattern for dependency injection in t
 
 **Step 1: Centralized service construction (AppServices)**
 
-`aionui-app` defines `AppServices`, which holds all shared dependencies centrally:
+`chisl-app` defines `AppServices`, which holds all shared dependencies centrally:
 
 ```rust
 pub struct AppServices {
@@ -444,7 +444,7 @@ Key points:
 - **AppServices is the sole service construction center** — all Repository instantiation and Service assembly happens here
 - **RouterState holds only necessary dependencies** — each domain's State includes only the services it uses
 - **Dependencies are passed via `Arc<dyn Trait>`** — enables runtime polymorphism and test substitution
-- **Domain crates do not construct their own dependencies** — they only define what they need (RouterState), `aionui-app` handles assembly
+- **Domain crates do not construct their own dependencies** — they only define what they need (RouterState), `chisl-app` handles assembly
 
 ## Security Model
 
@@ -471,11 +471,19 @@ CORS (local mode only, allows any origin)
 - Token extraction priority: `Authorization: Bearer` header → `aionui-session` cookie
 - Supports token blacklist (SHA-256 hash, DashMap storage)
 
+> **Note on retained runtime IDs:** The JWT `iss`/`aud` claim values (`aionui`, `aionui-webui`)
+> and the session cookie name (`aionui-session`) are **deliberately retained** as runtime
+> identifiers for install continuity — existing deployments and persisted sessions must keep
+> validating. They are runtime constants, not crate names, and are intentionally left unchanged.
+
 ### CSRF Protection
 
 Uses the Double Submit Cookie pattern:
 
 - Cookie name: `aionui-csrf-token` (not HttpOnly — JavaScript must read it)
+
+> The `aionui-csrf-token` cookie name is likewise a deliberately-retained runtime identifier
+> (see note above); it is not a crate reference and is intentionally kept stable.
 - Request header: `x-csrf-token`
 - Validation: cookie value must exactly match header value
 - Safe methods (GET, HEAD, OPTIONS) bypass validation
@@ -493,6 +501,9 @@ Uses the Double Submit Cookie pattern:
 | ------------------- | -------- | ---------- | ------------------------- | ------- |
 | `aionui-session`    | ✅       | When HTTPS | Strict(HTTPS) / Lax(HTTP) | 30 days |
 | `aionui-csrf-token` | ❌       | When HTTPS | Strict(HTTPS) / Lax(HTTP) | 30 days |
+
+> The `aionui-session` and `aionui-csrf-token` cookie names above are deliberately-retained
+> runtime identifiers (see note under JWT Authentication) — kept stable for install continuity.
 
 ### Rate Limiting
 
@@ -529,7 +540,7 @@ Enabled via the `--local` startup flag, designed for Electron embedded scenarios
 | ----------------- | ---------------------------------------- | ----------------- | -------------------------------------------- |
 | Unit tests        | `#[cfg(test)]` inline in each `.rs` file | None or Mock      | Function-level logic verification            |
 | Integration tests | `crates/<crate>/tests/`                  | In-memory SQLite  | Service and Repository behavior verification |
-| E2E tests         | `crates/aionui-app/tests/`               | In-memory SQLite  | Full HTTP request chain verification         |
+| E2E tests         | `crates/chisl-app/tests/`                 | In-memory SQLite  | Full HTTP request chain verification         |
 
 ### In-Memory Database
 
@@ -551,7 +562,7 @@ All tests requiring a database use `init_database_memory()`:
 
 ### E2E Test Pattern
 
-`aionui-app/tests/common/mod.rs` provides shared test utilities:
+`chisl-app/tests/common/mod.rs` provides shared test utilities:
 
 ```rust
 // Build the complete application
@@ -614,28 +625,28 @@ Prohibited:
 
 ### Complete Steps for Creating a New Domain Crate
 
-Using `aionui-my-feature` as an example:
+Using `chisl-my-feature` as an example:
 
 **Step 1: Create the crate and register it in the workspace**
 
-1. Create the directory `crates/aionui-my-feature/`
+1. Create the directory `crates/chisl-my-feature/`
 2. Add the workspace member in root `Cargo.toml`:
    ```toml
    members = [
        # ... existing members
-       "crates/aionui-my-feature",
+       "crates/chisl-my-feature",
    ]
    ```
 3. Register in `[workspace.dependencies]` of root `Cargo.toml`:
    ```toml
-   aionui-my-feature = { path = "crates/aionui-my-feature" }
+   chisl-my-feature = { path = "crates/chisl-my-feature" }
    ```
 4. Use `.workspace = true` for shared dependency versions within the crate
 
 **Step 2: Write the crate following the standard structure**
 
 ```
-crates/aionui-my-feature/
+crates/chisl-my-feature/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs        # Export my_feature_routes, MyFeatureService, MyFeatureRouterState
@@ -646,22 +657,22 @@ crates/aionui-my-feature/
     └── my_feature_test.rs
 ```
 
-**Step 3: If database access is needed, add to aionui-db**
+**Step 3: If database access is needed, add to chisl-db**
 
 1. Add Row model in `models/`
 2. Define Repository trait (`I` prefix) and Sqlite implementation in `repository/`
 3. Add migration file in `migrations/` (`NNN_descriptive_name.sql`)
 
-**Step 4: If API types are needed, add to aionui-api-types**
+**Step 4: If API types are needed, add to chisl-api-types**
 
-Define request/response types in `aionui-api-types` to keep API contracts centrally managed.
+Define request/response types in `chisl-api-types` to keep API contracts centrally managed.
 
-**Step 5: Wire into aionui-app**
+**Step 5: Wire into chisl-app**
 
-1. Add dependency in `aionui-app/Cargo.toml`:
+1. Add dependency in `chisl-app/Cargo.toml`:
 
    ```toml
-   aionui-my-feature.workspace = true
+   chisl-my-feature.workspace = true
    ```
 
 2. Add field to `ModuleStates`:
@@ -706,8 +717,8 @@ Before adding a new crate, confirm:
 
 - [ ] Crate internal structure follows the standard pattern (lib/routes/service/state)
 - [ ] Dependency direction is correct (does not depend on upper-layer or same-layer concrete implementations)
-- [ ] Repository trait defined in aionui-db, implementation uses Sqlite prefix
-- [ ] API types defined in aionui-api-types
+- [ ] Repository trait defined in chisl-db, implementation uses Sqlite prefix
+- [ ] API types defined in chisl-api-types
 - [ ] Routes use `/api/` prefix with kebab-case resource names
 - [ ] Includes corresponding test files
 - [ ] WebSocket events follow `domain.camelCaseAction` naming convention
@@ -727,14 +738,19 @@ The backend embeds a bun runtime for self-contained distribution. Relevant env v
   skipping the embedded + `which` fallback chain. Useful for testing
   custom bun builds or bisecting bun regressions.
 
+> The `AIONUI_EMBED_BUN` and `AIONUI_BUN_PATH` environment-variable names are
+> deliberately-retained runtime identifiers (still consumed by `chisl-runtime`'s
+> build script and resolver) — kept stable for install/CI continuity, not renamed
+> with the crate rebrand.
+
 The bun version is pinned in
-`crates/aionui-runtime/Cargo.toml` under
-`[package.metadata.aionui-runtime] bun_version = "..."`. Upgrading bun is
+`crates/chisl-runtime/Cargo.toml` under
+`[package.metadata.chisl-runtime] bun_version = "..."`. Upgrading bun is
 a one-line change — no source edits required.
 
 ### Startup PATH Enhancement
 
-`fn main()` calls `aionui_runtime::enhance_process_path()` **before** the
+`fn main()` calls `chisl_runtime::enhance_process_path()` **before** the
 tokio runtime starts, so every downstream `which::which(...)` and
 `Command::new(...)` — including the existing spawn sites across the
 workspace — inherits an enriched `PATH`. Three layers are merged in priority
@@ -750,8 +766,8 @@ logged at `info` level).
 ### Subprocess Spawn Builder
 
 New subprocess spawn sites should go through
-`aionui_runtime::Builder::agent(program)` (for long-running agent CLIs
-whose stdio the caller owns) or `aionui_runtime::Builder::clean_cli(program)`
+`chisl_runtime::Builder::agent(program)` (for long-running agent CLIs
+whose stdio the caller owns) or `chisl_runtime::Builder::clean_cli(program)`
 (for short-lived tools whose output we parse). Both set
 `kill_on_drop(true)` and strip `NODE_OPTIONS`/`NODE_INSPECT`/`NODE_DEBUG`/
 `CLAUDECODE` so debug-profile env doesn't leak into the child.

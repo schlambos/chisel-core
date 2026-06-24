@@ -1,4 +1,4 @@
-# `aionui-opencode-conformance`
+# `chisl-opencode-conformance`
 
 Test-only crate that pins the OpenCode SSE protocol surface Chisl's
 remote-OpenCode adapter assumes. It is **not** wired into any runtime path; its
@@ -7,7 +7,7 @@ upstream protocol drift fails CI at PR time instead of surfacing as silent
 rendering bugs in production.
 
 The companion design document is
-[`aionui-ai-agent/src/manager/remote/PROTOCOL.md`](../aionui-ai-agent/src/manager/remote/PROTOCOL.md);
+[`chisl-ai-agent/src/manager/remote/PROTOCOL.md`](../chisl-ai-agent/src/manager/remote/PROTOCOL.md);
 the recorded fixtures live in `fixtures/`; the integration test that exercises
 this library is in `tests/event_parsing.rs`.
 
@@ -25,7 +25,7 @@ re-exported as `OPENCODE_SDK_VERSION` (and friends). The pin is asserted by:
   `devDependencies."@opencode-ai/sdk"` entry in
   `<chisl-root>/AionUi/package.json` matches the JSON pin.
 
-If any of the three checks fails, `cargo test -p aionui-opencode-conformance`
+If any of the three checks fails, `cargo test -p chisl-opencode-conformance`
 fails. The CI workflow
 `<chisl-root>/AionCore/.github/workflows/conformance.yml` runs the suite on every
 PR, so a bumped SDK that only updates the JSON, only `package.json`, or only
@@ -36,4 +36,4 @@ the same JSON, and the `--check` exit code (2) gates `bun run types:sync-opencod
 in CI for the renderer pipeline.
 
 To bump the SDK see the step-by-step procedure in
-[`PROTOCOL.md` → Version pin contract](../aionui-ai-agent/src/manager/remote/PROTOCOL.md#version-pin-contract).
+[`PROTOCOL.md` → Version pin contract](../chisl-ai-agent/src/manager/remote/PROTOCOL.md#version-pin-contract).
