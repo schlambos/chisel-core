@@ -1,0 +1,22 @@
+Task 10: AionCore re-point kept-provider endpoints; confirm no removed-provider fetchers
+
+Changes:
+- crates/aionui-system/src/model_fetcher/fetchers.rs
+  - Added DASHSCOPE_INTL_COMPAT_BASE_URL = https://dashscope-intl.aliyuncs.com/compatible-mode/v1.
+  - Routed qwen and dashscope model fetches through the international Dashscope-compatible /models endpoint.
+  - Kept minimax hardcoded model fetcher unchanged.
+  - Kept dashscope-coding fetcher and changed its validation request to the international Dashscope-compatible /chat/completions endpoint.
+- crates/aionui-system/src/model_fetcher/mod.rs
+  - Marked dashscope and qwen as non-auto-fix provider fetchers so the international endpoint path is not overwritten by generic URL probing.
+
+Removed-provider scan:
+- Command: rg -n --glob '!target/**' --glob '!*.lock' --glob '!opencode-backup.json' --glob '!data/builtin-skills/**' --glob '!crates/aionui-app/assets/builtin-skills/**' '(?i)(stepfun|volces|qianfan|baidubce|hunyuan|modelscope|ctyun|lingyiwanwu|01\.ai|zero[-_]?one)'
+- Result: removed-provider grep: 0 matches
+
+Verification:
+- rustfmt --check crates/aionui-system/src/model_fetcher/fetchers.rs crates/aionui-system/src/model_fetcher/mod.rs: exit 0
+- cargo check -p aionui-system -p aionui-mcp: exit 0
+- cargo test -p aionui-system: exit 0; 145 unit tests, 6 connection tests, 17 model-fetch route tests, 15 protocol route tests, 19 provider route tests, 18 settings route tests, 15 system-info route tests all passed.
+
+LSP:
+- lsp_diagnostics could not run because the LSP connection was closed and lsp_status reported Not connected.

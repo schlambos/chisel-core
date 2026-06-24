@@ -123,7 +123,15 @@ fn validate_anonymous_request(req: &FetchModelsAnonymousRequest) -> Result<(), A
 fn supports_url_fix(platform: &str) -> bool {
     !matches!(
         platform,
-        "anthropic" | "claude" | "gemini" | "bedrock" | "vertex-ai" | "minimax" | "dashscope-coding"
+        "anthropic"
+            | "claude"
+            | "gemini"
+            | "bedrock"
+            | "vertex-ai"
+            | "minimax"
+            | "dashscope"
+            | "qwen"
+            | "dashscope-coding"
     )
 }
 
@@ -182,6 +190,8 @@ mod tests {
         assert!(!supports_url_fix("bedrock"));
         assert!(!supports_url_fix("vertex-ai"));
         assert!(!supports_url_fix("minimax"));
+        assert!(!supports_url_fix("dashscope"));
+        assert!(!supports_url_fix("qwen"));
         assert!(!supports_url_fix("dashscope-coding"));
     }
 

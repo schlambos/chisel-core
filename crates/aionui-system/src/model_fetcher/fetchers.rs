@@ -8,6 +8,7 @@ use tracing::warn;
 use super::FetchConfig;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DASHSCOPE_INTL_COMPAT_BASE_URL: &str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
 
 /// Dispatch to the appropriate platform-specific fetcher.
 pub(crate) async fn fetch_for_platform(
@@ -21,7 +22,8 @@ pub(crate) async fn fetch_for_platform(
         "vertex-ai" => Ok(vertex_ai_models()),
         "new-api" => fetch_new_api(client, &config.base_url, &config.api_key).await,
         "minimax" => Ok(minimax_models()),
-        "dashscope-coding" => fetch_dashscope_coding(client, &config.base_url, &config.api_key).await,
+        "dashscope" | "qwen" => fetch_qwen_dashscope(client, &config.api_key).await,
+        "dashscope-coding" => fetch_dashscope_coding(client, &config.api_key).await,
         _ => fetch_openai_compatible(client, &config.base_url, &config.api_key).await,
     }
 }
@@ -276,13 +278,13 @@ fn ensure_v1_path(base_url: &str) -> String {
 
 const DASHSCOPE_MODELS: &[&str] = &["qwen-coder-plus", "qwen-coder-turbo"];
 
-async fn fetch_dashscope_coding(
-    client: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
-) -> Result<Vec<ModelInfo>, AppError> {
+async fn fetch_qwen_dashscope(client: &reqwest::Client, api_key: &str) -> Result<Vec<ModelInfo>, AppError> {
+    fetch_openai_compatible(client, DASHSCOPE_INTL_COMPAT_BASE_URL, api_key).await
+}
+
+async fn fetch_dashscope_coding(client: &reqwest::Client, api_key: &str) -> Result<Vec<ModelInfo>, AppError> {
     // Validate key by sending a minimal chat completion request
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let url = format!("{DASHSCOPE_INTL_COMPAT_BASE_URL}/chat/completions");
     let body = serde_json::json!({
         "model": DASHSCOPE_MODELS[0],
         "messages": [{"role": "user", "content": "hi"}],
@@ -374,6 +376,14 @@ mod tests {
         let models = minimax_models();
         assert_eq!(models.len(), 3);
         assert_eq!(models[0], ModelInfo::Id("MiniMax-Text-01".into()));
+    }
+
+    #[test]
+    fn dashscope_intl_base_url_is_openai_compatible() {
+        assert_eq!(
+            DASHSCOPE_INTL_COMPAT_BASE_URL,
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        );
     }
 
     #[test]
