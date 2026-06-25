@@ -40,7 +40,7 @@ Chislcore is the backend half of [Chisl](https://github.com/schlambos/chisel-ui)
 
 It is built on **Axum** (HTTP), **Tokio** (async runtime), and **SQLite via sqlx** (persistence), and embeds a **bun** runtime so it can spawn JS-based agent tooling without a system install.
 
-The desktop client lives in [`chisel-ui`](https://github.com/schlambos/chisel-ui). For the product pitch, start there.
+The desktop client lives in [`Chisl`](https://github.com/schlambos/chisel-ui). For the product pitch, start there.
 
 ## Features
 
@@ -78,7 +78,7 @@ Conversations are routed to an agent manager by protocol. Each manager implement
 | --------------- | -------------------------------------------------------------------------------------------------------------- |
 | REST            | All routes under the `/api/` prefix with kebab-case resource names; unified `ApiResponse<T>` / `ErrorResponse`. |
 | Realtime        | A single `/ws` endpoint; messages are `{ name: "domain.action", data }`, broadcast via the event bus.           |
-| Contracts       | Every request/response type lives in `aionui-api-types` — the single source of truth, with no HTTP-framework deps. |
+| Contracts       | Every request/response type lives in `chisl-api-types` — the single source of truth, with no HTTP-framework deps. |
 | Errors          | `AppError` variants map to stable status codes and error codes (e.g. `NotFound` → 404 `NOT_FOUND`).             |
 
 ## Channels
@@ -95,8 +95,8 @@ Chislcore can drive agents from messaging platforms through a channel plugin sys
 
 | Area          | Behavior                                                                                                            |
 | ------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Sessions      | JWT (HMAC-SHA256, 24h), extracted from `Authorization: Bearer` or the `aionui-session` cookie; supports a blacklist. |
-| CSRF          | Double Submit Cookie (`aionui-csrf-token` cookie vs `x-csrf-token` header); safe methods and login routes exempt.   |
+| Sessions      | JWT (HMAC-SHA256, 24h), extracted from `Authorization: Bearer` or the `chisl-session` cookie; supports a blacklist. |
+| CSRF          | Double Submit Cookie (`chisl-csrf-token` cookie vs `x-csrf-token` header); safe methods and login routes exempt.   |
 | Passwords     | bcrypt (cost 12), with timing-attack and user-enumeration protection.                                               |
 | Rate limiting | Tiered by client IP / user — auth (5/15min), public API (60/min), sensitive actions (20/min).                       |
 | Local mode    | `--local` skips JWT/CSRF, opens CORS, and injects a fixed `system_default_user` — intended for the embedded desktop app. |
@@ -106,12 +106,12 @@ Chislcore can drive agents from messaging platforms through a channel plugin sys
 A Cargo workspace of 21 crates across four layers, with dependencies flowing strictly downward:
 
 ```
-Composition  →  aionui-app                         (binary, router assembly)
+Composition  →  chisl-app                         (binary, router assembly)
 Domain       →  conversation, channel, team, cron, file, office,
                 system, mcp, ai-agent, extension, shell, assistant
-Capability   →  aionui-auth (JWT/CSRF)   aionui-realtime (WebSocket/events)
-Foundation   →  aionui-common  aionui-api-types  aionui-db  aionui-assets
-                aionui-runtime  aionui-lsp
+Capability   →  chisl-auth (JWT/CSRF)   chisl-realtime (WebSocket/events)
+Foundation   →  chisl-common  chisl-api-types  chisl-db  chisl-assets
+                chisl-runtime  chisl-lsp
 ```
 
 Domain crates are loosely coupled and interact only through trait abstractions. Database access goes through `I*Repository` traits (with `Sqlite*` implementations); migrations are embedded and run on startup. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full layout and [`AGENTS.md`](./AGENTS.md) for conventions.
@@ -127,12 +127,12 @@ cargo build --workspace
 Run the server (defaults to `127.0.0.1:25808`):
 
 ```bash
-cargo run --bin aioncore -- --local
+cargo run --bin chislcore -- --local
 ```
 
-Useful flags: `--host`, `--port`, `--data-dir <path>`, `--work-dir <path>`, `--log-level "info,aionui_mcp=trace"`. `--local` is the embedded mode the desktop app uses (no auth, open CORS).
+Useful flags: `--host`, `--port`, `--data-dir <path>`, `--work-dir <path>`, `--log-level "info,chisl_mcp=trace"`. `--local` is the embedded mode the desktop app uses (no auth, open CORS).
 
-> When run alongside the desktop client, `chisel-ui` resolves the `aioncore` binary (the shipped executable name) from `PATH` and launches it for you — you usually only run `bun run dev` in `chisel-ui` during development.
+> When run alongside the desktop client, `Chisl` resolves the `chislcore` binary (the shipped executable name) from `PATH` and launches it for you — you usually only run `bun run dev` in `Chisl` during development.
 
 ## CLI
 
