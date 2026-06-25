@@ -1,5 +1,108 @@
 # Changelog
 
+## [0.1.12](https://github.com/schlambos/chisel-core/compare/v0.1.11...v0.1.12) (2026-06-25)
+
+
+### Features
+
+* **ledger:** add tool-call restore plan foundation ([88361f7](https://github.com/schlambos/chisel-core/commit/88361f7a4fc55d497e10d5e6e0379dc4b8301616))
+* **ledger:** expose tool-call restore plan route ([8e36d8b](https://github.com/schlambos/chisel-core/commit/8e36d8b295372ea4c5475a267b0dcdf0ad244831))
+* **local-opencode:** Phase 4 process manager for local opencode serve instances ([1d56501](https://github.com/schlambos/chisel-core/commit/1d56501e4ffd5a379e29b81d0af7d5df9f881fc9))
+* **lsp:** LSP session lifecycle hardening + remove broken PowerShell entry ([5a1c59f](https://github.com/schlambos/chisel-core/commit/5a1c59ff2a546295220d284b5f1c4802705f5b3f))
+* **opencode:** extend remote provider auth routes for M12 API parity ([48f1ed3](https://github.com/schlambos/chisel-core/commit/48f1ed32985f9ec696901644f77e4ad11405c2e5))
+* **opencode:** first-class remote API integration (C03, M12, M13, M20, V2 context) ([b15e930](https://github.com/schlambos/chisel-core/commit/b15e930e9ae43062dd6e1e4eb6d6bd3cd234a8d2))
+* **P0:** pin OpenCode SSE protocol surface + recorded conformance suite + CI gate ([1d3cdf9](https://github.com/schlambos/chisel-core/commit/1d3cdf9c87f19c6ad2dcd943cfe473c110f5b0e5))
+* **P1.1:** canonical stop/idle/retry/error SSE events + synced-row workspace fix ([e488b50](https://github.com/schlambos/chisel-core/commit/e488b50d8b0e7b180328f320e4b078b95045b441))
+* **P1.2a:** question/permission reconcile + metadata + cross-client settle + subagent timeout/inheritance/pending-prompts aggregator ([0617a50](https://github.com/schlambos/chisel-core/commit/0617a5037fa3518b2e37ed48ca9018174e71c8be))
+* **permissions:** resubmit-shell + conversation-scoped permission sync endpoints ([591174f](https://github.com/schlambos/chisel-core/commit/591174f4de9441036c194bcb20250af01b6c94d9))
+* persist and resume remote OpenCode sessions ([47274f4](https://github.com/schlambos/chisel-core/commit/47274f4716c153bd09eb41616f7aefbc2099f104))
+* **phase-3:** Voice Mode, Background Processes, SideCars, and Event Reactions ([9293eb0](https://github.com/schlambos/chisel-core/commit/9293eb08b7625d9ef44f9cae0fa838f37ff08264))
+* **plugin:** add streaming-latency trace instrumentation for Phase 2 Metric 3 ([7a6e403](https://github.com/schlambos/chisel-core/commit/7a6e4030856286fc89d4097c24e475473f7a3fa0))
+* **plugin:** eagerly start plugin webserver on first remote agent session ([29327a2](https://github.com/schlambos/chisel-core/commit/29327a2997734f5ff020960495af2b3624c42ad5))
+* **remote/opencode:** /question flow via Approvals queue (M09) ([faccf98](https://github.com/schlambos/chisel-core/commit/faccf985cc2df4c331b4e3f6996b36ac27283bef))
+* **remote/opencode:** backfill child sessions on reconnect (M08) ([d0d602b](https://github.com/schlambos/chisel-core/commit/d0d602b652a7b5d32b220e73d2e00f883be14f8d))
+* **remote/opencode:** discover server agents as selectable modes (M10) ([fa636a4](https://github.com/schlambos/chisel-core/commit/fa636a465d91375d2dbb23a49a89ab3264c4aa1c))
+* **remote/opencode:** full SSE event coverage with classified fallback (E02) ([562e9df](https://github.com/schlambos/chisel-core/commit/562e9dff6fd88a5944705209c41049a25accc54f))
+* **remote/opencode:** global config read/write + effective-config endpoint (M19) ([c47671b](https://github.com/schlambos/chisel-core/commit/c47671bb6466a307ad76bbb1613a477e11217f2b))
+* **remote/opencode:** log forwarding + LSP/VCS endpoints (M14/M15/M16) ([546c740](https://github.com/schlambos/chisel-core/commit/546c740f2a3847cb1c10258616f3c5b6835c242b))
+* **remote/opencode:** message edit/delete groundwork + endpoints (M07) ([97ddafa](https://github.com/schlambos/chisel-core/commit/97ddafa16dbffcdd9258351f80c39b8f3d7616bd))
+* **remote/opencode:** per-agent health probe endpoint (A02) ([8535432](https://github.com/schlambos/chisel-core/commit/85354325bfe6e2e1ac9bb5b292d18513f66a6c60))
+* **remote/opencode:** propagate conversation rename/archive to server session (M06) ([6c3333b](https://github.com/schlambos/chisel-core/commit/6c3333be0fc2e8f342b72c18717eef5ddfe597e6))
+* **remote/opencode:** skills catalog, fork/revert/diff, share/summarize, inject_skills (M10/M03/M04/M09) ([93299bd](https://github.com/schlambos/chisel-core/commit/93299bdee890b2d324c68c94932ea5c327614c4e))
+* **remote/opencode:** SSE heartbeat + supervised auto-reconnect (C02) ([1011292](https://github.com/schlambos/chisel-core/commit/101129247e81c619a53e83bcfeda6f8356f0fac1))
+* **remote/opencode:** stream tool output and fix parallel permissions ([2d7f297](https://github.com/schlambos/chisel-core/commit/2d7f297d04e7953407b233c27bf3f22fd6d323a1))
+* **remote/opencode:** subscribe to /global/event + unwrap payload (C01+E01) ([fbcee5f](https://github.com/schlambos/chisel-core/commit/fbcee5fd02081deb944a1150f9869212c053c5e6))
+* **remote/opencode:** support generic basic auth (A01) ([f283ffb](https://github.com/schlambos/chisel-core/commit/f283ffb7ab03a1b12cc1a47bb765aea5e8ecd95a))
+* **remote/opencode:** tool-host local/server mode (C04) ([b106e51](https://github.com/schlambos/chisel-core/commit/b106e512ca8a7dca3d1e6229946c24345f4d3baa))
+* **remote/opencode:** V2 session API + sync collaboration (M20/M22) ([6dbb164](https://github.com/schlambos/chisel-core/commit/6dbb164241886dfac9c043b1a48bd65294e176fe))
+* **remote:** A1 directory-scoped reply hotfix + A5 connect error classification and server-tools workspace fail-fast ([a403cfa](https://github.com/schlambos/chisel-core/commit/a403cfa7fc2d5f74392e1bc2c49e5d9f775ed21c))
+* **remote:** bridge client filesystem to remote OpenCode via MCP ([7064839](https://github.com/schlambos/chisel-core/commit/7064839e0dcf47cb8e8093e921e0d70574230362))
+* **remote:** deny local tool permissions and inject workspace system hint for remote agents ([754345f](https://github.com/schlambos/chisel-core/commit/754345f70009c35daf275f1ffaa1ea73f2010a20))
+* **remote:** emit producing model id per OpenCode assistant message ([b8e220e](https://github.com/schlambos/chisel-core/commit/b8e220e1aa7f993a2b75002bd68cf4178deba2be))
+* **remote:** map OpenCode todo.updated events to Plan stream events ([3dcabc3](https://github.com/schlambos/chisel-core/commit/3dcabc3e2100de2b36699699f3f5629935bae6d0))
+* **remote:** plugin webserver control-plane channel for Chisl OpenCode plugin ([2604135](https://github.com/schlambos/chisel-core/commit/26041356515571f7ae7f6022a29566af73d2755f))
+* **remote:** run shell commands locally via MCP with user confirmation ([49cf9d3](https://github.com/schlambos/chisel-core/commit/49cf9d304ed4e9fde74e04472af9633553bfbcbc))
+* **remote:** synthesize acp_context_usage for OpenCode turns ([ade38d2](https://github.com/schlambos/chisel-core/commit/ade38d2094889192739c1928aff36f74151eaef4))
+* **remote:** verify and self-heal local fs MCP reachability ([d595d9d](https://github.com/schlambos/chisel-core/commit/d595d9dd606945aebb80bf3ded6cd9fe6e61ee4b))
+* **revert:** add per-hunk/per-file edit revert and verify hook ([b10bc42](https://github.com/schlambos/chisel-core/commit/b10bc42aca43fec5437df19d2d1549817b13f4db))
+* surface OpenCode slash commands via GET /command ([e9b2df6](https://github.com/schlambos/chisel-core/commit/e9b2df6e8a5968fabd17a758db3c8549a6f5baf1))
+* **sync:** background session listing uses paginated V2 API ([bee8f00](https://github.com/schlambos/chisel-core/commit/bee8f008c9506b2218bb19bb59e176f1c17dd311))
+* **Task14.1:** add opencode_tool_snapshots DB layer ([7b45ac2](https://github.com/schlambos/chisel-core/commit/7b45ac29c45d3c6287f0b01f09dbbea09ef8f38d))
+* **Task14.2:** per-tool-call snapshot Git layer ([204e487](https://github.com/schlambos/chisel-core/commit/204e4875dfa88ebdcc8fa6515550f8f06e08b4c5))
+* **Task14.3:** hook local_fs_mcp and expose revert-tool-call route ([9ad0f57](https://github.com/schlambos/chisel-core/commit/9ad0f573a55a4ecafa0bda6adca8fdc06aefb957))
+* **terminal:** migrate terminal backend to Rust portable-pty ([afb15e0](https://github.com/schlambos/chisel-core/commit/afb15e04bbf9434917aa7e7076cba72f8635cc14))
+* **vcs:** add workspace VCS status and init routes ([2bd89a5](https://github.com/schlambos/chisel-core/commit/2bd89a5ebceff17bcb7edb7d819ad413159dbcc0))
+
+
+### Bug Fixes
+
+* **aionrs:** drop orphaned tool_call history on session resume (ELECTRON-1HV, ELECTRON-1J6) ([#330](https://github.com/schlambos/chisel-core/issues/330)) ([880722f](https://github.com/schlambos/chisel-core/commit/880722fd3b2f4e37fa5654cc5ed210cddbfd14b5))
+* **aionrs:** preserve tool call correlation across aborts ([#335](https://github.com/schlambos/chisel-core/issues/335)) ([d65c8ed](https://github.com/schlambos/chisel-core/commit/d65c8ed49be4a558aff99e907e359264d6729d1c))
+* **conversation:** persist revert extra and broadcast listChanged ([27009ff](https://github.com/schlambos/chisel-core/commit/27009ffe5e1221b45ffad0b0d7e356f0532281f3))
+* **conversation:** unify provider/model resolution across send/cron paths (ELECTRON-1HX, ELECTRON-1HM) ([#326](https://github.com/schlambos/chisel-core/issues/326)) ([71e275a](https://github.com/schlambos/chisel-core/commit/71e275ae3295d88c9da5eacf9f959d4683b4043d))
+* **events:** add missing ErrorEventData fields to test constructors ([79d4586](https://github.com/schlambos/chisel-core/commit/79d458608df21cd7fd3012d9a443f5a7a270fb6d))
+* filter remote OpenCode SSE events by owning session id ([59f7a88](https://github.com/schlambos/chisel-core/commit/59f7a882d14e6c0e25ec5374e0b6487f187c447b))
+* **mcp:** improve local fs MCP reliability and model context ([4578454](https://github.com/schlambos/chisel-core/commit/4578454cb2035ab7bed36cdb70e5831683990084))
+* **opencode:** stop sending unsupported v2 prompt override fields ([85dc28a](https://github.com/schlambos/chisel-core/commit/85dc28a81e5a587af179de3fcd8cba90f9de0043))
+* **plugin:** probe-hello guard, opencode-entry snippet, bearer auth, fixed port 64921 ([09c851b](https://github.com/schlambos/chisel-core/commit/09c851b06d1c4ec14faf3d56dbd0b814642c9137))
+* **remote/opencode:** collapse fs MCP to single slot + serialize turns ([92dfbfa](https://github.com/schlambos/chisel-core/commit/92dfbfa514c7b7325830b6e76817f03a2bd458d6))
+* **remote/opencode:** persist sessionKey at session-create to prevent duplicate conversation (F02) ([f091f17](https://github.com/schlambos/chisel-core/commit/f091f17d1c6eb71dbfa517b88f1107902a7fec38))
+* **remote/opencode:** silence too_many_arguments + cover new event in test match ([5a6f2aa](https://github.com/schlambos/chisel-core/commit/5a6f2aa26de5ec808f37b82b0c7b1da46d54ad1e))
+* **remote/opencode:** use canonical /permission/{id}/reply endpoint ([746a4d2](https://github.com/schlambos/chisel-core/commit/746a4d28303fc3d8169f68ed579c4b0b6fabcd53))
+* **remote:** re-register local fs MCP on OpenCode session resume ([f8e43c2](https://github.com/schlambos/chisel-core/commit/f8e43c241759f4181250c33c88c33fb4a895b4e1))
+* **sidecar:** security review fixes — stream responses, warn on non-loopback bind, strip Connection-listed headers, drop Referer ([4578baf](https://github.com/schlambos/chisel-core/commit/4578baf60b06f731b43dd96ddb9c027c3aca8921))
+* split streamed message segments around tool boundaries ([#339](https://github.com/schlambos/chisel-core/issues/339)) ([476b1cc](https://github.com/schlambos/chisel-core/commit/476b1cc86f2adef8998477a666809dda50afca3e))
+* **sync:** dispatch replayed sync events to renderer after SSE reconnect ([5682813](https://github.com/schlambos/chisel-core/commit/5682813440b8500dc9249fdeef7a31f03a4bdc61))
+* **team-mcp:** use fixed server name to stay within 64-char tool limit (ELECTRON-1JY) ([#336](https://github.com/schlambos/chisel-core/issues/336)) ([eaa3aa0](https://github.com/schlambos/chisel-core/commit/eaa3aa098816191d8531ef0f1de12292e5e47cc5))
+
+
+### Performance Improvements
+
+* **remote/opencode:** batch SSE message.part.delta on 16 ms frame (E03) ([09202f0](https://github.com/schlambos/chisel-core/commit/09202f0132641d34fcc6ec8eefa2bb90eeff1de9))
+
+
+### Code Refactoring
+
+* **brand:** rename aionui-* crates to chisl-* ([0bcb228](https://github.com/schlambos/chisel-core/commit/0bcb22889abecb6f55b95e01e7fc13ceab1feab8))
+* **brand:** rename backend binary aioncore to chislcore ([49b5bce](https://github.com/schlambos/chisel-core/commit/49b5bced2a06725d7d5d72b7201f9213de7a17ed))
+* **channels:** remove WeChat/WeCom/DingTalk/Lark plugins, routes, enums, deps ([9ab2872](https://github.com/schlambos/chisel-core/commit/9ab28722efcba22f3ad6e7e6154c3b37dde32048))
+* **models:** re-point Qwen/Dashscope fetchers to international endpoint ([45373b3](https://github.com/schlambos/chisel-core/commit/45373b32106e5507326cc4a7e53f70649c688f37))
+* **Task18:** add workspace_diff git2 helper to aionui-file ([7255125](https://github.com/schlambos/chisel-core/commit/7255125b67aa527fa5c41491a5164c294b151261))
+
+
+### Documentation
+
+* **agents:** add Operating Rules (HARD) section ([e506608](https://github.com/schlambos/chisel-core/commit/e506608caff63f53179335d7b93222741000b802))
+* **agents:** forbid raising changelog location/untracked status ([81300da](https://github.com/schlambos/chisel-core/commit/81300daf83122f280cd66b51e76924e8ca0c2e14))
+* brand backend as Chislcore in prose (keep aioncore binary/commands) ([704e5d1](https://github.com/schlambos/chisel-core/commit/704e5d18cf5a7a1ef1867333bd7c86f280417f40))
+* **brand:** add Chisel Core readme ([1651d80](https://github.com/schlambos/chisel-core/commit/1651d80a5a4366c4db491f7af5ad5f6ccd6272c2))
+* **brand:** rebrand AionCore docs to Chislcore and chisl-* crates ([5aa756a](https://github.com/schlambos/chisel-core/commit/5aa756a3c7cac24c3bdbbc57820174dd101d6900))
+* comprehensive product README (features, protocols, API, architecture) ([a7ed63d](https://github.com/schlambos/chisel-core/commit/a7ed63d2aaea2b104780ae3a4a7b248e44e3fb67))
+* fix missed Aion brand references ([0f25077](https://github.com/schlambos/chisel-core/commit/0f25077662c1bff09098e4a275d25312c974ce5a))
+* **readme:** sync Chislcore and Chisl branding ([20378b6](https://github.com/schlambos/chisel-core/commit/20378b6fe5fc0e33aea1aecae0885b9ddd672bbd))
+* rebrand developer documentation to Chisl ([d5acb0a](https://github.com/schlambos/chisel-core/commit/d5acb0a2f2d2f8cebb49741202fb157889e9447a))
+* require changelog update on every commit, add CHANGELOG.md reference ([dd3c030](https://github.com/schlambos/chisel-core/commit/dd3c0301abc67c44b811b2aeb1db1ce3927fa5c5))
+
 ## [0.1.11](https://github.com/iOfficeAI/AionCore/compare/v0.1.10...v0.1.11) (2026-05-25)
 
 ### Bug Fixes
