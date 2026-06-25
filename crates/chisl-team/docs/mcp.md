@@ -6,14 +6,14 @@
 
 ## 1. 两套 MCP：一眼看懂
 
-AionUi 参考实现里，MCP 分成两套独立服务：
+ChislUi 参考实现里，MCP 分成两套独立服务：
 
 |          | Team Guide MCP                             | Team 内部 MCP                                 |
 | -------- | ------------------------------------------ | --------------------------------------------- |
 | 作用域   | 全局单例                                   | 每个 team session 一个                        |
 | 谁调     | **solo agent**（还没建团的普通单聊 agent） | **团内 agent**（lead / teammate）             |
 | 目的     | 把"单聊 → 建团"能力注入到普通 agent        | 团内协作（发消息、任务板、spawn）             |
-| 关键工具 | `aion_create_team`, `aion_list_models`     | 10 个 `team_*` 工具                           |
+| 关键工具 | `chisl_create_team`, `chisl_list_models`     | 10 个 `team_*` 工具                           |
 | 触发入口 | Solo agent 判断需要团队时主动调            | Agent 启动时注入 stdio config，agent 自行调用 |
 | 传输     | stdio MCP（CLI 进程 <-> 后端）             | TCP + JSON-RPC 2.0                            |
 | 后端状态 | ⚠️ **完全没有实现**                        | 已有（8 个工具，缺 2 个）                     |
@@ -26,10 +26,10 @@ AionUi 参考实现里，MCP 分成两套独立服务：
 
 | 工具               | 作用                                                                                                                              |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| `aion_create_team` | 将当前单聊升级为团队：新建 team，把当前 agent 作为 lead，并可带一批初始 teammate spec。返回 team_id、lead slot_id、会话迁移指令。 |
-| `aion_list_models` | 返回可用 backend × model 列表，供 agent 决定 spawn 谁                                                                             |
+| `chisl_create_team` | 将当前单聊升级为团队：新建 team，把当前 agent 作为 lead，并可带一批初始 teammate spec。返回 team_id、lead slot_id、会话迁移指令。 |
+| `chisl_list_models` | 返回可用 backend × model 列表，供 agent 决定 spawn 谁                                                                             |
 
-**触发场景**：用户在单聊里说"帮我拉一个团完成 X"，solo agent 看到后调 `aion_create_team`，后端建团、自动把当前 conversation 绑定到 lead slot、启动 session。前端感知方式：WS 推 `team.created` 或类似事件（⚠️ 事件也未定义）。
+**触发场景**：用户在单聊里说"帮我拉一个团完成 X"，solo agent 看到后调 `chisl_create_team`，后端建团、自动把当前 conversation 绑定到 lead slot、启动 session。前端感知方式：WS 推 `team.created` 或类似事件（⚠️ 事件也未定义）。
 
 ### 2.2 Team 内部 MCP
 
@@ -44,7 +44,7 @@ AionUi 参考实现里，MCP 分成两套独立服务：
 | 7   | `team_rename_agent`       |     ✅     | 任意 agent | 改 slot 显示名                                               |
 | 8   | `team_shutdown_agent`     |     ✅     | Lead only  | 请求某 teammate 下线（写 `shutdown_request` 到对方 mailbox） |
 | 9   | `team_describe_assistant` |     ❌     | —          | 描述某个自定义 assistant 的能力/限制（供 spawn 时参考）      |
-| 10  | `team_list_models`        |     ❌     | —          | 团内版本的 `aion_list_models`                                |
+| 10  | `team_list_models`        |     ❌     | —          | 团内版本的 `chisl_list_models`                                |
 
 后端缺 9、10。9 和 10 主要服务于 lead 做 spawn 决策，缺失会让 lead 只能按硬编码白名单 `["claude","codex"]` 盲选。
 
@@ -64,7 +64,7 @@ AionUi 参考实现里，MCP 分成两套独立服务：
 
 - 长度上限 10 MiB，超过直接 `InvalidData`
 - 负载必须是合法 JSON-RPC 2.0 请求或响应
-- 参见 `crates/aionui-team/src/mcp/protocol.rs` 的 `read_frame` / `write_frame`
+- 参见 `crates/chislui-team/src/mcp/protocol.rs` 的 `read_frame` / `write_frame`
 
 ### 3.2 JSON-RPC 2.0
 
@@ -112,7 +112,7 @@ AionUi 参考实现里，MCP 分成两套独立服务：
   "id": 1,
   "result": {
     "protocolVersion": "2024-11-05",
-    "serverInfo": { "name": "aionui-team-mcp", "version": "1.0.0" },
+    "serverInfo": { "name": "chislui-team-mcp", "version": "1.0.0" },
     "capabilities": { "tools": {} }
   }
 }
@@ -136,7 +136,7 @@ Tool 业务错误 **不走** JSON-RPC error，而是返回 `result.isError=true`
 
 ## 4. Agent MCP 注入机制
 
-后端（aionui-backend）负责 agent 进程的完整生命周期：启动 agent、注入 MCP 连接配置、管理 stdio bridge。这是前后端分离架构下后端的职责。
+后端（chislui-backend）负责 agent 进程的完整生命周期：启动 agent、注入 MCP 连接配置、管理 stdio bridge。这是前后端分离架构下后端的职责。
 
 ### 4.1 后端两套 MCP 注入机制
 
@@ -146,11 +146,11 @@ Tool 业务错误 **不走** JSON-RPC error，而是返回 `result.isError=true`
 | -------- | --------------------------------------------------- | -------------------------------------------------------------------- |
 | 来源     | 用户在设置里配的 MCP servers（DB `mcp_servers` 表） | team session 启动时动态生成                                          |
 | 注入时机 | agent 首次创建 session 时（`session/new`）          | team session 启动后，写入 conversation extra 或追加到 agent 启动参数 |
-| 管理模块 | `aionui-mcp` crate（`build_session_mcp_servers()`） | `aionui-team` crate（`TeamMcpStdioConfig`）                          |
+| 管理模块 | `chislui-mcp` crate（`build_session_mcp_servers()`） | `chislui-team` crate（`TeamMcpStdioConfig`）                          |
 | 生命周期 | 跟用户配置走，持久化                                | 跟 team session 走，session 停止即失效                               |
 | 类型     | stdio / http / sse（取决于 ACP backend 能力）       | 仅 stdio（TCP bridge）                                               |
 
-AionUi 参考实现中，两套在 agent 建 session 时合并注入（`userServers + presetServers + teamServer`）。后端需要在 `ConversationService.send_message` → agent factory → `session/new` 路径上做同样的合并。
+ChislUi 参考实现中，两套在 agent 建 session 时合并注入（`userServers + presetServers + teamServer`）。后端需要在 `ConversationService.send_message` → agent factory → `session/new` 路径上做同样的合并。
 
 ### 4.2 Team MCP 注入流程
 
@@ -185,7 +185,7 @@ agent 新进程 (session_id=def)    ← rebuild，带 team MCP config
 
 | 操作     | 现有 API                                               | 位置                                         |
 | -------- | ------------------------------------------------------ | -------------------------------------------- |
-| 杀旧进程 | `IWorkerTaskManager::kill(conv_id, reason)`            | `crates/aionui-ai-agent/src/task_manager.rs` |
+| 杀旧进程 | `IWorkerTaskManager::kill(conv_id, reason)`            | `crates/chislui-ai-agent/src/task_manager.rs` |
 | 重建进程 | `IWorkerTaskManager::get_or_build_task(conv_id, opts)` | 同上                                         |
 
 不需要给 `IWorkerTaskManager` 加新方法（如 `skipCache`）。`kill` 从 DashMap 移除 + 杀进程，`get_or_build_task` 发现不存在就用 factory 重建——两步组合即 restart。
@@ -226,8 +226,8 @@ session_new() 构造 payload                    ← 需要改
     │  if config.team_mcp_stdio_config.is_some():
     │    payload["data"]["mcpServers"] = [{
     │      "type": "stdio",
-    │      "name": "aionui-team",
-    │      "command": "aionui-backend",
+    │      "name": "chislui-team",
+    │      "command": "chislui-backend",
     │      "args": ["mcp-bridge"],
     │      "env": [
     │        { "name": "TEAM_MCP_PORT", "value": "<port>" },
@@ -239,7 +239,7 @@ session_new() 构造 payload                    ← 需要改
 ACP CLI (claude / codex / ...) 收到 session/new
     │  读 mcpServers → spawn stdio bridge 子进程
     ▼
-aionui-backend mcp-bridge (子进程)
+chislui-backend mcp-bridge (子进程)
     │  stdin/stdout ↔ ACP CLI (JSON-RPC 2.0)
     │  TCP ↔ TeamMcpServer (127.0.0.1:<port>)
     ▼
@@ -250,9 +250,9 @@ agent 可调 team_* 工具
 
 | 文件                                                | 改动                                                                                                    | 影响范围                               |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| `aionui-ai-agent/src/types.rs`                      | `AcpBuildExtra` 加 `#[serde(default)] team_mcp_stdio_config: Option<TeamMcpStdioConfig>`                | 旧 extra 无此字段 → `None`，零影响     |
-| `aionui-ai-agent/src/acp_agent.rs :: session_new()` | 如果 `team_mcp_stdio_config.is_some()`，构造 `mcpServers` 数组追加到 payload                            | 单聊 config 为 `None` → 不追加，零影响 |
-| `aionui-mcp/src/session_injection.rs`               | team MCP 作为额外一项 append 到 `build_session_mcp_servers()` 结果里（或在 `session_new` 里直接 merge） | 视实现选择                             |
+| `chislui-ai-agent/src/types.rs`                      | `AcpBuildExtra` 加 `#[serde(default)] team_mcp_stdio_config: Option<TeamMcpStdioConfig>`                | 旧 extra 无此字段 → `None`，零影响     |
+| `chislui-ai-agent/src/acp_agent.rs :: session_new()` | 如果 `team_mcp_stdio_config.is_some()`，构造 `mcpServers` 数组追加到 payload                            | 单聊 config 为 `None` → 不追加，零影响 |
+| `chislui-mcp/src/session_injection.rs`               | team MCP 作为额外一项 append 到 `build_session_mcp_servers()` 结果里（或在 `session_new` 里直接 merge） | 视实现选择                             |
 
 **稳定性保证**：
 
@@ -263,7 +263,7 @@ agent 可调 team_* 工具
 
 ### 4.5 stdio config 结构
 
-`crates/aionui-team/src/mcp/bridge.rs`：
+`crates/chislui-team/src/mcp/bridge.rs`：
 
 ```rust
 pub struct TeamMcpStdioConfig {
@@ -275,18 +275,18 @@ pub struct TeamMcpStdioConfig {
 
 ### 4.6 stdio bridge 方案：打进主二进制
 
-stdio bridge 作为 `aionui-backend` 的 subcommand 实现，不单独出二进制：
+stdio bridge 作为 `chislui-backend` 的 subcommand 实现，不单独出二进制：
 
 ```
-aionui-backend mcp-bridge
+chislui-backend mcp-bridge
 ```
 
 agent CLI spawn 时的 MCP server 配置：
 
 ```json
 {
-  "name": "aionui-team",
-  "command": "aionui-backend",
+  "name": "chislui-team",
+  "command": "chislui-backend",
   "args": ["mcp-bridge"],
   "env": [
     { "name": "TEAM_MCP_PORT", "value": "<port>" },
@@ -308,9 +308,9 @@ bridge 职责（代码量极小）：
 
 ---
 
-## 5. 后端 vs AionUi GAP 分析
+## 5. 后端 vs ChislUi GAP 分析
 
-| #   | 能力                           | AionUi |    后端     | 备注                                                       |
+| #   | 能力                           | ChislUi |    后端     | 备注                                                       |
 | --- | ------------------------------ | :----: | :---------: | ---------------------------------------------------------- |
 | 1   | Team 内 MCP TCP server         |   ✅   |     ✅      | `TeamMcpServer` 已就绪                                     |
 | 2   | JSON-RPC 2.0 + initialize 鉴权 |   ✅   |     ✅      | 协议一致                                                   |
@@ -324,8 +324,8 @@ bridge 职责（代码量极小）：
 | 10  | `team_describe_assistant`      |   ✅   |     ❌      | 缺                                                         |
 | 11  | `team_list_models`             |   ✅   |     ❌      | 缺                                                         |
 | 12  | Team Guide MCP (单例)          |   ✅   |     ❌      | **完全没做**                                               |
-| 13  | `aion_create_team`             |   ✅   |     ❌      | 无法从单聊升级到团                                         |
-| 14  | `aion_list_models` (全局)      |   ✅   |     ❌      | 无                                                         |
+| 13  | `chisl_create_team`             |   ✅   |     ❌      | 无法从单聊升级到团                                         |
+| 14  | `chisl_list_models` (全局)      |   ✅   |     ❌      | 无                                                         |
 | 15  | stdio bridge 二进制            |   ✅   |     ❌      | 只有数据结构                                               |
 | 16  | MCP 写 mailbox 后主动 wake     |   ✅   |     ❌      | 导致 agent-to-agent 消息可能悬停（见 internals.md bug #2） |
 
@@ -388,17 +388,17 @@ Scheduler.try_wake(target) ──── 目前只有单聊 API 触发时才会�
 
 | 内容                               | 位置                                                                                                  |
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| TCP server 启停                    | `crates/aionui-team/src/mcp/server.rs :: TeamMcpServer`                                               |
-| 握手 + 鉴权                        | `crates/aionui-team/src/mcp/server.rs :: handle_initialize`                                           |
-| Tool dispatch                      | `crates/aionui-team/src/mcp/server.rs :: dispatch_tool`                                               |
-| Tool descriptor（tools/list 返回） | `crates/aionui-team/src/mcp/tools.rs :: all_tool_descriptors`                                         |
-| Backend 白名单                     | `crates/aionui-team/src/mcp/tools.rs :: SPAWN_BACKEND_WHITELIST`                                      |
-| 帧 + JSON-RPC 类型                 | `crates/aionui-team/src/mcp/protocol.rs`                                                              |
-| Stdio config 结构                  | `crates/aionui-team/src/mcp/bridge.rs :: TeamMcpStdioConfig`                                          |
-| Session 与 server 生命周期绑定     | `crates/aionui-team/src/session.rs :: TeamSession::start`                                             |
-| Scheduler 对 MCP action 的执行     | `crates/aionui-team/src/scheduler.rs :: execute_action`                                               |
-| `SpawnAgent` 空壳位置              | `crates/aionui-team/src/scheduler.rs`（搜 `"spawn_agent action — requires TeamSession to complete"`） |
-| Mailbox 写入                       | `crates/aionui-team/src/scheduler.rs :: handle_send_message`                                          |
+| TCP server 启停                    | `crates/chislui-team/src/mcp/server.rs :: TeamMcpServer`                                               |
+| 握手 + 鉴权                        | `crates/chislui-team/src/mcp/server.rs :: handle_initialize`                                           |
+| Tool dispatch                      | `crates/chislui-team/src/mcp/server.rs :: dispatch_tool`                                               |
+| Tool descriptor（tools/list 返回） | `crates/chislui-team/src/mcp/tools.rs :: all_tool_descriptors`                                         |
+| Backend 白名单                     | `crates/chislui-team/src/mcp/tools.rs :: SPAWN_BACKEND_WHITELIST`                                      |
+| 帧 + JSON-RPC 类型                 | `crates/chislui-team/src/mcp/protocol.rs`                                                              |
+| Stdio config 结构                  | `crates/chislui-team/src/mcp/bridge.rs :: TeamMcpStdioConfig`                                          |
+| Session 与 server 生命周期绑定     | `crates/chislui-team/src/session.rs :: TeamSession::start`                                             |
+| Scheduler 对 MCP action 的执行     | `crates/chislui-team/src/scheduler.rs :: execute_action`                                               |
+| `SpawnAgent` 空壳位置              | `crates/chislui-team/src/scheduler.rs`（搜 `"spawn_agent action — requires TeamSession to complete"`） |
+| Mailbox 写入                       | `crates/chislui-team/src/scheduler.rs :: handle_send_message`                                          |
 
 ---
 

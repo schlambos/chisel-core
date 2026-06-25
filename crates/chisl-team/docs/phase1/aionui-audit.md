@@ -1,6 +1,6 @@
-# AionUi Team 模块后端能力审计（Phase 1）
+# ChislUi Team 模块后端能力审计（Phase 1）
 
-> **目的**：对照 AionUi 前端 main 分支（`/Volumes/Macintosh HD/Users/zhuqingyu/project/AionUi/`，commit `ed8a6bcd3`），列出 aionui-backend 后端需要复刻的所有 team 能力。
+> **目的**：对照 ChislUi 前端 main 分支（`/Volumes/Macintosh HD/Users/zhuqingyu/project/ChislUi/`，commit `ed8a6bcd3`），列出 aionui-backend 后端需要复刻的所有 team 能力。
 >
 > **范围约束**：
 >
@@ -14,7 +14,7 @@
 > - [内部调度说明（旧版）](../internals.md)（参考价值，未逐字验证）
 > - [MCP 通信（旧版）](../mcp.md)（参考价值，未逐字验证）
 >
-> **AionUi 源码路径索引**（下文中所有路径均相对前端根目录 `/Volumes/Macintosh HD/Users/zhuqingyu/project/AionUi/`）：
+> **ChislUi 源码路径索引**（下文中所有路径均相对前端根目录 `/Volumes/Macintosh HD/Users/zhuqingyu/project/ChislUi/`）：
 >
 > | 模块                    | 路径                                               | 行数 |
 > | ----------------------- | -------------------------------------------------- | ---- |
@@ -50,7 +50,7 @@
 
 ### 1.1 能力清单
 
-| 能力                           | AionUi 实现                                                                                                                                                                                                                                                                                                                                                                                       | 关键代码路径                                              |
+| 能力                           | ChislUi 实现                                                                                                                                                                                                                                                                                                                                                                                       | 关键代码路径                                              |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | 创建 team（REST）              | `TeamSessionService.createTeam({userId, name, workspace, workspaceMode, agents, sessionMode})`：生成 teamId、逐个 agent 创建对应 conversation（或复用已有 conversationId 实现单聊→team），回填 workspace，落库到 `repo.create(team)`                                                                                                                                                              | `TeamSessionService.ts:475-559`                           |
 | 创建 team（MCP spawn）         | `TeamGuideMcpServer.handleCreateTeam(args, backend, callerConversationId)`：1) 从 `AION_MCP_BACKEND` env 拿 agent type 2) 校验 team-capable 3) 复用 callerConversationId 作为 leader 4) 调 `teamSessionService.createTeam` 5) emit `team.listChanged` + `conversation.listChanged` + `deepLink.received` 6) 异步 `getOrStartSession` 并向 leader 发 summary message                               | `TeamGuideMcpServer.ts:165-261`                           |
@@ -156,7 +156,7 @@ deleteTeam(id)
 
 ### 2.1 能力清单
 
-| 能力                        | AionUi 实现                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | 关键代码路径                               |
+| 能力                        | ChislUi 实现                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | 关键代码路径                               |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
 | REST addAgent               | `TeamSessionService.addAgent(teamId, agent)`：每个 teamId 用 `addAgentLocks` 串行化（防止并发 spawn 时 agents 数组 read-modify-write 竞态）；调 `addAgentUnsafe`：继承 workspace + sessionMode，`buildConversationParams` 造 conversation，生成 `slotId = 'slot-' + uuid(8)`，更新 `repo.update({agents, updatedAt})`，调 `session.addAgent(newAgent)` 写入内存。emit `team.listChanged { action:'agent_added' }`                                                                                                       | `TeamSessionService.ts:613-678`            |
 | MCP spawn                   | `TeamMcpServer.handleSpawnAgent(args, callerSlotId)`：1) 校验 caller 必须是 leader（非 leader 直接抛错） 2) 若提供 `custom_agent_id`，从 `assistants` 配置查 preset，校验 enabled，`agent_type` 被 preset.backend 覆盖 3) `isTeamCapableBackend(agentType)` 校验 4) 若提供 `model`，校验在 `acp.cachedModels[agentType].availableModels` 内（不在只 warn，不拒绝） 5) 调外部 `spawnAgent(name, agentType, model, customAgentId)` 6) 向新 agent mailbox 写入 "You have been spawned as X" 7) `safeWake(newAgent.slotId)` | `TeamMcpServer.ts:373-450`                 |
@@ -205,7 +205,7 @@ deleteTeam(id)
 
 ### 3.1 能力清单
 
-| 能力                    | AionUi 实现                                                                                                                                                                                                                                                                                                                | 关键代码路径                                                                                             |
+| 能力                    | ChislUi 实现                                                                                                                                                                                                                                                                                                                | 关键代码路径                                                                                             |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | Team Guide MCP 生命周期 | App 启动时 `initTeamGuideService(teamSessionService)` 新建 `TeamGuideMcpServer` 并 `start()`（TCP listen 随机端口、auth token=`crypto.randomUUID()`）；`getTeamGuideStdioConfig()` 暴露给 ACP agent；app quit `stopTeamGuideService()`                                                                                     | `teamGuideSingleton.ts:24-45`, `TeamGuideMcpServer.ts:45-77`, `initBridge.ts:40-43`                      |
 | Team Guide 工具集       | 2 个：`aion_create_team`、`aion_list_models`（共享 `handleListModels`）                                                                                                                                                                                                                                                    | `TeamGuideMcpServer.ts:155-163`                                                                          |
@@ -241,7 +241,7 @@ deleteTeam(id)
 ### 3.3 stdio ↔ TCP 桥架构
 
 ```
-                  AionUi Electron main 进程
+                  ChislUi Electron main 进程
 ┌────────────────────────────────────────────────────────────────┐
 │  TeamGuideMcpServer (单例)             TeamMcpServer (每 team) │
 │  net.createServer('127.0.0.1', *)      net.createServer(...)   │
@@ -411,7 +411,7 @@ Task 依赖是双向链（`blockedBy` + `blocks`）。
 
 ### 7.1 REST / IPC 等价入口（backend 需要暴露的 API）
 
-> AionUi 走 ipcBridge；后端要包掉这些 team 逻辑意味着提供等价 HTTP/WebSocket 端点。具体 endpoint 命名/路径由后端决定，此处只列能力。
+> ChislUi 走 ipcBridge；后端要包掉这些 team 逻辑意味着提供等价 HTTP/WebSocket 端点。具体 endpoint 命名/路径由后端决定，此处只列能力。
 
 | 能力                       | 参数                                                                                           | 行为契约                                                                                                                         |
 | -------------------------- | ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
@@ -488,7 +488,7 @@ Task 依赖是双向链（`blockedBy` + `blocks`）。
 
 ### 7.6 事件 / IPC（后端等价需提供 WebSocket 或 SSE）
 
-AionUi `ipcBridge.team.*` 集合（前端消费）：
+ChislUi `ipcBridge.team.*` 集合（前端消费）：
 
 - `team.listChanged { teamId, action: 'created' | 'removed' | 'agent_added' | 'agent_removed' }`
 - `team.agentSpawned { teamId, agent }`
@@ -503,7 +503,7 @@ AionUi `ipcBridge.team.*` 集合（前端消费）：
 
 ## 8. 源码中发现的硬约束（agent 行为易坏点）
 
-这些是 AionUi 代码里写死的、前后端分离必须保留的行为契约：
+这些是 ChislUi 代码里写死的、前后端分离必须保留的行为契约：
 
 1. **wake 并发去重**：同一 slotId 正在 wake 时再次 wake 必须跳过（log debug 即可），否则 mailbox 会被双读。
 2. **wake 锁释放时机**：消息发出后立即 delete activeWakes（不等 finish），否则 finish 事件丢失会永久死锁。
@@ -527,7 +527,7 @@ AionUi `ipcBridge.team.*` 集合（前端消费）：
 
 ## 9. 未在源码找到的事项
 
-- AionUi 没有显式 REST 端点做 "aion_create_team"——它完全依赖 MCP + ipcBridge。后端要暴露 REST 需要后端自己设计。
+- ChislUi 没有显式 REST 端点做 "aion_create_team"——它完全依赖 MCP + ipcBridge。后端要暴露 REST 需要后端自己设计。
 - `TeammateStatus.completed` 状态在代码里没有显式 setter（仅 type 里有）；`completed` 只被 `maybeWakeLeaderWhenAllIdle` 当 "settled" 条件之一读。后端是否要实现这个状态需要业务决策。
 - `workspaceMode: 'shared' | 'isolated'` 中 `isolated` 的实际分支行为未在源码中找到（只有 `shared` 路径）；看 `buildAgentConversationParams` 可能按 `customWorkspace` 差异化处理，但本次审计未追踪到。
 
@@ -535,5 +535,5 @@ AionUi `ipcBridge.team.*` 集合（前端消费）：
 
 ## 10. 版本锚定
 
-- AionUi 源码 commit：`ed8a6bcd3 fix(bundled-bun): add baseline variant for linux-x64 to support non-AVX2 CPUs (#2654)`（main 分支，2026-04-29 拉取）
+- ChislUi 源码 commit：`ed8a6bcd3 fix(bundled-bun): add baseline variant for linux-x64 to support non-AVX2 CPUs (#2654)`（main 分支，2026-04-29 拉取）
 - aionui-backend 所在 worktree：`/Users/zhuqingyu/.superset/worktrees/aionui-backend/repeated-algebra`，分支 `docs/api-for-frontend`

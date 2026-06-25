@@ -70,7 +70,7 @@ M0 共识冻结 → M1 W1 完工 → M2 W2 骨架 → M3 W2 闭环跑通 → M4 
 - ⬜ D3 `TeamMcpStdioServerSpec` 合并 + 3 条单元测试绿
 - ⬜ D4 `team_list_models` + `team_describe_assistant` descriptor + 最小 handler 合并；descriptor 文本与 team-prompts.md §5.2 逐字节一致
 - ⬜ **D4b `TEAM_SPAWN_AGENT_DESCRIPTION` 原文常量合并 + `diff -w` 证明零差异**（P0#48 补漏）
-- ⬜ D5a/b-1/b-2/c 四个 prompt 子模块合并；快照测试绿；模板文本来自 AionUi 源码（非大模型生成）
+- ⬜ D5a/b-1/b-2/c 四个 prompt 子模块合并；快照测试绿；模板文本来自 ChislUi 源码（非大模型生成）
 - ⬜ D6 `aionui-backend mcp-bridge` 子命令合并；独立集成测试通过（spawn 子进程 + mock TCP 收到 `auth_token`）
 
 **验收证据**：
@@ -86,7 +86,7 @@ M0 共识冻结 → M1 W1 完工 → M2 W2 骨架 → M3 W2 闭环跑通 → M4 
 
 **不通过的典型信号**：
 
-- 任何 descriptor 或 prompt 常量"改写成了更清晰的版本" → 驳回，按 AionUi 原文重改（[aionui-audit §8 #5](./aionui-audit.md#8-源码中发现的硬约束agent-行为易坏点)）
+- 任何 descriptor 或 prompt 常量"改写成了更清晰的版本" → 驳回，按 ChislUi 原文重改（[aionui-audit §8 #5](./aionui-audit.md#8-源码中发现的硬约束agent-行为易坏点)）
 - D6 bridge 丢弃了 `auth_token` 没有带入 TCP 请求 → 驳回
 
 **依赖**：M0 通过。
@@ -462,7 +462,7 @@ Step 8  断言 5：60s 内 WS 出现 team.agent.status.Working（coder 被 wake�
 | ACP SDK 的 `McpServer` stdio variant 不符合预期                                                        | D3 在 M0 阶段发现 | 改用 HTTP transport 注入（backend-audit §4.3 备选）；延期 M1 半天                                                      |
 | `claude --experimental-acp` 本地机跑不起来                                                             | M3 / M7 阶段      | 手工 WS 连 + curl 校验 DB extra + mock ACP 响应；smoke 改成半手工                                                      |
 | Wave N 某模块做到一半发现签名冲突                                                                      | 各 Wave 阶段      | 暂停该模块，开 issue 改 interface-contracts.md，leader 裁决；其他模块不冻结                                            |
-| D5 的 AionUi prompt 文本在移植时有 UTF-8/换行问题                                                      | M1 阶段           | 改用 `include_str!("prompt_templates/lead.txt")` 把 AionUi 原文件逐字节拷进来，再 diff                                 |
+| D5 的 ChislUi prompt 文本在移植时有 UTF-8/换行问题                                                      | M1 阶段           | 改用 `include_str!("prompt_templates/lead.txt")` 把 ChislUi 原文件逐字节拷进来，再 diff                                 |
 | `task_manager.kill` + `get_or_build_task` 组合在 team agent 首次启动（DashMap 里本来就没）时行为不确定 | M2 / M7 阶段      | D9 / W5-D29 显式处理：`kill` 返回 `NotFound` 视为成功                                                                  |
 | Finish 事件订阅导致后台 task 泄漏                                                                      | M3 / M6 阶段      | D9 / W4-D18 在 `stop_session` 里 abort 所有订阅 task 的 JoinHandle；smoke test 跑完断言后台 task 已退出                |
 | W4-D25 broadcast channel 被 lagged 订阅拖慢                                                            | M6 阶段           | channel size 已取 256；lagged 订阅者 tokio broadcast 自动 skip 不影响其他订阅                                          |

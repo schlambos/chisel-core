@@ -1,6 +1,6 @@
 # Team HTTP API
 
-所有端点前缀 `/api/teams`，全部需要 JWT。响应统一 `ApiResponse<T>` / `ErrorResponse`。DTO 定义在 `crates/aionui-api-types/src/team.rs`。
+所有端点前缀 `/api/teams`，全部需要 JWT。响应统一 `ApiResponse<T>` / `ErrorResponse`。DTO 定义在 `crates/chislui-api-types/src/team.rs`。
 
 ## 端点一览
 
@@ -36,7 +36,7 @@
 ```
 
 - `agents` 至少 1 个；第一个自动成为 lead（无论 role 写什么）
-- `backend`：`acp / claude / gemini / qwen / nanobot / aionrs / remote / openclaw-gateway`
+- `backend`：`acp / claude / gemini / qwen / nanobot / chislrs / remote / openclaw-gateway`
 - `role`：`lead / leader / teammate`（大小写敏感）
 
 ### TeamResponse
@@ -71,7 +71,7 @@
 
 ## 发消息与拉历史
 
-走 `aionui-conversation` 模块的单聊端点，跟普通单聊**完全一致**：
+走 `chislui-conversation` 模块的单聊端点，跟普通单聊**完全一致**：
 
 | 动作                | 端点                                                 |
 | ------------------- | ---------------------------------------------------- |

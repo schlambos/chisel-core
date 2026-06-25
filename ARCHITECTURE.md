@@ -466,13 +466,13 @@ CORS (local mode only, allows any origin)
 
 - Algorithm: HMAC-SHA256
 - Validity: 24 hours
-- Payload: `user_id`, `username`, `iat`, `exp`, `iss` ("aionui"), `aud` ("aionui-webui")
+- Payload: `user_id`, `username`, `iat`, `exp`, `iss` ("chislui"), `aud` ("chislui-webui")
 - Secret source priority: environment variable → database → random generation (64 bytes, getrandom)
-- Token extraction priority: `Authorization: Bearer` header → `aionui-session` cookie
+- Token extraction priority: `Authorization: Bearer` header → `chislui-session` cookie
 - Supports token blacklist (SHA-256 hash, DashMap storage)
 
-> **Note on retained runtime IDs:** The JWT `iss`/`aud` claim values (`aionui`, `aionui-webui`)
-> and the session cookie name (`aionui-session`) are **deliberately retained** as runtime
+> **Note on retained runtime IDs:** The JWT `iss`/`aud` claim values (`chislui`, `chislui-webui`)
+> and the session cookie name (`chislui-session`) are **deliberately retained** as runtime
 > identifiers for install continuity — existing deployments and persisted sessions must keep
 > validating. They are runtime constants, not crate names, and are intentionally left unchanged.
 
@@ -480,9 +480,9 @@ CORS (local mode only, allows any origin)
 
 Uses the Double Submit Cookie pattern:
 
-- Cookie name: `aionui-csrf-token` (not HttpOnly — JavaScript must read it)
+- Cookie name: `chislui-csrf-token` (not HttpOnly — JavaScript must read it)
 
-> The `aionui-csrf-token` cookie name is likewise a deliberately-retained runtime identifier
+> The `chislui-csrf-token` cookie name is likewise a deliberately-retained runtime identifier
 > (see note above); it is not a crate reference and is intentionally kept stable.
 - Request header: `x-csrf-token`
 - Validation: cookie value must exactly match header value
@@ -499,10 +499,10 @@ Uses the Double Submit Cookie pattern:
 
 | Cookie              | HttpOnly | Secure     | SameSite                  | Max-Age |
 | ------------------- | -------- | ---------- | ------------------------- | ------- |
-| `aionui-session`    | ✅       | When HTTPS | Strict(HTTPS) / Lax(HTTP) | 30 days |
-| `aionui-csrf-token` | ❌       | When HTTPS | Strict(HTTPS) / Lax(HTTP) | 30 days |
+| `chislui-session`    | ✅       | When HTTPS | Strict(HTTPS) / Lax(HTTP) | 30 days |
+| `chislui-csrf-token` | ❌       | When HTTPS | Strict(HTTPS) / Lax(HTTP) | 30 days |
 
-> The `aionui-session` and `aionui-csrf-token` cookie names above are deliberately-retained
+> The `chislui-session` and `chislui-csrf-token` cookie names above are deliberately-retained
 > runtime identifiers (see note under JWT Authentication) — kept stable for install continuity.
 
 ### Rate Limiting

@@ -5,7 +5,7 @@
 > **事实来源**：
 >
 > - [backend-audit.md](./backend-audit.md) §1.10 / §1.11 / §4.1–§4.8
-> - [aionui-audit.md](./aionui-audit.md) §2.1 / §3.1 / §4 / §7
+> - [chislui-audit.md](./chislui-audit.md) §2.1 / §3.1 / §4 / §7
 > - [mcp.md](../mcp.md) §4.5 / §4.6
 >
 > **相关文档**：[README.md](./README.md) · [modules.md](./modules.md) · [milestones.md](./milestones.md)
@@ -18,34 +18,34 @@
 
 | 类型 | 目标                                                                                                                                                                                     |
 | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 新增 | `aionui-api-types::team_mcp` 子模块（提升 `TeamMcpStdioConfig`）                                                                                                                         |
-| 新增 | `aionui-team::mcp::bridge` 新 struct `TeamMcpStdioServerSpec`（session/new 注入体）                                                                                                      |
-| 新增 | `aionui-team::prompts` 4 份常量字符串（leader/teammate/guide/spawn tool desc）+ builder 新签名                                                                                           |
-| 新增 | `aionui-team::mcp::tools` 两个工具 descriptor + handler：`team_list_models` / `team_describe_assistant`                                                                                  |
-| 新增 | `aionui-team::session::TeamSession::stdio_spec(slot_id)` 返回 `TeamMcpStdioServerSpec`                                                                                                   |
-| 新增 | `aionui-team::session::TeamSession::on_agent_finish(conversation_id, is_error)` 供 Wave 2 转发 Finish                                                                                    |
-| 新增 | `aionui-app` 子命令 `mcp-bridge`（stdio bridge 入口，无新 trait）                                                                                                                        |
-| 修改 | `aionui-ai-agent::AcpBuildExtra` 加字段 `team_mcp_stdio_config: Option<TeamMcpStdioConfig>`                                                                                              |
-| 修改 | `aionui-ai-agent::acp_agent::session_new_and_prompt` 按 config 注入 mcp_servers                                                                                                          |
-| 修改 | `aionui-team::service::TeamSessionService::new` 加 `task_manager: Arc<dyn IWorkerTaskManager>` 入参                                                                                      |
-| 修改 | `aionui-team::service::ensure_session` 实现 kill+rebuild 闭环（写回 extra → kill → get_or_build_task）                                                                                   |
-| 修改 | `aionui-team::session::TeamSession::send_message / send_message_to_agent` 接 wake 路径                                                                                                   |
-| 修改 | `aionui-conversation::service::ConversationService::update_extra(conv_id, patch)` 【新增接口】供 `ensure_session` 写 `team_mcp_stdio_config`（extra 是 JSON 字符串列，不需 schema 迁移） |
-| 修改 | `aionui-app::state_builders::build_team_state` 传 worker_task_manager                                                                                                                    |
+| 新增 | `chislui-api-types::team_mcp` 子模块（提升 `TeamMcpStdioConfig`）                                                                                                                         |
+| 新增 | `chislui-team::mcp::bridge` 新 struct `TeamMcpStdioServerSpec`（session/new 注入体）                                                                                                      |
+| 新增 | `chislui-team::prompts` 4 份常量字符串（leader/teammate/guide/spawn tool desc）+ builder 新签名                                                                                           |
+| 新增 | `chislui-team::mcp::tools` 两个工具 descriptor + handler：`team_list_models` / `team_describe_assistant`                                                                                  |
+| 新增 | `chislui-team::session::TeamSession::stdio_spec(slot_id)` 返回 `TeamMcpStdioServerSpec`                                                                                                   |
+| 新增 | `chislui-team::session::TeamSession::on_agent_finish(conversation_id, is_error)` 供 Wave 2 转发 Finish                                                                                    |
+| 新增 | `chislui-app` 子命令 `mcp-bridge`（stdio bridge 入口，无新 trait）                                                                                                                        |
+| 修改 | `chislui-ai-agent::AcpBuildExtra` 加字段 `team_mcp_stdio_config: Option<TeamMcpStdioConfig>`                                                                                              |
+| 修改 | `chislui-ai-agent::acp_agent::session_new_and_prompt` 按 config 注入 mcp_servers                                                                                                          |
+| 修改 | `chislui-team::service::TeamSessionService::new` 加 `task_manager: Arc<dyn IWorkerTaskManager>` 入参                                                                                      |
+| 修改 | `chislui-team::service::ensure_session` 实现 kill+rebuild 闭环（写回 extra → kill → get_or_build_task）                                                                                   |
+| 修改 | `chislui-team::session::TeamSession::send_message / send_message_to_agent` 接 wake 路径                                                                                                   |
+| 修改 | `chislui-conversation::service::ConversationService::update_extra(conv_id, patch)` 【新增接口】供 `ensure_session` 写 `team_mcp_stdio_config`（extra 是 JSON 字符串列，不需 schema 迁移） |
+| 修改 | `chislui-app::state_builders::build_team_state` 传 worker_task_manager                                                                                                                    |
 
-以下按模块给出签名。**字段命名对齐 aionui-backend Rust 规则（snake_case）；对外 JSON 字段按 backend-audit §1.10 的事实保持 snake_case（rebase 后已经全面去 `rename_all=camelCase`，见 commit `dae96f8`）。**
+以下按模块给出签名。**字段命名对齐 chislui-backend Rust 规则（snake_case）；对外 JSON 字段按 backend-audit §1.10 的事实保持 snake_case（rebase 后已经全面去 `rename_all=camelCase`，见 commit `dae96f8`）。**
 
 ---
 
-## 1. `aionui-api-types` 新增类型（Wave 1 · 模块 D1）
+## 1. `chislui-api-types` 新增类型（Wave 1 · 模块 D1）
 
-**文件**：新增 `crates/aionui-api-types/src/team_mcp.rs`；在 `lib.rs` `pub mod team_mcp; pub use team_mcp::*;`
+**文件**：新增 `crates/chislui-api-types/src/team_mcp.rs`；在 `lib.rs` `pub mod team_mcp; pub use team_mcp::*;`
 
 ```rust
 use serde::{Deserialize, Serialize};
 
 /// team session MCP server 的 stdio 连接三元组
-/// (提升自 aionui-team::mcp::bridge，供 aionui-ai-agent 反序列化 AcpBuildExtra 用)
+/// (提升自 chislui-team::mcp::bridge，供 chislui-ai-agent 反序列化 AcpBuildExtra 用)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamMcpStdioConfig {
     pub port: u16,
@@ -54,25 +54,25 @@ pub struct TeamMcpStdioConfig {
 }
 
 impl TeamMcpStdioConfig {
-    /// stdio bridge 读到的 env 名（固定常量，不可改；aionui-audit §3.1 列出）
+    /// stdio bridge 读到的 env 名（固定常量，不可改；chislui-audit §3.1 列出）
     pub const ENV_PORT: &'static str = "TEAM_MCP_PORT";
     pub const ENV_TOKEN: &'static str = "TEAM_MCP_TOKEN";
     pub const ENV_SLOT_ID: &'static str = "TEAM_AGENT_SLOT_ID";
 }
 ```
 
-**废弃**：`aionui-team::mcp::bridge::TeamMcpStdioConfig` 原定义改成 `pub use aionui_api_types::TeamMcpStdioConfig;`（保持 import path 不断）。
+**废弃**：`chislui-team::mcp::bridge::TeamMcpStdioConfig` 原定义改成 `pub use chislui_api_types::TeamMcpStdioConfig;`（保持 import path 不断）。
 
-**不引入依赖**：`aionui-api-types` 继续禁 axum/tower（AGENTS.md 硬规则）。
+**不引入依赖**：`chislui-api-types` 继续禁 axum/tower（AGENTS.md 硬规则）。
 
 ---
 
-## 2. `aionui-ai-agent::types::AcpBuildExtra` 扩展（Wave 1 · 模块 D2）
+## 2. `chislui-ai-agent::types::AcpBuildExtra` 扩展（Wave 1 · 模块 D2）
 
-**文件**：`crates/aionui-ai-agent/src/types.rs`
+**文件**：`crates/chislui-ai-agent/src/types.rs`
 
 ```rust
-use aionui_api_types::TeamMcpStdioConfig;
+use chislui_api_types::TeamMcpStdioConfig;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AcpBuildExtra {
@@ -89,23 +89,23 @@ pub struct AcpBuildExtra {
 **兼容约束**：
 
 - `#[serde(default)]` + `Option` 保证旧 extra 无此字段反序列化为 `None`（单聊零影响，backend-audit §4.3 引用）
-- **字段命名规则**：新增字段统一 **snake_case**（本字段 `team_mcp_stdio_config` 即如此）；既有 `teamId` 字段（[`service.rs:73`](../../../crates/aionui-team/src/service.rs) 早期写入）**留作历史兼容**不动，但不再新增驼峰字段。conversation.extra 的 JSON 由后端自己写自己读，snake_case 自洽即可（commit `dae96f8` 方向）
+- **字段命名规则**：新增字段统一 **snake_case**（本字段 `team_mcp_stdio_config` 即如此）；既有 `teamId` 字段（[`service.rs:73`](../../../crates/chislui-team/src/service.rs) 早期写入）**留作历史兼容**不动，但不再新增驼峰字段。conversation.extra 的 JSON 由后端自己写自己读，snake_case 自洽即可（commit `dae96f8` 方向）
 
 ---
 
-## 3. `aionui-team::mcp::bridge` 新增 ServerSpec（Wave 1 · 模块 D3）
+## 3. `chislui-team::mcp::bridge` 新增 ServerSpec（Wave 1 · 模块 D3）
 
-**文件**：`crates/aionui-team/src/mcp/bridge.rs`
+**文件**：`crates/chislui-team/src/mcp/bridge.rs`
 
 ```rust
-use aionui_api_types::TeamMcpStdioConfig;
+use chislui_api_types::TeamMcpStdioConfig;
 
 /// session/new 用的 stdio MCP server 完整描述
 /// （直接可以被 NewSessionRequest::mcp_servers 消费）
 #[derive(Debug, Clone)]
 pub struct TeamMcpStdioServerSpec {
-    pub name: String,          // 固定 "aionui-team-<team_id>"
-    pub command: String,       // aionui-backend 的绝对路径，由调用方传入（见 §7）
+    pub name: String,          // 固定 "chislui-team-<team_id>"
+    pub command: String,       // chislui-backend 的绝对路径，由调用方传入（见 §7）
     pub args: Vec<String>,     // 固定 vec!["mcp-bridge".into()]
     pub env: Vec<(String, String)>, // 三个 env，见 §1 的常量
 }
@@ -123,15 +123,15 @@ impl TeamMcpStdioServerSpec {
 
 ---
 
-## 4. `aionui-team::mcp::tools` 新增两个工具 descriptor（Wave 1 · 模块 D4）
+## 4. `chislui-team::mcp::tools` 新增两个工具 descriptor（Wave 1 · 模块 D4）
 
-**文件**：`crates/aionui-team/src/mcp/tools.rs`
+**文件**：`crates/chislui-team/src/mcp/tools.rs`
 
 **新增 descriptor**（phase1 只要求 descriptor 和 **最小实现** —— 返回 stub 数据也算通过，Wave 2 再接真实数据源）：
 
 ```rust
 // descriptor 文本必须原样复用 team-prompts.md §5.2 的 team_list_models / team_describe_assistant
-// （aionui-audit §8 硬约束：prompt/tool description 原样复用，禁改写）
+// （chislui-audit §8 硬约束：prompt/tool description 原样复用，禁改写）
 pub fn team_list_models_descriptor() -> ToolDescriptor { /* ... */ }
 pub fn team_describe_assistant_descriptor() -> ToolDescriptor { /* ... */ }
 ```
@@ -139,7 +139,7 @@ pub fn team_describe_assistant_descriptor() -> ToolDescriptor { /* ... */ }
 **handler 签名**（server.rs dispatch 层调用）：
 
 ```rust
-// phase1 最小实现：返回固定 backend 列表（claude / codex / gemini / aionrs）
+// phase1 最小实现：返回固定 backend 列表（claude / codex / gemini / chislrs）
 // Wave 2 再接 agent_registry / assistants 配置
 pub fn handle_team_list_models(args: &serde_json::Value) -> ToolResult { /* ... */ }
 
@@ -148,22 +148,22 @@ pub fn handle_team_list_models(args: &serde_json::Value) -> ToolResult { /* ... 
 pub fn handle_team_describe_assistant(args: &serde_json::Value) -> ToolResult { /* ... */ }
 ```
 
-**`all_tool_descriptors()`** 扩展为返回 **10 条**，顺序与 aionui-audit §3.2 表格一致。
+**`all_tool_descriptors()`** 扩展为返回 **10 条**，顺序与 chislui-audit §3.2 表格一致。
 
 ---
 
-## 5. `aionui-team::prompts` 大幅扩写（Wave 1 · 模块 D5）
+## 5. `chislui-team::prompts` 大幅扩写（Wave 1 · 模块 D5）
 
-**文件**：`crates/aionui-team/src/prompts.rs`（现有 3 个 builder 重写）
+**文件**：`crates/chislui-team/src/prompts.rs`（现有 3 个 builder 重写）
 
-**新增常量**（原样复用 AionUi 英文，**不翻译不改写**，见 team-prompts.md §5 / §3 / §4）：
+**新增常量**（原样复用 ChislUi 英文，**不翻译不改写**，见 team-prompts.md §5 / §3 / §4）：
 
 ```rust
 /// teamGuidePrompt.ts 的 Rust 端完整等价，面向 solo ACP agent
 /// phase1 仅定义；Layer-1 注入由 Wave 2 模块 D7 的 send 路径接到 AcpBuildExtra.preset_context（或 wake payload）
-pub const TEAM_GUIDE_PROMPT_TEMPLATE: &str = r#"..."#; // 108 行 AionUi 原文
-pub const LEAD_PROMPT_TEMPLATE: &str = r#"..."#;        // 188 行 AionUi 原文
-pub const TEAMMATE_PROMPT_TEMPLATE: &str = r#"..."#;    // 114 行 AionUi 原文
+pub const TEAM_GUIDE_PROMPT_TEMPLATE: &str = r#"..."#; // 108 行 ChislUi 原文
+pub const LEAD_PROMPT_TEMPLATE: &str = r#"..."#;        // 188 行 ChislUi 原文
+pub const TEAMMATE_PROMPT_TEMPLATE: &str = r#"..."#;    // 114 行 ChislUi 原文
 pub const TEAM_SPAWN_AGENT_DESCRIPTION: &str = r#"..."#; // toolDescriptions.ts 19 行
 ```
 
@@ -220,13 +220,13 @@ pub struct AvailableAssistant {
 }
 ```
 
-**硬约束**（aionui-audit §8 #5、team-prompts.md §5）：模板常量一旦定义，Wave 2 只能填 param，**不得改模板文本**。
+**硬约束**（chislui-audit §8 #5、team-prompts.md §5）：模板常量一旦定义，Wave 2 只能填 param，**不得改模板文本**。
 
 ---
 
-## 6. `aionui-team::session::TeamSession` 新方法（Wave 2 · 模块 D7）
+## 6. `chislui-team::session::TeamSession` 新方法（Wave 2 · 模块 D7）
 
-**文件**：`crates/aionui-team/src/session.rs`
+**文件**：`crates/chislui-team/src/session.rs`
 
 ```rust
 impl TeamSession {
@@ -263,11 +263,11 @@ pub struct WakeInput {
 
 ---
 
-## 6.5 `aionui-team::scheduler::TeammateManager` 签名扩展（Wave 2 · 模块 D8）
+## 6.5 `chislui-team::scheduler::TeammateManager` 签名扩展（Wave 2 · 模块 D8）
 
-**文件**：`crates/aionui-team/src/scheduler.rs`
+**文件**：`crates/chislui-team/src/scheduler.rs`
 
-D8 负责把 scheduler 的已有方法**接上生产路径**。以下签名 AionUi 参考实现已全部实现（`TeammateManager.ts`），后端代码里方法存在但行为不完整。
+D8 负责把 scheduler 的已有方法**接上生产路径**。以下签名 ChislUi 参考实现已全部实现（`TeammateManager.ts`），后端代码里方法存在但行为不完整。
 
 ```rust
 impl TeammateManager {
@@ -287,7 +287,7 @@ impl TeammateManager {
 
     /// maybe_wake_leader_when_all_idle 扩展：
     /// 现有只看 Idle，需扩展为 settled = {Idle, Completed, Failed, Pending}
-    /// （AionUi TeammateManager.ts:440-452 的判定逻辑）
+    /// （ChislUi TeammateManager.ts:440-452 的判定逻辑）
     pub fn maybe_wake_leader_when_all_idle(&self) -> Option<String>;
     // 签名不变，内部逻辑改
 
@@ -305,7 +305,7 @@ impl TeammateManager {
     // ── 新增方法 ──
 
     /// activeWakes 去重：防止同一 agent 被并发 wake 两次
-    /// （AionUi TeammateManager.ts:94-100 的 activeWakes Map）
+    /// （ChislUi TeammateManager.ts:94-100 的 activeWakes Map）
     /// 返回 true = 获得锁可以 wake；false = 已有 wake 在跑，skip
     pub async fn acquire_wake_lock(&self, slot_id: &str) -> bool;
 
@@ -325,7 +325,7 @@ fn is_settled(status: &TeammateStatus) -> bool {
     matches!(status,
         TeammateStatus::Idle
         | TeammateStatus::Completed
-        | TeammateStatus::Error      // 对应 AionUi 的 Failed
+        | TeammateStatus::Error      // 对应 ChislUi 的 Failed
         | TeammateStatus::Pending    // 注意：后端 Pending 目前 serde alias 映射到 Idle，
                                      // phase1 需要恢复独立 Pending variant
     )
@@ -353,9 +353,9 @@ active_wakes: DashSet<String>,  // slot_id 集合
 
 ---
 
-## 7. `aionui-ai-agent::acp_agent::session_new_and_prompt` 注入（Wave 2 · 模块 D10）
+## 7. `chislui-ai-agent::acp_agent::session_new_and_prompt` 注入（Wave 2 · 模块 D10）
 
-**文件**：`crates/aionui-ai-agent/src/acp_agent.rs:448-458`
+**文件**：`crates/chislui-ai-agent/src/acp_agent.rs:448-458`
 
 **现状**：
 
@@ -372,7 +372,7 @@ let mut req = NewSessionRequest::new(&self.workspace);
 if let Some(cfg) = &self.config.team_mcp_stdio_config {
     let spec = TeamMcpStdioServerSpec::from_config(
         /* team_id 从 cfg 不直接含，改从 env 或 cfg.slot_id 的前缀取；phase1 简化：
-           name 直接写 "aionui-team" 足以区分 */
+           name 直接写 "chislui-team" 足以区分 */
         "",
         &self.backend_binary_path,   // 新增字段：AcpAgentManager 构造时从 AppServices 接
         cfg,
@@ -388,16 +388,16 @@ let session_response = self.protocol.new_session(req).await?;
 
 ---
 
-## 8. `aionui-app` 新增子命令 `mcp-bridge`（Wave 1 · 模块 D6）
+## 8. `chislui-app` 新增子命令 `mcp-bridge`（Wave 1 · 模块 D6）
 
-**文件**：`crates/aionui-app/src/lib.rs`（或新子模块 `bridge.rs`）
+**文件**：`crates/chislui-app/src/lib.rs`（或新子模块 `bridge.rs`）
 
 **CLI 入口**：
 
 ```rust
 // main.rs
 if args.get(1).map(|s| s.as_str()) == Some("mcp-bridge") {
-    aionui_app::bridge::run_mcp_bridge().await;
+    chislui_app::bridge::run_mcp_bridge().await;
     return;
 }
 ```
@@ -410,7 +410,7 @@ if args.get(1).map(|s| s.as_str()) == Some("mcp-bridge") {
 /// 职责（对应 mcp.md §4.6 的 4 步）：
 /// 1. 从 env 读 TEAM_MCP_PORT / TEAM_MCP_TOKEN / TEAM_AGENT_SLOT_ID
 /// 2. 接 stdin/stdout：rmcp ServerHandler（初始化 + tools/list + tools/call 透传）
-/// 3. TCP 连 127.0.0.1:<port>：aionui_team::mcp::protocol 的 4 字节长度帧 + JSON-RPC
+/// 3. TCP 连 127.0.0.1:<port>：chislui_team::mcp::protocol 的 4 字节长度帧 + JSON-RPC
 /// 4. 启动后发 notifications/initialized 和（phase1 可选）mcp_ready 通知
 pub async fn run_mcp_bridge() -> !;
 ```
@@ -421,13 +421,13 @@ pub async fn run_mcp_bridge() -> !;
 - bridge **不做 caller 身份判定**：只负责透传 + 在每条 TCP 请求里附 `auth_token` + `slot_id`（或 `from_slot_id`）。
 - bridge 错误即退出（exit code 非零），ACP CLI 会把 MCP server 标为 broken，agent 继续跑只是 team\_\* 不可用（mcp.md §4.4 "稳定性保证 #3"）。
 
-**phase1 范围**：mcp_ready 握手"简化"为"tcp 连接建立成功即认为 ready"，不强制 phase1 做完整握手 —— AionUi 侧 waitForMcpReady 超时 graceful resolve（aionui-audit §8 #11），所以后端 phase1 先不接 server 端等待，后续 P1 再补。
+**phase1 范围**：mcp_ready 握手"简化"为"tcp 连接建立成功即认为 ready"，不强制 phase1 做完整握手 —— ChislUi 侧 waitForMcpReady 超时 graceful resolve（chislui-audit §8 #11），所以后端 phase1 先不接 server 端等待，后续 P1 再补。
 
 ---
 
-## 9. `aionui-team::service::TeamSessionService` 签名扩展（Wave 2 · 模块 D9）
+## 9. `chislui-team::service::TeamSessionService` 签名扩展（Wave 2 · 模块 D9）
 
-**文件**：`crates/aionui-team/src/service.rs`
+**文件**：`crates/chislui-team/src/service.rs`
 
 ```rust
 pub struct TeamSessionService {
@@ -470,14 +470,14 @@ impl TeamSessionService {
 
 ---
 
-## 10. `aionui-app::state_builders::build_team_state` 扩展（Wave 2 · 模块 D11）
+## 10. `chislui-app::state_builders::build_team_state` 扩展（Wave 2 · 模块 D11）
 
-**文件**：`crates/aionui-app/src/state_builders.rs:304`
+**文件**：`crates/chislui-app/src/state_builders.rs:304`
 
 ```rust
 pub fn build_team_state(
     services: &AppServices,
-    cron_service: Option<Arc<aionui_cron::service::CronService>>,
+    cron_service: Option<Arc<chislui_cron::service::CronService>>,
     backend_binary_path: Arc<PathBuf>,   // 新增
 ) -> TeamRouterState {
     // ...
@@ -492,13 +492,13 @@ pub fn build_team_state(
 }
 ```
 
-`backend_binary_path` 在 `aionui_app::lib::build_router` 一次性 `Arc::new(std::env::current_exe()?)` 后 clone 到各子 builder。
+`backend_binary_path` 在 `chislui_app::lib::build_router` 一次性 `Arc::new(std::env::current_exe()?)` 后 clone 到各子 builder。
 
 ---
 
 ## 11. ConversationService 不改（关键决策）
 
-**phase1 决定不改 `aionui-conversation::service::build_task_options`**。
+**phase1 决定不改 `chislui-conversation::service::build_task_options`**。
 
 **理由**（backend-audit §4.5 "备选"）：
 
@@ -512,7 +512,7 @@ pub fn build_team_state(
 
 ## 12.5 `remove_team` 级联 kill agent 进程（Wave 2 · 模块 D11.5）
 
-**文件**：`crates/aionui-team/src/service.rs`
+**文件**：`crates/chislui-team/src/service.rs`
 
 ```rust
 impl TeamSessionService {
@@ -579,7 +579,7 @@ impl TeamSessionService {
 
 ## 13. User-scope 过滤（Wave 3 · 模块 W3-D12）
 
-**文件**：`crates/aionui-team/src/service.rs`
+**文件**：`crates/chislui-team/src/service.rs`
 
 ```rust
 impl TeamSessionService {
@@ -597,7 +597,7 @@ impl TeamSessionService {
 **Repository trait 扩展**：
 
 ```rust
-// crates/aionui-db/src/repository/team.rs
+// crates/chislui-db/src/repository/team.rs
 pub trait ITeamRepository {
     // 改动：入参加 user_id（老签名改为 user_id 过滤，无默认 null 分支）
     fn list_by_user(&self, user_id: &str) -> Result<Vec<Team>, AppError>;
@@ -606,7 +606,7 @@ pub trait ITeamRepository {
 }
 ```
 
-**Routes 改动**：`crates/aionui-team/src/routes.rs` 所有 handler 从 `Extension<AuthUser>` 取 `user_id` 传给 service。
+**Routes 改动**：`crates/chislui-team/src/routes.rs` 所有 handler 从 `Extension<AuthUser>` 取 `user_id` 传给 service。
 
 **错误语义**：phase1 不暴露"存在但无权"差异（避免枚举型泄漏），越权访问一律 NotFound。
 
@@ -614,7 +614,7 @@ pub trait ITeamRepository {
 
 ## 14. `get_team` agent 修复（Wave 3 · 模块 W3-D13）
 
-**文件**：`crates/aionui-team/src/service.rs`
+**文件**：`crates/chislui-team/src/service.rs`
 
 ```rust
 impl TeamSessionService {
@@ -656,7 +656,7 @@ pub trait IConversationRepository {
 
 ## 15. `rename_agent` 规范化（Wave 3 · 模块 W3-D14）
 
-**文件**：`crates/aionui-team/src/scheduler.rs`
+**文件**：`crates/chislui-team/src/scheduler.rs`
 
 ```rust
 impl TeammateManager {
@@ -703,7 +703,7 @@ renamed_agents: Mutex<HashMap<String, String>>,
 
 ## 16. Conversation 复用（Wave 3 · 模块 W3-D15）
 
-**文件**：`crates/aionui-api-types/src/team.rs`
+**文件**：`crates/chislui-api-types/src/team.rs`
 
 ```rust
 #[derive(Debug, Clone, Deserialize)]
@@ -720,7 +720,7 @@ pub struct CreateAgentRequest {
 }
 ```
 
-**文件**：`crates/aionui-team/src/service.rs`
+**文件**：`crates/chislui-team/src/service.rs`
 
 ```rust
 impl TeamSessionService {
@@ -766,10 +766,10 @@ impl TeamSessionService {
 
 ## 17. `ConversationService.send_message` 识别 `team_id`（Wave 3 · 模块 W3-D16）
 
-**新 trait**：放 `aionui-conversation` 里（避免 `aionui-conversation` 反向依赖 `aionui-team`）：
+**新 trait**：放 `chislui-conversation` 里（避免 `chislui-conversation` 反向依赖 `chislui-team`）：
 
 ```rust
-// crates/aionui-conversation/src/service.rs（或新 traits.rs）
+// crates/chislui-conversation/src/service.rs（或新 traits.rs）
 #[async_trait]
 pub trait ITeamMessageRouter: Send + Sync {
     /// 当 ConversationService 发现 conv 的 extra.team_id 非空时调用
@@ -834,27 +834,27 @@ impl ITeamMessageRouter for TeamSessionService {
 
 ## 18. MCP 帧大小 + 300s 超时（Wave 3 · 模块 W3-D17）
 
-**文件**：`crates/aionui-common/src/lib.rs`
+**文件**：`crates/chislui-common/src/lib.rs`
 
 ```rust
 pub const TEAM_MCP_REQUEST_TIMEOUT_MS: u64 = 300_000;
 pub const TEAM_MCP_MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 ```
 
-**文件**：`crates/aionui-team/src/mcp/protocol.rs`
+**文件**：`crates/chislui-team/src/mcp/protocol.rs`
 
 ```rust
 // 原：const MAX_MCP_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 // 改：
-pub const MAX_MCP_MESSAGE_SIZE: usize = aionui_common::TEAM_MCP_MAX_FRAME_BYTES;
+pub const MAX_MCP_MESSAGE_SIZE: usize = chislui_common::TEAM_MCP_MAX_FRAME_BYTES;
 ```
 
-**文件**：`crates/aionui-team/src/mcp/server.rs`
+**文件**：`crates/chislui-team/src/mcp/server.rs`
 
 ```rust
 // dispatch_tool 外层：
 let result = tokio::time::timeout(
-    std::time::Duration::from_millis(aionui_common::TEAM_MCP_REQUEST_TIMEOUT_MS),
+    std::time::Duration::from_millis(chislui_common::TEAM_MCP_REQUEST_TIMEOUT_MS),
     dispatch_tool(...),
 ).await;
 
@@ -868,7 +868,7 @@ match result {
 
 ## 19. AgentStream chunk 订阅底座（Wave 4 · 模块 W4-D25）
 
-**文件**：`crates/aionui-ai-agent/src/types.rs`
+**文件**：`crates/chislui-ai-agent/src/types.rs`
 
 ```rust
 #[derive(Debug, Clone)]
@@ -881,7 +881,7 @@ pub enum AgentStreamChunk {
 }
 ```
 
-**文件**：`crates/aionui-ai-agent/src/task_manager.rs`
+**文件**：`crates/chislui-ai-agent/src/task_manager.rs`
 
 ```rust
 pub trait AgentManagerHandle: Send + Sync {
@@ -893,7 +893,7 @@ pub trait AgentManagerHandle: Send + Sync {
 }
 ```
 
-**文件**：`crates/aionui-ai-agent/src/acp_agent.rs`
+**文件**：`crates/chislui-ai-agent/src/acp_agent.rs`
 
 ```rust
 pub struct AcpAgentManager {
@@ -921,13 +921,13 @@ let _ = self.stream_tx.send(AgentStreamChunk::ToolUse { ... });
 let _ = self.stream_tx.send(AgentStreamChunk::Finish { agent_crash: false, stop_reason: ... });
 ```
 
-**broadcast channel 大小**：256 足够 agent stream 高峰（AionUi 参考按 in-process 事件 bus 无上限，后端用 broadcast 限定避免 OOM）。
+**broadcast channel 大小**：256 足够 agent stream 高峰（ChislUi 参考按 in-process 事件 bus 无上限，后端用 broadcast 限定避免 OOM）。
 
 ---
 
 ## 20. `active_wakes` + `wake_timeouts`（Wave 4 · 模块 W4-D18）
 
-**文件**：`crates/aionui-team/src/scheduler.rs`
+**文件**：`crates/chislui-team/src/scheduler.rs`
 
 ```rust
 pub struct TeammateManager {
@@ -942,7 +942,7 @@ impl TeammateManager {
         self.active_wakes.insert(slot_id.to_string())
     }
 
-    /// 消息发出成功后立即调用（不等 finish）—— aionui-audit §8 #2
+    /// 消息发出成功后立即调用（不等 finish）—— chislui-audit §8 #2
     pub fn release_wake_lock(&self, slot_id: &str) {
         self.active_wakes.remove(slot_id);
     }
@@ -993,7 +993,7 @@ self.wake_timeouts.insert(slot_id, handle);
 
 ## 21. `finalized_turns` 5s dedup（Wave 4 · 模块 W4-D19）
 
-**文件**：`crates/aionui-team/src/scheduler.rs`
+**文件**：`crates/chislui-team/src/scheduler.rs`
 
 ```rust
 pub struct TeammateManager {
@@ -1023,7 +1023,7 @@ impl TeammateManager {
     }
 
     /// re-wake 前调用（W4-D18 的 try_acquire_wake_lock 成功后立即）
-    /// aionui-audit §8 #3：不清这个 dedup 会吞掉新 turn 的 finish
+    /// chislui-audit §8 #3：不清这个 dedup 会吞掉新 turn 的 finish
     pub fn clear_finalized_turn(&self, conversation_id: &str) {
         self.finalized_turns.remove(conversation_id);
     }
@@ -1039,7 +1039,7 @@ impl TeammateManager {
 
 ## 22. Crash recovery（Wave 4 · 模块 W4-D20）
 
-**文件**：`crates/aionui-team/src/session.rs`
+**文件**：`crates/chislui-team/src/session.rs`
 
 ```rust
 impl TeamSession {
@@ -1056,7 +1056,7 @@ impl TeamSession {
         }
 
         if let AgentStreamChunk::Error { message } = &chunk {
-            if aionui_common::RATE_LIMIT_REGEX.is_match(message) {
+            if chislui_common::RATE_LIMIT_REGEX.is_match(message) {
                 self.scheduler.set_status(&slot_id, TeammateStatus::Failed).await;
                 return Ok(());
             }
@@ -1080,7 +1080,7 @@ fn detect_crash(chunk: &AgentStreamChunk) -> Option<CrashReason> {
 }
 ```
 
-**文件**：`crates/aionui-team/src/scheduler.rs`
+**文件**：`crates/chislui-team/src/scheduler.rs`
 
 ```rust
 impl TeammateManager {
@@ -1129,7 +1129,7 @@ pub enum CrashReason { AgentCrash, ProcessExited, SessionNotFound }
 
 ## 23. 429 / rate-limit 识别（Wave 4 · 模块 W4-D21）
 
-**文件**：`crates/aionui-common/src/lib.rs`
+**文件**：`crates/chislui-common/src/lib.rs`
 
 ```rust
 use once_cell::sync::Lazy;
@@ -1146,7 +1146,7 @@ pub static RATE_LIMIT_REGEX: Lazy<Regex> = Lazy::new(|| {
 
 ## 24. Inactivity watchdog（Wave 4 · 模块 W4-D22）
 
-**文件**：`crates/aionui-team/src/scheduler.rs`
+**文件**：`crates/chislui-team/src/scheduler.rs`
 
 ```rust
 impl TeammateManager {
@@ -1182,7 +1182,7 @@ impl TeammateManager {
 
 ## 25. `add_agent_locks` 串行化（Wave 4 · 模块 W4-D23）
 
-**文件**：`crates/aionui-team/src/service.rs`
+**文件**：`crates/chislui-team/src/service.rs`
 
 ```rust
 pub struct TeamSessionService {
@@ -1218,7 +1218,7 @@ impl TeamSessionService {
 
 ## 26. MCP `mcp_ready` 握手（Wave 4 · 模块 W4-D24）
 
-**文件**：`crates/aionui-team/src/mcp/protocol.rs`
+**文件**：`crates/chislui-team/src/mcp/protocol.rs`
 
 ```rust
 /// 新增 notification 类型（不是 JSON-RPC request，没有 id）
@@ -1233,7 +1233,7 @@ pub enum McpNotification {
 }
 ```
 
-**文件**：`crates/aionui-team/src/mcp/server.rs`
+**文件**：`crates/chislui-team/src/mcp/server.rs`
 
 ```rust
 pub struct TeamMcpServer {
@@ -1269,14 +1269,14 @@ impl TeamMcpServer {
             _ = notify.notified() => Ok(()),
             _ = tokio::time::sleep(timeout) => {
                 tracing::warn!("mcp_ready timeout for slot_id={}, degrading gracefully", slot_id);
-                Ok(())  // aionui-audit §8 #11
+                Ok(())  // chislui-audit §8 #11
             }
         }
     }
 }
 ```
 
-**文件**：`crates/aionui-app/src/bridge.rs`（D6 已实现 bridge 主逻辑；W4-D24 在 TCP connect 成功 + initialize ok 后追加）
+**文件**：`crates/chislui-app/src/bridge.rs`（D6 已实现 bridge 主逻辑；W4-D24 在 TCP connect 成功 + initialize ok 后追加）
 
 ```rust
 // 成功 initialize 后 fire-and-forget
@@ -1295,7 +1295,7 @@ let _ = write_frame(&mut tcp_stream, &notification.to_string()).await;
 
 ## 27. Team Guide MCP server（Wave 5 · 模块 W5-D26）
 
-**文件**：`crates/aionui-team/src/guide/server.rs`（新增）
+**文件**：`crates/chislui-team/src/guide/server.rs`（新增）
 
 ```rust
 pub struct GuideMcpServer {
@@ -1333,10 +1333,10 @@ impl GuideStdioConfig {
 }
 ```
 
-**文件**：`crates/aionui-team/src/guide/handlers.rs`
+**文件**：`crates/chislui-team/src/guide/handlers.rs`
 
 ```rust
-pub async fn handle_aion_create_team(
+pub async fn handle_chisl_create_team(
     service: &TeamSessionService,
     broadcaster: &dyn EventBroadcaster,
     args: &serde_json::Value,
@@ -1352,25 +1352,25 @@ pub async fn handle_aion_create_team(
     // 7. 返回 {team_id, name, route:"/team/<id>", lead_agent, status:"team_created", next_step:"..."}
 }
 
-pub async fn handle_aion_list_models(
+pub async fn handle_chisl_list_models(
     args: &serde_json::Value,
 ) -> Result<ToolResult, AppError> {
     // 复用 Wave 1 D4 的 team_list_models handler（硬编码 backend × model 表）
 }
 ```
 
-**用户常量**：`const MCP_SPAWN_USER_ID: &str = "system_default_user";`（aionui-audit §8 #15，后端 multi-tenant 时替换）。
-**MCP spawn 默认值**：`workspace_mode = "shared"`, `session_mode = "yolo"`（aionui-audit §8 #16）。
+**用户常量**：`const MCP_SPAWN_USER_ID: &str = "system_default_user";`（chislui-audit §8 #15，后端 multi-tenant 时替换）。
+**MCP spawn 默认值**：`workspace_mode = "shared"`, `session_mode = "yolo"`（chislui-audit §8 #16）。
 
 ---
 
 ## 28. Guide stdio bridge 分支（Wave 5 · 模块 W5-D27）
 
-**文件**：`crates/aionui-app/src/bridge.rs`（在 D6 已有的 `run_mcp_bridge()` 内部分叉）
+**文件**：`crates/chislui-app/src/bridge.rs`（在 D6 已有的 `run_mcp_bridge()` 内部分叉）
 
 ```rust
 pub async fn run_mcp_bridge() -> ! {
-    if std::env::var(aionui_team::guide::GuideStdioConfig::ENV_BACKEND).is_ok() {
+    if std::env::var(chislui_team::guide::GuideStdioConfig::ENV_BACKEND).is_ok() {
         run_guide_bridge().await
     } else {
         run_team_bridge().await
@@ -1385,7 +1385,7 @@ async fn run_guide_bridge() -> ! {
 
     // 每条 tools/call 请求往 params 里追加 backend + conversation_id
     // 然后走 TCP 发给 GuideMcpServer
-    // （Guide server 用这两个字段做业务判断，比如 aion_create_team 的 caller 复用）
+    // （Guide server 用这两个字段做业务判断，比如 chisl_create_team 的 caller 复用）
 }
 ```
 
@@ -1395,17 +1395,17 @@ async fn run_guide_bridge() -> ! {
 
 ## 29. Guide prompt 注入 + capability 判定（Wave 5 · 模块 W5-D28）
 
-**文件**：`crates/aionui-team/src/guide/capability.rs`（新增）
+**文件**：`crates/chislui-team/src/guide/capability.rs`（新增）
 
 ```rust
-const TEAM_CAPABLE_BACKENDS: &[&str] = &["claude", "codex", "gemini", "aionrs"];
+const TEAM_CAPABLE_BACKENDS: &[&str] = &["claude", "codex", "gemini", "chislrs"];
 
 pub fn is_team_capable_backend(backend: &str, mcp_stdio_capable: bool) -> bool {
     TEAM_CAPABLE_BACKENDS.contains(&backend) || mcp_stdio_capable
 }
 ```
 
-**文件**：`crates/aionui-ai-agent/src/acp_agent.rs`（instructions 构造点）
+**文件**：`crates/chislui-ai-agent/src/acp_agent.rs`（instructions 构造点）
 
 ```rust
 // 注入顺序：既有 preset_context + 新 Guide prompt + user messages
@@ -1439,11 +1439,11 @@ if config.team_mcp_stdio_config.is_none()
 
 ## 30. `team_spawn_agent` 真实落地（Wave 5 · 模块 W5-D29）
 
-**文件**：`crates/aionui-team/src/session.rs`
+**文件**：`crates/chislui-team/src/session.rs`
 
 ```rust
 impl TeamSession {
-    /// MCP spawn 闭环（AionUi TeamSessionService.ts:763-787 等价）
+    /// MCP spawn 闭环（ChislUi TeamSessionService.ts:763-787 等价）
     pub async fn spawn_agent(
         &self,
         caller_slot_id: &str,
@@ -1474,13 +1474,13 @@ pub struct SpawnAgentRequest {
 10. `wake(new_slot_id)` 触发首次 role prompt 注入（经 W2 D7 的 compute_wake_input → W4-D18 锁 → send_message）
 11. emit WS `team.listChanged{action: 'agent_added'}` + `team.agentSpawned`
 
-**错误回滚**：任一步失败需回滚前面的副作用（agent remove + conversation delete + task kill）；phase1 最小实现：若步 9/10 失败只 log + set_status(Failed) 不回滚 agents 数组（AionUi 参考实现也不回滚）。
+**错误回滚**：任一步失败需回滚前面的副作用（agent remove + conversation delete + task kill）；phase1 最小实现：若步 9/10 失败只 log + set_status(Failed) 不回滚 agents 数组（ChislUi 参考实现也不回滚）。
 
 ---
 
 ## 31. `team_shutdown_agent` 闭环（Wave 5 · 模块 W5-D30）
 
-**文件**：`crates/aionui-team/src/mcp/server.rs`
+**文件**：`crates/chislui-team/src/mcp/server.rs`
 
 ```rust
 fn handle_send_message(
@@ -1491,7 +1491,7 @@ fn handle_send_message(
     let to = /*...*/;
     let message = /*...*/;
 
-    // shutdown 协议拦截（aionui-audit §2.1 shutdown）
+    // shutdown 协议拦截（chislui-audit §2.1 shutdown）
     if message.trim() == "shutdown_approved" {
         return self.handle_shutdown_approved(caller_slot_id).await;
     }
@@ -1504,7 +1504,7 @@ fn handle_send_message(
 }
 ```
 
-**文件**：`crates/aionui-team/src/scheduler.rs`
+**文件**：`crates/chislui-team/src/scheduler.rs`
 
 ```rust
 impl TeammateManager {
@@ -1533,7 +1533,7 @@ impl TeammateManager {
         Ok(())
     }
 
-    /// Wave 5 改造：target role 校验（aionui-audit §2.1 "Leader 不可 shutdown"）
+    /// Wave 5 改造：target role 校验（chislui-audit §2.1 "Leader 不可 shutdown"）
     pub async fn shutdown_agent(&self, caller_slot_id: &str, target: &str) -> Result<(), TeamError> {
         let caller = self.get_agent(caller_slot_id).ok_or(...)?;
         if caller.role != TeammateRole::Lead { return Err(TeamError::LeaderOnly); }
@@ -1578,7 +1578,7 @@ scheduler.wake(&lead);
 
 ## 32. `team.mcpStatus` + `teammate_message` WS（Wave 5 · 模块 W5-D31）
 
-**文件**：`crates/aionui-api-types/src/team.rs`
+**文件**：`crates/chislui-api-types/src/team.rs`
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]

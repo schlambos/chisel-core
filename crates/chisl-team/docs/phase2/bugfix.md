@@ -18,8 +18,8 @@ Leader prompt (`lead.txt`) 规则 9/10 和 87-88 行要求先提方案等确认�
 
 **双保险：**
 
-1. `crates/aionui-team/src/guide/server.rs:156` — send_message 追加 `[SYSTEM NOTE]` 明确指示直接 spawn
-2. `crates/aionui-team/src/prompts/prompt_templates/lead.txt` — 规则 9/10/88 增加 SYSTEM NOTE 例外
+1. `crates/chislui-team/src/guide/server.rs:156` — send_message 追加 `[SYSTEM NOTE]` 明确指示直接 spawn
+2. `crates/chislui-team/src/prompts/prompt_templates/lead.txt` — 规则 9/10/88 增加 SYSTEM NOTE 例外
 
 ---
 
@@ -33,12 +33,12 @@ Leader prompt (`lead.txt`) 规则 9/10 和 87-88 行要求先提方案等确认�
 
 ### 修复
 
-- `crates/aionui-team/src/service.rs` — create_team 成功后 broadcast `team.created` 事件
+- `crates/chislui-team/src/service.rs` — create_team 成功后 broadcast `team.created` 事件
 - 同时在 adopt 旧 conversation 时广播 `conversation.listChanged(updated)` 让前端移除旧对话
 
 ### 前端待做
 
-前端需监听 `team.created` + `conversation.listChanged` 实现自动跳转。已提 issue: https://github.com/iOfficeAI/AionUi/issues/2734
+前端需监听 `team.created` + `conversation.listChanged` 实现自动跳转。已提 issue: https://github.com/iOfficeAI/ChislUi/issues/2734
 
 ---
 
@@ -54,8 +54,8 @@ Team 成员 conversation extra 里没有 `session_mode`。Claude Code 默认 def
 
 在 team 成员创建时强制写入 `"session_mode": "bypassPermissions"` 到 conversation extra：
 
-- `crates/aionui-team/src/service.rs` — `rebuild_agent_processes` 的 patch 加 `session_mode`
-- `crates/aionui-team/src/session.rs` — `attach_spawned_agent_process_bg` 的 patch 加 `session_mode`
+- `crates/chislui-team/src/service.rs` — `rebuild_agent_processes` 的 patch 加 `session_mode`
+- `crates/chislui-team/src/session.rs` — `attach_spawned_agent_process_bg` 的 patch 加 `session_mode`
 
 ---
 
@@ -89,7 +89,7 @@ Team 成员 conversation extra 里没有 `session_mode`。Claude Code 默认 def
 
 ### 修复
 
-`crates/aionui-team/src/mcp/server.rs` — `exec_shutdown_agent` 写入 mailbox 后调用 `svc.wake_agent_in_session(team_id, &target_slot_id)` 唤醒目标。
+`crates/chislui-team/src/mcp/server.rs` — `exec_shutdown_agent` 写入 mailbox 后调用 `svc.wake_agent_in_session(team_id, &target_slot_id)` 唤醒目标。
 
 ---
 
@@ -103,7 +103,7 @@ Team 成员 conversation extra 里没有 `session_mode`。Claude Code 默认 def
 
 ### 修复
 
-`crates/aionui-team/src/service.rs` — 新增 `ensure_session_locks: DashMap<String, Mutex>` 字段，`ensure_session` 加 per-team mutex + double-check locking。
+`crates/chislui-team/src/service.rs` — 新增 `ensure_session_locks: DashMap<String, Mutex>` 字段，`ensure_session` 加 per-team mutex + double-check locking。
 
 ---
 
@@ -117,7 +117,7 @@ Session resume 时 CLI 重新 spawn `mcp-guide-stdio` 子进程，Guide HTTP ser
 
 ### 修复
 
-`crates/aionui-app/src/guide_stdio.rs` — `forward_tool` 加最多 3 次重试（间隔 500ms/1s/1.5s）。
+`crates/chislui-app/src/guide_stdio.rs` — `forward_tool` 加最多 3 次重试（间隔 500ms/1s/1.5s）。
 
 ---
 
@@ -193,31 +193,31 @@ WebSocket 事件 payload 中增加 `msg_id` 字段，供前端去重。前端应
 ## 改动文件清单（均未提交）
 
 ```
-crates/aionui-team/src/service.rs          — wake_lock 修复、StreamRelay、ensure_session 锁、team.created 事件、conversation.listChanged、session_mode
-crates/aionui-team/src/session.rs          — try_wake 加 StreamRelay、移除 leader mirror 跳过、session_mode、msg_id 去重
-crates/aionui-team/src/guide/server.rs     — send_message 加 [SYSTEM NOTE]
-crates/aionui-team/src/prompts/prompt_templates/lead.txt — SYSTEM NOTE 例外规则
-crates/aionui-team/src/mcp/server.rs       — shutdown_agent 加 wake
-crates/aionui-team/docs/phase2/bugfix.md   — 本文档
-crates/aionui-conversation/src/service.rs  — pub fn repo() accessor
-crates/aionui-app/src/guide_stdio.rs       — forward_tool 重试逻辑
+crates/chislui-team/src/service.rs          — wake_lock 修复、StreamRelay、ensure_session 锁、team.created 事件、conversation.listChanged、session_mode
+crates/chislui-team/src/session.rs          — try_wake 加 StreamRelay、移除 leader mirror 跳过、session_mode、msg_id 去重
+crates/chislui-team/src/guide/server.rs     — send_message 加 [SYSTEM NOTE]
+crates/chislui-team/src/prompts/prompt_templates/lead.txt — SYSTEM NOTE 例外规则
+crates/chislui-team/src/mcp/server.rs       — shutdown_agent 加 wake
+crates/chislui-team/docs/phase2/bugfix.md   — 本文档
+crates/chislui-conversation/src/service.rs  — pub fn repo() accessor
+crates/chislui-app/src/guide_stdio.rs       — forward_tool 重试逻辑
 ```
 
 ---
 
 ## 重要操作提示
 
-1. build release 后必须执行 `pkill -f aionui-backend` 杀掉旧进程，再重启前端
-2. 当前 release binary 已包含所有修复：`/Users/zhuqingyu/project/aionui-backend/target/release/aionui-backend`
+1. build release 后必须执行 `pkill -f chislui-backend` 杀掉旧进程，再重启前端
+2. 当前 release binary 已包含所有修复：`/Users/zhuqingyu/project/chislui-backend/target/release/chislui-backend`
 3. 代码改动均在工作区未提交，需要 commit
 
 ---
 
 ## 环境信息
 
-- Backend binary: `/Users/zhuqingyu/project/aionui-backend/target/release/aionui-backend`
-- Symlink: `~/.local/bin/aionui-backend` → 上述 binary
-- Frontend: `/Users/zhuqingyu/project/AionUi` branch `feat/backend-migration`
+- Backend binary: `/Users/zhuqingyu/project/chislui-backend/target/release/chislui-backend`
+- Symlink: `~/.local/bin/chislui-backend` → 上述 binary
+- Frontend: `/Users/zhuqingyu/project/ChislUi` branch `feat/backend-migration`
 - Backend fix branch: `fix/team-communication-bugs`
-- Log file: `/Users/zhuqingyu/Library/Logs/AionUi-Dev/2026-05-02.backend.log`
-- Frontend issue: https://github.com/iOfficeAI/AionUi/issues/2734
+- Log file: `/Users/zhuqingyu/Library/Logs/ChislUi-Dev/2026-05-02.backend.log`
+- Frontend issue: https://github.com/iOfficeAI/ChislUi/issues/2734

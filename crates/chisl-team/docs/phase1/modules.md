@@ -11,7 +11,7 @@
 >
 > **相关文档**：[README.md](./README.md) · [interface-contracts.md](./interface-contracts.md) · [milestones.md](./milestones.md)
 >
-> **事实来源**：[backend-audit.md](./backend-audit.md) §1–§5 · [aionui-audit.md](./aionui-audit.md) §1–§4 · [mcp.md](../mcp.md) §4 · [team-prompts.md](../team-prompts.md) §2–§4
+> **事实来源**：[backend-audit.md](./backend-audit.md) §1–§5 · [chislui-audit.md](./chislui-audit.md) §1–§4 · [mcp.md](../mcp.md) §4 · [team-prompts.md](../team-prompts.md) §2–§4
 
 ---
 
@@ -121,11 +121,11 @@ Wave 5（3 人关键路径 + 可并行点）
 
 ## 2. Wave 1 模块详单（每人 ≤ 200 行）
 
-### D1 — `aionui-api-types::team_mcp` 子模块
+### D1 — `chislui-api-types::team_mcp` 子模块
 
 | 项       | 内容                                                                                             |
 | -------- | ------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-api-types/src/team_mcp.rs`（新增） + `lib.rs` 导出（修改）                        |
+| 目标文件 | `crates/chislui-api-types/src/team_mcp.rs`（新增） + `lib.rs` 导出（修改）                        |
 | 职责     | 定义 `TeamMcpStdioConfig { port, token, slot_id }` 和三个 env key 常量                           |
 | 输入     | 无（纯数据类型）                                                                                 |
 | 输出     | `pub struct TeamMcpStdioConfig` + `pub const ENV_*`                                              |
@@ -133,31 +133,31 @@ Wave 5（3 人关键路径 + 可并行点）
 | 测试策略 | 2 条单元测试：JSON roundtrip、serde_json 无 unknown field 报错                                   |
 | 预估 LoC | 40 行                                                                                            |
 | 预估人天 | 0.5                                                                                              |
-| 接口契约 | [interface-contracts.md §1](./interface-contracts.md#1-aionui-api-types-新增类型wave-1--模块-d1) |
+| 接口契约 | [interface-contracts.md §1](./interface-contracts.md#1-chislui-api-types-新增类型wave-1--模块-d1) |
 
 ---
 
-### D2 — `aionui-ai-agent::AcpBuildExtra` 字段扩展
+### D2 — `chislui-ai-agent::AcpBuildExtra` 字段扩展
 
 | 项       | 内容                                                                                                                                                                         |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-ai-agent/src/types.rs`（修改，只加 1 个字段 + import）                                                                                                        |
+| 目标文件 | `crates/chislui-ai-agent/src/types.rs`（修改，只加 1 个字段 + import）                                                                                                        |
 | 职责     | 加 `#[serde(default)] team_mcp_stdio_config: Option<TeamMcpStdioConfig>`                                                                                                     |
 | 输入     | D1 导出的类型                                                                                                                                                                |
 | 输出     | 新字段可反序列化                                                                                                                                                             |
-| 依赖     | D1 必须先 merge（Cargo 依赖层面）**— phase1 特例：D2 里先用 `pub use aionui_api_types::TeamMcpStdioConfig;`，单元测试里用 stub struct 跑通 JSON；待 D1 merge 后只需删 stub** |
+| 依赖     | D1 必须先 merge（Cargo 依赖层面）**— phase1 特例：D2 里先用 `pub use chislui_api_types::TeamMcpStdioConfig;`，单元测试里用 stub struct 跑通 JSON；待 D1 merge 后只需删 stub** |
 | 测试策略 | 2 条：旧 JSON（无字段）反序列化为 None；新 JSON 正确解出 config                                                                                                              |
 | 预估 LoC | 15 行                                                                                                                                                                        |
 | 预估人天 | 0.3                                                                                                                                                                          |
-| 接口契约 | [§2](./interface-contracts.md#2-aionui-ai-agenttypesacpbuildextra-扩展wave-1--模块-d2)                                                                                       |
+| 接口契约 | [§2](./interface-contracts.md#2-chislui-ai-agenttypesacpbuildextra-扩展wave-1--模块-d2)                                                                                       |
 
 ---
 
-### D3 — `aionui-team::mcp::bridge::TeamMcpStdioServerSpec`
+### D3 — `chislui-team::mcp::bridge::TeamMcpStdioServerSpec`
 
 | 项       | 内容                                                                                                                                                                                                                                                          |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/mcp/bridge.rs`（修改：替换原 `TeamMcpStdioConfig` 用 `pub use` + 新增 ServerSpec）                                                                                                                                                    |
+| 目标文件 | `crates/chislui-team/src/mcp/bridge.rs`（修改：替换原 `TeamMcpStdioConfig` 用 `pub use` + 新增 ServerSpec）                                                                                                                                                    |
 | 职责     | 从 `(team_id, backend_binary_path, TeamMcpStdioConfig)` 构造出 `{name, command, args, env}`；并提供 `into_sdk()` 方法转成 `agent_client_protocol_schema::McpServer`（此前未用过的 variant —— **本模块第一步：读 SDK 源码确定 variant 形状并写进 TODO 注释**） |
 | 输入     | D1 类型 + SDK 类型                                                                                                                                                                                                                                            |
 | 输出     | `pub struct TeamMcpStdioServerSpec` + `from_config()` + `into_sdk()`                                                                                                                                                                                          |
@@ -165,7 +165,7 @@ Wave 5（3 人关键路径 + 可并行点）
 | 测试策略 | 3 条：from_config 字段填充；env 命名对齐 D1 常量；snapshot SDK 序列化结果（tools/list 场景反序列化保持稳定）                                                                                                                                                  |
 | 预估 LoC | 80 行                                                                                                                                                                                                                                                         |
 | 预估人天 | 1.0（含确认 SDK variant 形状的 0.3 天）                                                                                                                                                                                                                       |
-| 接口契约 | [§3](./interface-contracts.md#3-aionui-teammcpbridge-新增serverspecwave-1--模块-d3)                                                                                                                                                                           |
+| 接口契约 | [§3](./interface-contracts.md#3-chislui-teammcpbridge-新增serverspecwave-1--模块-d3)                                                                                                                                                                           |
 
 ---
 
@@ -173,17 +173,17 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项              | 内容                                                                                                                                                                                                                                                                                                                       |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件        | `crates/aionui-team/src/mcp/tools.rs`（修改）+ `server.rs` dispatch 分支（修改）                                                                                                                                                                                                                                           |
+| 目标文件        | `crates/chislui-team/src/mcp/tools.rs`（修改）+ `server.rs` dispatch 分支（修改）                                                                                                                                                                                                                                           |
 | 职责            | 加 descriptor（文本原样复用 [team-prompts.md §5.2](../team-prompts.md#52-team-内部-mcp10-个工具)）+ phase1 最小 handler                                                                                                                                                                                                    |
-| phase1 最小实现 | `team_list_models`：返回固定 JSON `{agent_types:[{type:"claude",models:["claude-sonnet-4","claude-opus-4"]},{type:"codex",models:["gpt-5"]},...]}`（不读真实 registry）；`team_describe_assistant`：统一返回 `"Preset assistant not found"` 文本（backend 尚无 assistants 配置，aionui-audit §7.1 "workspace" 一致未实现） |
+| phase1 最小实现 | `team_list_models`：返回固定 JSON `{agent_types:[{type:"claude",models:["claude-sonnet-4","claude-opus-4"]},{type:"codex",models:["gpt-5"]},...]}`（不读真实 registry）；`team_describe_assistant`：统一返回 `"Preset assistant not found"` 文本（backend 尚无 assistants 配置，chislui-audit §7.1 "workspace" 一致未实现） |
 | 输入            | 无（phase1 用 hardcoded backend 表）                                                                                                                                                                                                                                                                                       |
 | 输出            | 两个 descriptor + 两个 handler                                                                                                                                                                                                                                                                                             |
 | 依赖            | 无                                                                                                                                                                                                                                                                                                                         |
 | 测试策略        | 4 条：2 个 descriptor 的文本匹配 team-prompts.md 原文；2 个 handler 返回 ToolResult.isError=false                                                                                                                                                                                                                          |
 | 预估 LoC        | 150 行（含两段 description 文本 + handler + 测试 fixture）                                                                                                                                                                                                                                                                 |
 | 预估人天        | 1.0                                                                                                                                                                                                                                                                                                                        |
-| 接口契约        | [§4](./interface-contracts.md#4-aionui-teammcptools-新增两个工具-descriptorwave-1--模块-d4)                                                                                                                                                                                                                                |
-| ⚠️ 硬约束       | descriptor 文本**原样**来自 AionUi（aionui-audit §8 #5）；Wave 2 才补真实数据源                                                                                                                                                                                                                                            |
+| 接口契约        | [§4](./interface-contracts.md#4-chislui-teammcptools-新增两个工具-descriptorwave-1--模块-d4)                                                                                                                                                                                                                                |
+| ⚠️ 硬约束       | descriptor 文本**原样**来自 ChislUi（chislui-audit §8 #5）；Wave 2 才补真实数据源                                                                                                                                                                                                                                            |
 
 ---
 
@@ -191,54 +191,54 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                                                                                                     |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/mcp/tools.rs`（新增 `pub const TEAM_SPAWN_AGENT_DESCRIPTION: &str = r#"..."#;`） + 替换现有 `team_spawn_agent` descriptor 中的 description 字段引用常量                                                                                                          |
-| 职责     | 只做一件事：把 AionUi `toolDescriptions.ts:1-18` 原文（"3 PRECONDITIONS + STRICT 流程"）**逐字节**复制到 Rust 常量替换后端原有的极简自造描述（"Dynamically create a new teammate agent (Lead only)."）；现有 D4 模块只管新加的 2 个工具，这条是改已有工具                                |
+| 目标文件 | `crates/chislui-team/src/mcp/tools.rs`（新增 `pub const TEAM_SPAWN_AGENT_DESCRIPTION: &str = r#"..."#;`） + 替换现有 `team_spawn_agent` descriptor 中的 description 字段引用常量                                                                                                          |
+| 职责     | 只做一件事：把 ChislUi `toolDescriptions.ts:1-18` 原文（"3 PRECONDITIONS + STRICT 流程"）**逐字节**复制到 Rust 常量替换后端原有的极简自造描述（"Dynamically create a new teammate agent (Lead only)."）；现有 D4 模块只管新加的 2 个工具，这条是改已有工具                                |
 | 依赖     | 无（纯文本常量）                                                                                                                                                                                                                                                                         |
 | 测试     | 2 条：常量与 team-prompts.md §5.2 `team_spawn_agent` 原文 `diff -w` 零差异；`tools/list` 返回的该工具 description 等于常量                                                                                                                                                               |
 | 预估 LoC | 40（常量 + 替换 + 测试）                                                                                                                                                                                                                                                                 |
 | 预估人天 | 0.3                                                                                                                                                                                                                                                                                      |
-| 事实来源 | [backend-audit §3.5 #48](./backend-audit.md#35-交叉审阅补漏二轮对照-aionui-audit-7-8-后新发现) 标 **P0** · [aionui-audit §8 #5](./aionui-audit.md#8-源码中发现的硬约束agent-行为易坏点)（原文复用硬约束） · [team-prompts.md §5.2 team_spawn_agent](../team-prompts.md#team_spawn_agent) |
+| 事实来源 | [backend-audit §3.5 #48](./backend-audit.md#35-交叉审阅补漏二轮对照-chislui-audit-7-8-后新发现) 标 **P0** · [chislui-audit §8 #5](./chislui-audit.md#8-源码中发现的硬约束agent-行为易坏点)（原文复用硬约束） · [team-prompts.md §5.2 team_spawn_agent](../team-prompts.md#team_spawn_agent) |
 
 ---
 
-### D5 — `aionui-team::prompts` 三层模板 + builder
+### D5 — `chislui-team::prompts` 三层模板 + builder
 
 | 项           | 内容                                                                                                                                                                                                                                                              |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件     | `crates/aionui-team/src/prompts.rs`（**重写**：保留 `build_wake_payload` 概念，替换三个 builder）                                                                                                                                                                 |
+| 目标文件     | `crates/chislui-team/src/prompts.rs`（**重写**：保留 `build_wake_payload` 概念，替换三个 builder）                                                                                                                                                                 |
 | 职责         | 定义四份常量（Guide / Lead / Teammate 模板 + spawn 工具描述），实现新签名 builder                                                                                                                                                                                 |
-| 模板来源     | [team-prompts.md §2/§3/§4/§5](../team-prompts.md) —— **原样复用 AionUi 英文，禁翻译、禁改写**                                                                                                                                                                     |
-| builder 任务 | 按 [interface-contracts.md §5](./interface-contracts.md#5-aionui-teamprompts-大幅扩写wave-1--模块-d5) 的 params 产出字符串；`## Your Teammates` / `## Available Agent Types` / `## Available Preset Assistants` / `## Team Workspace` 四个动态 section 按条件开关 |
+| 模板来源     | [team-prompts.md §2/§3/§4/§5](../team-prompts.md) —— **原样复用 ChislUi 英文，禁翻译、禁改写**                                                                                                                                                                     |
+| builder 任务 | 按 [interface-contracts.md §5](./interface-contracts.md#5-chislui-teamprompts-大幅扩写wave-1--模块-d5) 的 params 产出字符串；`## Your Teammates` / `## Available Agent Types` / `## Available Preset Assistants` / `## Team Workspace` 四个动态 section 按条件开关 |
 | 输入         | TeamAgent / MailboxMessage / TeamTask / HashMap<slot_id,name>                                                                                                                                                                                                     |
 | 输出         | 5 个 pub fn（3 个 role builder + team_guide + wake_payload）                                                                                                                                                                                                      |
-| 依赖         | `aionui-team::types`（已存在）                                                                                                                                                                                                                                    |
+| 依赖         | `chislui-team::types`（已存在）                                                                                                                                                                                                                                    |
 | 测试策略     | 6 条快照测试：lead 最小参数；lead 带 preset assistants；teammate 最小；teammate 带 renamed；wake_payload 空邮件箱；wake_payload 有任务和邮件                                                                                                                      |
-| 预估 LoC     | 需要承载 500+ 行 AionUi 原文文本 → **虽超 200 行约束，但都是 `r#"..."#` 常量，实际"代码"逻辑 < 150 行。此处申请例外**：模板原文是"原料"不是"逻辑"，leader 已默许（phase1 README 会重申）                                                                          |
-| 预估人天     | 1.5（含模板逐行从 AionUi 源码拷贝校对的 0.5 天）                                                                                                                                                                                                                  |
-| 接口契约     | [§5](./interface-contracts.md#5-aionui-teamprompts-大幅扩写wave-1--模块-d5)                                                                                                                                                                                       |
+| 预估 LoC     | 需要承载 500+ 行 ChislUi 原文文本 → **虽超 200 行约束，但都是 `r#"..."#` 常量，实际"代码"逻辑 < 150 行。此处申请例外**：模板原文是"原料"不是"逻辑"，leader 已默许（phase1 README 会重申）                                                                          |
+| 预估人天     | 1.5（含模板逐行从 ChislUi 源码拷贝校对的 0.5 天）                                                                                                                                                                                                                  |
+| 接口契约     | [§5](./interface-contracts.md#5-chislui-teamprompts-大幅扩写wave-1--模块-d5)                                                                                                                                                                                       |
 
-**例外说明**：因 AionUi 三份 prompt 加起来 410 行原文必须原样搬运，模板文本视作"原料"而非"逻辑"（aionui-audit §8 #5 硬约束）。默认方案已按 team lead 要求把 D5 拆成 **4 个子模块 D5a / D5b-1 / D5b-2 / D5c**（即 8 人 Wave 1 里的 D5 系列），每人代码 < 200 行：
+**例外说明**：因 ChislUi 三份 prompt 加起来 410 行原文必须原样搬运，模板文本视作"原料"而非"逻辑"（chislui-audit §8 #5 硬约束）。默认方案已按 team lead 要求把 D5 拆成 **4 个子模块 D5a / D5b-1 / D5b-2 / D5c**（即 8 人 Wave 1 里的 D5 系列），每人代码 < 200 行：
 
 - **D5a**：Team Guide 模板常量 + `build_team_guide_prompt()`（~120 行）
-- **D5b-1**：Lead prompt 常量，用 `include_str!("prompt_templates/lead.txt")` 引用 AionUi 原文件。目标文件 `crates/aionui-team/src/prompts/lead.rs`（代码 < 50 行）+ `crates/aionui-team/src/prompts/prompt_templates/lead.txt`（逐字节复制 AionUi `leadPrompt.ts` 模板原文）
-- **D5b-2**：`build_lead_prompt()` builder 实现（依赖 D5b-1 的常量）。目标文件 `crates/aionui-team/src/prompts/lead.rs` 的 builder 部分（~30 行 Rust）
+- **D5b-1**：Lead prompt 常量，用 `include_str!("prompt_templates/lead.txt")` 引用 ChislUi 原文件。目标文件 `crates/chislui-team/src/prompts/lead.rs`（代码 < 50 行）+ `crates/chislui-team/src/prompts/prompt_templates/lead.txt`（逐字节复制 ChislUi `leadPrompt.ts` 模板原文）
+- **D5b-2**：`build_lead_prompt()` builder 实现（依赖 D5b-1 的常量）。目标文件 `crates/chislui-team/src/prompts/lead.rs` 的 builder 部分（~30 行 Rust）
 - **D5c**：Teammate 模板常量 + `build_teammate_prompt()` + `build_wake_payload()`（~150 行）
 
 > **D5b-1 / D5b-2 依赖关系**：D5b-2 语义上依赖 D5b-1 提供的 `pub const LEAD_PROMPT_TEMPLATE: &str = include_str!(...)`。phase1 并行策略：D5b-2 开工前先在本地 stub 一个 `LEAD_PROMPT_TEMPLATE = ""`；D5b-1 merge 后只需删 stub。与 D1→D2/D3/D6 同样的"stub 起手"模式。
 
 ---
 
-### D6 — `aionui-app mcp-bridge` 子命令
+### D6 — `chislui-app mcp-bridge` 子命令
 
 | 项       | 内容                                                                                                                                                                                                          |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-app/src/bridge.rs`（新增） + `main.rs`（新增 argv 分支）                                                                                                                                       |
+| 目标文件 | `crates/chislui-app/src/bridge.rs`（新增） + `main.rs`（新增 argv 分支）                                                                                                                                       |
 | 职责     | 实现 stdio↔TCP 透传（mcp.md §4.6 的 4 步）                                                                                                                                                                    |
-| 依赖     | `rmcp` 或手写最小 JSON-RPC 2.0 over stdio；`aionui-team::mcp::protocol::{read_frame, write_frame}`；D1 的 env key                                                                                             |
+| 依赖     | `rmcp` 或手写最小 JSON-RPC 2.0 over stdio；`chislui-team::mcp::protocol::{read_frame, write_frame}`；D1 的 env key                                                                                             |
 | 测试策略 | 2 条集成测试：1) spawn bridge 子进程 → 测试代码做 ACP 侧（向 stdin 发 `tools/list`）+ mock TCP server 侧（校验请求里有 `auth_token`、返回 fake tools）；2) TCP 连不上时 bridge 在 1s 内退出（非零 exit code） |
 | 预估 LoC | 180 行（含 argv parse + stdio loop + tcp loop + signal handling）                                                                                                                                             |
 | 预估人天 | 1.5                                                                                                                                                                                                           |
-| 接口契约 | [§8](./interface-contracts.md#8-aionui-app-新增子命令-mcp-bridgewave-1--模块-d6)                                                                                                                              |
+| 接口契约 | [§8](./interface-contracts.md#8-chislui-app-新增子命令-mcp-bridgewave-1--模块-d6)                                                                                                                              |
 
 ---
 
@@ -250,13 +250,13 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-team/src/session.rs`（只新增三个 pub 方法，不改 send 路径）                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 目标文件 | `crates/chislui-team/src/session.rs`（只新增三个 pub 方法，不改 send 路径）                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | 职责     | 只实现三个无副作用方法：<br>a. `stdio_spec(slot_id)`：封 `TeamMcpStdioServerSpec::from_config(team_id, binary_path, mcp_stdio_config(slot_id))` 返回 spec<br>b. `compute_wake_input(slot_id) -> Option<WakeInput>`：读 status + unread + tasks → 按 pending/failed 判断是否注入 role prompt → 用 D5 builder 拼 first_message；mailbox 空时 `should_send = false`<br>c. `on_agent_finish(conv_id, is_error)`：调 `scheduler.finalize_turn(slot_id, &[])` → 返回值交给调用方（本模块不直接 re-wake，re-wake 在 D7b） |
 | 依赖     | D3 Spec + D5 builder + D8 scheduler                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | 测试     | 4 条：pending agent 首次 compute_wake_input 返回 WithRolePrompt；working agent compute_wake_input 返回 None；mailbox 空时 should_send=false；on_agent_finish 返回 Some(lead_slot_id)                                                                                                                                                                                                                                                                                                                               |
 | 预估 LoC | 150                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | 预估人天 | 1.5                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| 接口契约 | [§6](./interface-contracts.md#6-aionui-teamsessionteamsession-新方法wave-2--模块-d7)                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 接口契约 | [§6](./interface-contracts.md#6-chislui-teamsessionteamsession-新方法wave-2--模块-d7)                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ---
 
@@ -264,14 +264,14 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/session.rs`（只改两个 send 方法）+ `crates/aionui-api-types/src/team.rs`（请求 DTO 加 `files: Option<Vec<String>>` 字段）+ `crates/aionui-team/src/routes.rs`（handler 透传 files）                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 目标文件 | `crates/chislui-team/src/session.rs`（只改两个 send 方法）+ `crates/chislui-api-types/src/team.rs`（请求 DTO 加 `files: Option<Vec<String>>` 字段）+ `crates/chislui-team/src/routes.rs`（handler 透传 files）                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | 职责     | 1) `send_message(content, files)` / `send_message_to_agent(slot_id, content, files)` DTO 和签名加 `files: Option<Vec<String>>` 可选参数（backend-audit §3.5 #45 P0）<br>2) 写完 mailbox → 调 D7a 的 `compute_wake_input(slot_id)` → 若 `should_send` 则 `task_manager.send_message(conv_id, SendMessageData { content: first_message, files, ... })`<br>3) **log-not-throw 语义**：wake 失败（task_manager.send_message err）只 `tracing::warn!` **不** propagate 给 HTTP 调用方 → HTTP 返回 200（mailbox 已写入）；调用方重试会双写（backend-audit §3.5 #46 P0）<br>4) teammate 场景（`send_message_to_agent` 给某非 leader agent）同样接 wake |
 | 依赖     | D7a（compute_wake_input）+ W2 D10（task_manager.send_message 接 SendMessageData）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | 测试     | 5 条：leader send 后 task_manager.send_message 收到 files 参数；mailbox 空时 should_send=false 不调 wake；wake 失败返 200 + log warn（不 propagate err）；附件 files 透传到 SendMessageData；teammate send_message_to_agent 触发 target wake                                                                                                                                                                                                                                                                                                                                                                                                    |
 | 预估 LoC | 120                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | 预估人天 | 1.2                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| 接口契约 | [§6.2](./interface-contracts.md#6-aionui-teamsessionteamsession-新方法wave-2--模块-d7)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| 事实来源 | [backend-audit §3.5 #45/#46](./backend-audit.md#35-交叉审阅补漏二轮对照-aionui-audit-7-8-后新发现) · [aionui-audit §4.1 表格备注](./aionui-audit.md#41-wake-触发源) "log-not-throw"                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| 接口契约 | [§6.2](./interface-contracts.md#6-chislui-teamsessionteamsession-新方法wave-2--模块-d7)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| 事实来源 | [backend-audit §3.5 #45/#46](./backend-audit.md#35-交叉审阅补漏二轮对照-chislui-audit-7-8-后新发现) · [chislui-audit §4.1 表格备注](./chislui-audit.md#41-wake-触发源) "log-not-throw"                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 ---
 
@@ -279,14 +279,14 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                                                                                                                                                   |
 | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/session.rs`（`send_message_to_agent` 加 `silent: bool` 参数 + 占位分支）                                                                                                                                                                                                                                       |
-| 职责     | 只做占位：`silent=true` 走和 `silent=false` 几乎一样的流程，**但不写 user bubble** 到目标 conversation（phase1 因为 Wave 2 还没接通 conversation 的 user bubble 写入路径，此模块仅让签名支持参数，实际 silent 行为的**完整测试**在 Wave 5 W5-D26b 的 `aion_create_team` 场景里真跑（那时 leader 复用 conversation 会用到 silent=true） |
+| 目标文件 | `crates/chislui-team/src/session.rs`（`send_message_to_agent` 加 `silent: bool` 参数 + 占位分支）                                                                                                                                                                                                                                       |
+| 职责     | 只做占位：`silent=true` 走和 `silent=false` 几乎一样的流程，**但不写 user bubble** 到目标 conversation（phase1 因为 Wave 2 还没接通 conversation 的 user bubble 写入路径，此模块仅让签名支持参数，实际 silent 行为的**完整测试**在 Wave 5 W5-D26b 的 `chisl_create_team` 场景里真跑（那时 leader 复用 conversation 会用到 silent=true） |
 | 依赖     | D7b                                                                                                                                                                                                                                                                                                                                    |
 | 测试     | 2 条：silent=true 不 panic；Wave 5 e2e 验证实际效果                                                                                                                                                                                                                                                                                    |
 | 预估 LoC | 40                                                                                                                                                                                                                                                                                                                                     |
 | 预估人天 | 0.3                                                                                                                                                                                                                                                                                                                                    |
-| 接口契约 | [§6.3](./interface-contracts.md#6-aionui-teamsessionteamsession-新方法wave-2--模块-d7)                                                                                                                                                                                                                                                 |
-| 事实来源 | [aionui-audit §4.1](./aionui-audit.md#41-wake-触发源) "silent=true 时 **不** 写 user bubble"                                                                                                                                                                                                                                           |
+| 接口契约 | [§6.3](./interface-contracts.md#6-chislui-teamsessionteamsession-新方法wave-2--模块-d7)                                                                                                                                                                                                                                                 |
+| 事实来源 | [chislui-audit §4.1](./chislui-audit.md#41-wake-触发源) "silent=true 时 **不** 写 user bubble"                                                                                                                                                                                                                                           |
 
 ---
 
@@ -294,8 +294,8 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                                                                                                                                                                    |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/scheduler.rs`（修改）                                                                                                                                                                                                                                                                                                           |
-| 职责     | 1) 在 `TeammateStatus` 加 `Pending` variant（默认值，取代 `None` 状态的"首次"语义，aionui-audit §2.1）<br>2) `try_wake` 判断 `status in {Pending, Failed}` 时返回 `WakePayload::WithRolePrompt`，否则 `WakePayload::MailboxOnly`<br>3) `maybe_wake_leader_when_all_idle` 扩大 settled 集合到 `{Idle, Completed, Failed, Pending}`（aionui-audit §8 #4） |
+| 目标文件 | `crates/chislui-team/src/scheduler.rs`（修改）                                                                                                                                                                                                                                                                                                           |
+| 职责     | 1) 在 `TeammateStatus` 加 `Pending` variant（默认值，取代 `None` 状态的"首次"语义，chislui-audit §2.1）<br>2) `try_wake` 判断 `status in {Pending, Failed}` 时返回 `WakePayload::WithRolePrompt`，否则 `WakePayload::MailboxOnly`<br>3) `maybe_wake_leader_when_all_idle` 扩大 settled 集合到 `{Idle, Completed, Failed, Pending}`（chislui-audit §8 #4） |
 | 输入     | 现有 scheduler + D5 builder                                                                                                                                                                                                                                                                                                                             |
 | 输出     | `WakePayload` 多一个 variant；`try_wake` 签名兼容（内部结构变化）                                                                                                                                                                                                                                                                                       |
 | 依赖     | D5（需要用 role prompt builder） + D7（调用 D7 的 compute_wake_input 或由 D7 封装）                                                                                                                                                                                                                                                                     |
@@ -309,7 +309,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/service.rs`（修改 `new` + `ensure_session`）                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 目标文件 | `crates/chislui-team/src/service.rs`（修改 `new` + `ensure_session`）                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | 职责     | 1) 构造函数加 `task_manager` + `backend_binary_path`<br>2) `ensure_session`：启 MCP server → 对每个 agent 调 `session.stdio_spec(slot_id)` → 调 `conversation_service.update_extra(conv_id, {"team_mcp_stdio_config": spec_config})` → `task_manager.kill(conv_id, TeamSessionRefresh)` → `task_manager.get_or_build_task(conv_id, opts)`<br>3) 全部成功才 insert；失败时 `session.stop()` + 不 insert<br>4) 启动 Finish 事件订阅 task（`task_manager.get_task(conv_id).subscribe()` → 过滤 Finish → 调 `session.on_agent_finish`） |
 | 前置     | `ConversationService` 需要 `update_extra(conv_id, patch)` 公开方法；若现有 API 不支持，D9 作者新增（不需 schema 迁移，extra 是 JSON 字符串列）                                                                                                                                                                                                                                                                                                                                                                                      |
 | 输入     | D7                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -325,8 +325,8 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                         |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-ai-agent/src/acp_agent.rs`（修改 `session_new_and_prompt` + 构造函数加 `backend_binary_path` 字段）                                           |
-| 职责     | 按 [interface-contracts.md §7](./interface-contracts.md#7-aionui-ai-agentacp_agentsession_new_and_prompt-注入wave-2--模块-d10) 改造 `NewSessionRequest` 构造 |
+| 目标文件 | `crates/chislui-ai-agent/src/acp_agent.rs`（修改 `session_new_and_prompt` + 构造函数加 `backend_binary_path` 字段）                                           |
+| 职责     | 按 [interface-contracts.md §7](./interface-contracts.md#7-chislui-ai-agentacp_agentsession_new_and_prompt-注入wave-2--模块-d10) 改造 `NewSessionRequest` 构造 |
 | 输入     | D2（读 config）+ D3（build spec → into_sdk）                                                                                                                 |
 | 输出     | session/new 携带 team MCP                                                                                                                                    |
 | 依赖     | D2 + D3                                                                                                                                                      |
@@ -336,12 +336,12 @@ Wave 5（3 人关键路径 + 可并行点）
 
 ---
 
-### D11 — `aionui-app` 装配 + e2e smoke test
+### D11 — `chislui-app` 装配 + e2e smoke test
 
 | 项       | 内容                                                                                                                                                                                                                                                                                                                                   |
 | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-app/src/state_builders.rs`（修改 `build_team_state` 签名）+ `lib.rs`（传 `backend_binary_path`）+ `crates/aionui-app/tests/team_phase1_smoke.rs`（新增）                                                                                                                                                                |
-| 职责     | 1) `build_team_state` 按 [interface-contracts.md §10](./interface-contracts.md#10-aionui-appstate_buildersbuild_team_state-扩展wave-2--模块-d11) 加参数<br>2) `lib.rs::build_router` 一次性 `current_exe()` 缓存到 `Arc<PathBuf>`<br>3) e2e smoke：按 [README.md §3](./README.md) 的 8 步脚本实跑，校验 agent 能调 `team_send_message` |
+| 目标文件 | `crates/chislui-app/src/state_builders.rs`（修改 `build_team_state` 签名）+ `lib.rs`（传 `backend_binary_path`）+ `crates/chislui-app/tests/team_phase1_smoke.rs`（新增）                                                                                                                                                                |
+| 职责     | 1) `build_team_state` 按 [interface-contracts.md §10](./interface-contracts.md#10-chislui-appstate_buildersbuild_team_state-扩展wave-2--模块-d11) 加参数<br>2) `lib.rs::build_router` 一次性 `current_exe()` 缓存到 `Arc<PathBuf>`<br>3) e2e smoke：按 [README.md §3](./README.md) 的 8 步脚本实跑，校验 agent 能调 `team_send_message` |
 | 输入     | D7 / D9 / D10                                                                                                                                                                                                                                                                                                                          |
 | 输出     | 装配完整 + 可通过的 smoke test                                                                                                                                                                                                                                                                                                         |
 | 依赖     | D7 + D9 + D10（Wave 2 最后）                                                                                                                                                                                                                                                                                                           |
@@ -356,14 +356,14 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                             |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/service.rs`（仅 `remove_team` 方法内在 `stop_session` 前循环遍历 `team.agents` 调 `task_manager.kill(conv_id, Some(AgentKillReason::TeamDeleted))`）                                     |
+| 目标文件 | `crates/chislui-team/src/service.rs`（仅 `remove_team` 方法内在 `stop_session` 前循环遍历 `team.agents` 调 `task_manager.kill(conv_id, Some(AgentKillReason::TeamDeleted))`）                                     |
 | 职责     | 只做一件事：`remove_team` 执行链的最前面加一步——对 team 的每个 agent 调 `task_manager.kill(conv_id, TeamDeleted)`；kill 返回 NotFound 视为成功；kill 返回其他 err 只 log 不阻塞（删除不因 agent 进程残留而失败） |
 | 依赖     | W2 D9（`TeamSessionService::new` 已拿到 `task_manager`）+ W3-D12c（`remove_team(user_id, id)` 归属校验先做）                                                                                                     |
 | 测试     | 2 条集成：建 team（2 个 agent）→ 用 MockWorkerTaskManager 监听 kill → `remove_team` 后 kill 被调 2 次参数是两个 agent 的 conv_id；MockWorkerTaskManager kill 全部返 NotFound → remove_team 仍成功删 team 行      |
 | 预估 LoC | 40                                                                                                                                                                                                               |
 | 预估人天 | 0.3                                                                                                                                                                                                              |
 | 接口契约 | [§12.5](./interface-contracts.md#125-remove_team-级联-killwave-2--模块-d115)                                                                                                                                     |
-| 事实来源 | [backend-audit §3.5 #47](./backend-audit.md#35-交叉审阅补漏二轮对照-aionui-audit-7-8-后新发现) 标 **P0**（agent 进程会变成孤儿） · [aionui-audit §1.4 删除时序图](./aionui-audit.md#14-删除时序图)               |
+| 事实来源 | [backend-audit §3.5 #47](./backend-audit.md#35-交叉审阅补漏二轮对照-chislui-audit-7-8-后新发现) 标 **P0**（agent 进程会变成孤儿） · [chislui-audit §1.4 删除时序图](./chislui-audit.md#14-删除时序图)               |
 
 ---
 
@@ -385,19 +385,19 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                          |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/service.rs`（仅 `list_teams`）+ `crates/aionui-db/src/repository/team.rs`（加 `list_by_user`）+ `crates/aionui-team/src/routes.rs`（仅 list handler） |
+| 目标文件 | `crates/chislui-team/src/service.rs`（仅 `list_teams`）+ `crates/chislui-db/src/repository/team.rs`（加 `list_by_user`）+ `crates/chislui-team/src/routes.rs`（仅 list handler） |
 | 职责     | 只改 `list_teams`：签名 `(user_id: &str)` + repo 查询 `WHERE user_id = ?`                                                                                                     |
 | 依赖     | 无                                                                                                                                                                            |
 | 测试     | 1 条集成：两个 user 各一个 team → A 的 list 只见 A                                                                                                                            |
 | 预估 LoC | 40 · 预估人天 0.3                                                                                                                                                             |
 | 接口契约 | [§13.1](./interface-contracts.md#131-list_teamsuser_id)                                                                                                                       |
-| 事实来源 | [backend-audit §1.2](./backend-audit.md#12-cratesaionui-teamsrcservicers--teamsessionservice) · [aionui-audit §1.1 listTeams(userId)](./aionui-audit.md#11-能力清单)          |
+| 事实来源 | [backend-audit §1.2](./backend-audit.md#12-crateschislui-teamsrcservicers--teamsessionservice) · [chislui-audit §1.1 listTeams(userId)](./chislui-audit.md#11-能力清单)          |
 
 ### W3-D12b — `get_team(user_id, id)` 归属校验
 
 | 项       | 内容                                                                                                                |
 | -------- | ------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/service.rs`（仅 `get_team` 签名改造）+ `crates/aionui-team/src/routes.rs`（仅 get handler） |
+| 目标文件 | `crates/chislui-team/src/service.rs`（仅 `get_team` 签名改造）+ `crates/chislui-team/src/routes.rs`（仅 get handler） |
 | 职责     | 只改 `get_team`：不归属当前 user 的 team_id 返 `NotFound`（信息隐藏，不暴露"存在但无权"）                           |
 | 依赖     | W3-D13a 的 `find_by_id_and_user` trait 方法                                                                         |
 | 测试     | 1 条集成：A 调 `get_team(B_team_id)` 返 NotFound                                                                    |
@@ -409,7 +409,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                             |
 | -------- | ---------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/service.rs`（仅 `remove_team`）+ `crates/aionui-team/src/routes.rs`（仅 delete handler） |
+| 目标文件 | `crates/chislui-team/src/service.rs`（仅 `remove_team`）+ `crates/chislui-team/src/routes.rs`（仅 delete handler） |
 | 职责     | 只改 `remove_team`：不归属返 `NotFound` 且不执行删除                                                             |
 | 依赖     | W3-D13a                                                                                                          |
 | 测试     | 1 条集成：A 调 `remove_team(B_team_id)` 后 B 的 team 仍存在                                                      |
@@ -423,7 +423,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                      |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-db/src/repository/conversation.rs`（trait 加方法）+ `crates/aionui-db/src/repository/sqlite_conversation.rs`（实现）       |
+| 目标文件 | `crates/chislui-db/src/repository/conversation.rs`（trait 加方法）+ `crates/chislui-db/src/repository/sqlite_conversation.rs`（实现）       |
 | 职责     | 只加 repo 方法：`fn list_by_team_id(team_id, user_id) -> Vec<ConversationRow>`；用 `json_extract(extra, '$.team_id') = ? AND user_id = ?` |
 | 依赖     | 无（纯数据层）                                                                                                                            |
 | 测试     | 2 条：命中 team + user；属于别的 user 不命中                                                                                              |
@@ -434,7 +434,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项           | 内容                                                                                                            |
 | ------------ | --------------------------------------------------------------------------------------------------------------- |
-| 目标文件     | `crates/aionui-team/src/service.rs`（新增私有 fn，不触碰 `get_team`）                                           |
+| 目标文件     | `crates/chislui-team/src/service.rs`（新增私有 fn，不触碰 `get_team`）                                           |
 | 职责         | 只做反推：输入 `Vec<ConversationRow>` → 输出 `Vec<TeamAgent>`（按 `created_at asc`，第一个 = Lead）；不持久化   |
 | 依赖         | W3-D13a（取数据需要）                                                                                           |
 | 测试         | 2 条：2 个 conversation 反推 2 个 agent；first agent = Lead                                                     |
@@ -446,7 +446,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                            |
 | -------- | ----------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/service.rs`（仅在 `get_team` 末尾加 if 分支）                           |
+| 目标文件 | `crates/chislui-team/src/service.rs`（仅在 `get_team` 末尾加 if 分支）                           |
 | 职责     | 只做串接：若 `agents.is_empty()` → 调 D13a 拉 conversations → 调 D13b 反推 → `repo.update` 回写 |
 | 依赖     | W3-D12b（get_team 签名）+ W3-D13a + W3-D13b                                                     |
 | 测试     | 1 条集成：agents=[] 的 team → 首次 get 反推 + 回写，二次 get 不再 repair                        |
@@ -459,7 +459,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                          |
 | -------- | ------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/scheduler.rs` 新子模块（或 `utils.rs`），暴露 `pub fn normalize_name(&str) -> String` |
+| 目标文件 | `crates/chislui-team/src/scheduler.rs` 新子模块（或 `utils.rs`），暴露 `pub fn normalize_name(&str) -> String` |
 | 职责     | 只做字符串归一化：trim + filter `is_control()` + to_lowercase                                                 |
 | 依赖     | 无（纯函数，零状态）                                                                                          |
 | 测试     | 3 条：空格 trim；大小写；控制字符过滤                                                                         |
@@ -470,19 +470,19 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                      |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/scheduler.rs`（`TeammateManager::rename_agent` 改造 + 内存字段 `renamed_agents: Mutex<HashMap<String, String>>`） |
+| 目标文件 | `crates/chislui-team/src/scheduler.rs`（`TeammateManager::rename_agent` 改造 + 内存字段 `renamed_agents: Mutex<HashMap<String, String>>`） |
 | 职责     | 只改 `rename_agent`：调 D14a 归一化 → unique 冲突校验 → 首次 rename 写 `renamed_agents[slot_id] = old_name`（非首次不覆盖）               |
 | 依赖     | W3-D14a                                                                                                                                   |
 | 测试     | 3 条：冲突返 Err；首次记录；二次不覆盖                                                                                                    |
 | 预估 LoC | 70 · 预估人天 0.5                                                                                                                         |
 | 接口契约 | [§15.2](./interface-contracts.md#152-rename_agent-冲突--renamed_agents)                                                                   |
-| 事实来源 | [aionui-audit §2.1 renameAgent](./aionui-audit.md#21-能力清单)                                                                            |
+| 事实来源 | [chislui-audit §2.1 renameAgent](./chislui-audit.md#21-能力清单)                                                                            |
 
 ### W3-D14c — Prompt builder 读 renamed_agents 渲染 `[formerly: X]`
 
 | 项       | 内容                                                                                                      |
 | -------- | --------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/prompts/lead.rs` + `teammate.rs`（只改 `## Your Teammates` 段的渲染逻辑）         |
+| 目标文件 | `crates/chislui-team/src/prompts/lead.rs` + `teammate.rs`（只改 `## Your Teammates` 段的渲染逻辑）         |
 | 职责     | 只改 teammates 列表渲染：对每个 agent 查 `renamed_agents.get(slot_id)`；Some 时追加 ` [formerly: <原名>]` |
 | 依赖     | W3-D14b（数据源） + D5b-2 / D5c（builder 签名已预留 `renamed_agents` 参数）                               |
 | 测试     | 2 条快照：有 renamed 渲染；无 renamed 不渲染                                                              |
@@ -495,7 +495,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                    |
 | -------- | ----------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-api-types/src/team.rs`（`CreateAgentRequest` 加字段）    |
+| 目标文件 | `crates/chislui-api-types/src/team.rs`（`CreateAgentRequest` 加字段）    |
 | 职责     | 只加 1 个字段：`#[serde(default)] pub conversation_id: Option<String>`  |
 | 依赖     | 无                                                                      |
 | 测试     | 2 条：旧 JSON → None；新 JSON → Some                                    |
@@ -506,15 +506,15 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项           | 内容                                                                                                                                                                                     |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件     | `crates/aionui-team/src/service.rs`（`create_team` 内 for each agent 循环里加一个 if 分支）                                                                                              |
+| 目标文件     | `crates/chislui-team/src/service.rs`（`create_team` 内 for each agent 循环里加一个 if 分支）                                                                                              |
 | 职责         | 只做 `if agent.conversation_id.is_some()` 分支：读 conversation → 校验归属（非本 user NotFound）→ 校验冲突（已属别的 team BadRequest）→ `update_extra(team_id)`；None 时走原新建路径不动 |
 | 依赖         | W3-D15a                                                                                                                                                                                  |
 | 测试         | 3 条：合法复用；不存在 NotFound；已属别 team BadRequest                                                                                                                                  |
 | 预估 LoC     | 100 · 预估人天 1.0                                                                                                                                                                       |
 | 不能再拆理由 | 三个校验（存在 / 归属 / 冲突）+ update_extra 是 early-return 决策链，每一步都依赖上一步的结果；拆开会让错误路径跨模块传状态                                                              |
 | 接口契约     | [§16.2](./interface-contracts.md#162-create_team-复用分支)                                                                                                                               |
-| 事实来源     | [aionui-audit §1.1 "单聊→team 的 conversation 复用"](./aionui-audit.md#11-能力清单)                                                                                                      |
-| ⚠️ 注意      | phase1 只实现 REST 路径复用；MCP 路径 `aion_create_team` 的复用由 Wave 5 W5-D26b 完成                                                                                                    |
+| 事实来源     | [chislui-audit §1.1 "单聊→team 的 conversation 复用"](./chislui-audit.md#11-能力清单)                                                                                                      |
+| ⚠️ 注意      | phase1 只实现 REST 路径复用；MCP 路径 `chisl_create_team` 的复用由 Wave 5 W5-D26b 完成                                                                                                    |
 
 ---
 
@@ -522,7 +522,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项           | 内容                                                                                                                                                                               |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件     | `crates/aionui-conversation/src/traits.rs`（新增 trait）+ `crates/aionui-conversation/src/state.rs`（`ConversationService` 加 `team_router: Option<Arc<dyn ITeamMessageRouter>>`） |
+| 目标文件     | `crates/chislui-conversation/src/traits.rs`（新增 trait）+ `crates/chislui-conversation/src/state.rs`（`ConversationService` 加 `team_router: Option<Arc<dyn ITeamMessageRouter>>`） |
 | 职责         | 只做两件纯定义工作：<br>a. 定义 trait（1 个方法 `route_agent_message`）<br>b. ConversationService 构造新增 Option 字段；None 时维持原构造行为                                      |
 | 依赖         | 无（trait 放 conversation crate 内，避免反向依赖 team crate）                                                                                                                      |
 | 测试         | 1 条：默认 None；传入后字段持有正确                                                                                                                                                |
@@ -534,19 +534,19 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                     |
 | -------- | ------------------------------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-conversation/src/service.rs`（仅 `send_message` 入口增加一段 if）                                         |
+| 目标文件 | `crates/chislui-conversation/src/service.rs`（仅 `send_message` 入口增加一段 if）                                         |
 | 职责     | 只做分叉：读 `row.extra.team_id`；非空 && `team_router.is_some()` → 调 router；team_router None 时 log warn 退化到原路径 |
 | 依赖     | W3-D16a                                                                                                                  |
 | 测试     | 3 条：无 team_id 走原路径；有 team_id + router 走 mock；有 team_id 但 router None log warn 退化                          |
 | 预估 LoC | 80 · 预估人天 0.7                                                                                                        |
 | 接口契约 | [§17.2](./interface-contracts.md#172-send_message-路由分叉)                                                              |
-| 事实来源 | [aionui-audit §7.1 "对 agent 发话"](./aionui-audit.md#71-rest--ipc-等价入口backend-需要暴露的-api)                       |
+| 事实来源 | [chislui-audit §7.1 "对 agent 发话"](./chislui-audit.md#71-rest--ipc-等价入口backend-需要暴露的-api)                       |
 
 ### W3-D16c — `TeamSessionService impl ITeamMessageRouter` + 装配
 
 | 项           | 内容                                                                                                                                                                                                                                                      |
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件     | `crates/aionui-team/src/service.rs`（`impl ITeamMessageRouter for TeamSessionService`）+ `crates/aionui-app/src/state_builders.rs`（装配时把 team_session_service clone 作为 router 传进 conversation state）                                             |
+| 目标文件     | `crates/chislui-team/src/service.rs`（`impl ITeamMessageRouter for TeamSessionService`）+ `crates/chislui-app/src/state_builders.rs`（装配时把 team_session_service clone 作为 router 传进 conversation state）                                             |
 | 职责         | 1 件事（两个紧密耦合点）：<br>a. impl trait：按 conv_id → `session.slot_id_of` → 委托 `session.send_message_to_agent`（W2 D7 已有）<br>b. build_app_services 里把 `team_session_service.clone() as Arc<dyn ITeamMessageRouter>` 注入 conversation_service |
 | 依赖         | W3-D16a + W3-D16b + W2 D7                                                                                                                                                                                                                                 |
 | 测试         | 2 条集成：team 成员 conv 发消息 → session.send_message_to_agent 被调；不存在 conv_id 返 NotFound                                                                                                                                                          |
@@ -560,7 +560,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                  |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-common/src/lib.rs`（新增常量 `TEAM_MCP_MAX_FRAME_BYTES`）+ `crates/aionui-team/src/mcp/protocol.rs`（`MAX_MCP_MESSAGE_SIZE` 改为引用） |
+| 目标文件 | `crates/chislui-common/src/lib.rs`（新增常量 `TEAM_MCP_MAX_FRAME_BYTES`）+ `crates/chislui-team/src/mcp/protocol.rs`（`MAX_MCP_MESSAGE_SIZE` 改为引用） |
 | 职责     | 只改帧大小；常量放 common 供未来其他 MCP 复用                                                                                                         |
 | 依赖     | 无                                                                                                                                                    |
 | 测试     | 2 条：63MB roundtrip 通过；65MB 拒                                                                                                                    |
@@ -571,7 +571,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                    |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-common/src/lib.rs`（`TEAM_MCP_REQUEST_TIMEOUT_MS`）+ `crates/aionui-team/src/mcp/server.rs`（dispatch_tool 外层 `tokio::time::timeout`） |
+| 目标文件 | `crates/chislui-common/src/lib.rs`（`TEAM_MCP_REQUEST_TIMEOUT_MS`）+ `crates/chislui-team/src/mcp/server.rs`（dispatch_tool 外层 `tokio::time::timeout`） |
 | 职责     | 只加 300s 超时；超时返 `JsonRpcError::Internal("Request timeout")`                                                                                      |
 | 依赖     | 无                                                                                                                                                      |
 | 测试     | 1 条：handler sleep 301s → timeout error                                                                                                                |
@@ -594,7 +594,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                       |
 | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-ai-agent/src/types.rs`（新 enum）                                                                                                                           |
+| 目标文件 | `crates/chislui-ai-agent/src/types.rs`（新 enum）                                                                                                                           |
 | 职责     | 只定义 enum：`Text { text }` / `ToolUse { tool_name, input }` / `Thought { content }` / `Finish { agent_crash, stop_reason }` / `Error { message }` + `Clone + Debug` 实现 |
 | 依赖     | 无（纯类型）                                                                                                                                                               |
 | 测试     | 1 条：五个 variant 能通过 serde JSON roundtrip                                                                                                                             |
@@ -605,7 +605,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                 |
 | -------- | -------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-ai-agent/src/task_manager.rs`（trait 加方法）                                                         |
+| 目标文件 | `crates/chislui-ai-agent/src/task_manager.rs`（trait 加方法）                                                         |
 | 职责     | 只加 trait 方法 `fn subscribe_stream(&self) -> broadcast::Receiver<AgentStreamChunk>`；不实现                        |
 | 依赖     | W4-D25a                                                                                                              |
 | 测试     | 1 条：`fn implements_send_sync<T: Send + Sync>() {} implements_send_sync::<broadcast::Receiver<AgentStreamChunk>>()` |
@@ -616,7 +616,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                               |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-ai-agent/src/acp_agent.rs`（只加字段 `stream_tx: broadcast::Sender<AgentStreamChunk>` + 构造函数初始化 capacity 256 + impl `AgentManagerHandle::subscribe_stream`） |
+| 目标文件 | `crates/chislui-ai-agent/src/acp_agent.rs`（只加字段 `stream_tx: broadcast::Sender<AgentStreamChunk>` + 构造函数初始化 capacity 256 + impl `AgentManagerHandle::subscribe_stream`） |
 | 职责     | 只做"broadcast 装水管"——加字段、初始化 channel、暴露 subscribe 接口；**不改任何现有 chunk 处理逻辑**（merge 后 broadcast 空闲）                                                    |
 | 依赖     | W4-D25a（chunk 类型）+ W4-D25b（trait 方法签名）                                                                                                                                   |
 | 测试     | 2 条：构造 manager 后 subscribe_stream 返回合法 receiver；无 emit 时 receiver.try_recv 返 Empty                                                                                    |
@@ -628,14 +628,14 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                          |
 | -------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-ai-agent/src/acp_agent.rs`（现有 5 个 chunk 处理点各插一行 `let _ = self.stream_tx.send(...)`）                                |
+| 目标文件 | `crates/chislui-ai-agent/src/acp_agent.rs`（现有 5 个 chunk 处理点各插一行 `let _ = self.stream_tx.send(...)`）                                |
 | 职责     | 只做 emit 点插入：Text / ToolUse / Thought / Finish / Error 五种 chunk 处理处各加一行 send；不 propagate send 错（零订阅者 send 返 Err 正常） |
 | 依赖     | W4-D25c-1（sender 字段）                                                                                                                      |
 | 测试     | 3 条：订阅后收到 Text；收到 Finish；收到 Error                                                                                                |
 | 预估 LoC | 50                                                                                                                                            |
 | 预估人天 | 0.5                                                                                                                                           |
 | 接口契约 | [§19.3.2](./interface-contracts.md#193-acpagentmanager-broadcast-注入)                                                                        |
-| 事实来源 | [backend-audit §3.5 #53](./backend-audit.md#35-交叉审阅补漏二轮对照-aionui-audit-7-8-后新发现)                                                |
+| 事实来源 | [backend-audit §3.5 #53](./backend-audit.md#35-交叉审阅补漏二轮对照-chislui-audit-7-8-后新发现)                                                |
 
 ---
 
@@ -643,19 +643,19 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                       |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/scheduler.rs`（`TeammateManager` 加字段 `active_wakes: DashSet<String>` + 两个方法 `try_acquire_wake_lock` / `release_wake_lock`） |
+| 目标文件 | `crates/chislui-team/src/scheduler.rs`（`TeammateManager` 加字段 `active_wakes: DashSet<String>` + 两个方法 `try_acquire_wake_lock` / `release_wake_lock`） |
 | 职责     | 只做 wake 去重：<br>a. `try_acquire_wake_lock(slot_id) -> bool` 使用 `DashSet::insert` 原子语义<br>b. `release_wake_lock(slot_id)` 调 remove               |
 | 依赖     | 无（纯内存结构）                                                                                                                                           |
 | 测试     | 2 条：并发 100 次 try_acquire → 只有 1 次返 true；release 后 try_acquire 再次成功                                                                          |
 | 预估 LoC | 60 · 预估人天 0.5                                                                                                                                          |
 | 接口契约 | [§20.1](./interface-contracts.md#201-active_wakes-重入锁)                                                                                                  |
-| 事实来源 | [aionui-audit §8 #1/#2](./aionui-audit.md#8-源码中发现的硬约束agent-行为易坏点)                                                                            |
+| 事实来源 | [chislui-audit §8 #1/#2](./chislui-audit.md#8-源码中发现的硬约束agent-行为易坏点)                                                                            |
 
 ### W4-D18b-1 — `wake_timeouts` 存储字段 + `clear_wake_timeout`
 
 | 项       | 内容                                                                                                                                                      |
 | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/scheduler.rs`（`TeammateManager` 只加字段 `wake_timeouts: DashMap<String, JoinHandle<()>>` + `clear_wake_timeout(slot_id)` 实现） |
+| 目标文件 | `crates/chislui-team/src/scheduler.rs`（`TeammateManager` 只加字段 `wake_timeouts: DashMap<String, JoinHandle<()>>` + `clear_wake_timeout(slot_id)` 实现） |
 | 职责     | 只做纯存储操作：字段声明 + `clear_wake_timeout` 方法 `remove(slot_id).map(JoinHandle::abort)`                                                             |
 | 依赖     | 无                                                                                                                                                        |
 | 测试     | 2 条：insert + clear 后 map 为空；clear 不存在的 slot_id 不 panic                                                                                         |
@@ -667,7 +667,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项           | 内容                                                                                                                                                                                                               |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 目标文件     | `crates/aionui-team/src/scheduler.rs`（`arm_wake_timeout(slot_id, stream_rx)` 方法 spawn 后台 task）                                                                                                               |
+| 目标文件     | `crates/chislui-team/src/scheduler.rs`（`arm_wake_timeout(slot_id, stream_rx)` 方法 spawn 后台 task）                                                                                                               |
 | 职责         | 只做 spawn tokio task：`tokio::select!` loop 监听 stream_rx（chunk → 重置 deadline；Finish → 退出）与 `sleep_until(deadline)`（超时 → 调 `handle_inactivity_timeout`，W4-D22 提供）；JoinHandle 存入 D18b-1 的 map |
 | 依赖         | W4-D18b-1（存储） + W4-D25c-2（stream_rx 有效） + W4-D22（超时 handler 存在）                                                                                                                                      |
 | 测试         | 3 条：chunk 到达 reset deadline（不触发 timeout）；60s 无 chunk 触发 inactivity handler；Finish 到达清 map 条目                                                                                                    |
@@ -675,13 +675,13 @@ Wave 5（3 人关键路径 + 可并行点）
 | 预估人天     | 1.0                                                                                                                                                                                                                |
 | 不能再拆理由 | `tokio::select!` 三路（chunk recv / sleep / Finish）是原子并发原语；拆开会让取消语义失控                                                                                                                           |
 | 接口契约     | [§20.2.2](./interface-contracts.md#202-wake_timeouts-60s-看门狗)                                                                                                                                                   |
-| 事实来源     | [aionui-audit §2.1 inactivity watchdog](./aionui-audit.md#21-能力清单)                                                                                                                                             |
+| 事实来源     | [chislui-audit §2.1 inactivity watchdog](./chislui-audit.md#21-能力清单)                                                                                                                                             |
 
 ### W4-D18c — `compute_wake_input` / `send_message` 接入 wake lock
 
 | 项       | 内容                                                                                                                                |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/session.rs`（`compute_wake_input` / `send_message` 开头结尾加 acquire / release）                           |
+| 目标文件 | `crates/chislui-team/src/session.rs`（`compute_wake_input` / `send_message` 开头结尾加 acquire / release）                           |
 | 职责     | 只做调用点接入：session 的两处 wake 触发点在 wake 开始前 `try_acquire_wake_lock`，成功发送后立即 `release_wake_lock`（不等 finish） |
 | 依赖     | W4-D18a                                                                                                                             |
 | 测试     | 2 条：并发两次 compute_wake_input 同 slot → 只有一个走完全程；send 成功后 active_wakes 立即空                                       |
@@ -694,19 +694,19 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/scheduler.rs`（`TeammateManager` 加字段 `finalized_turns: DashMap<String, Instant>` + `begin_finalize(conv_id) -> bool` + `clear_finalized_turn(conv_id)`） |
+| 目标文件 | `crates/chislui-team/src/scheduler.rs`（`TeammateManager` 加字段 `finalized_turns: DashMap<String, Instant>` + `begin_finalize(conv_id) -> bool` + `clear_finalized_turn(conv_id)`） |
 | 职责     | 只做 dedup 存储：`begin_finalize` 若 `now - last < 5s` 返 false；否则写入 + spawn 5s 后清理；`clear_finalized_turn` 即 remove                                                       |
 | 依赖     | 无（纯内存结构）                                                                                                                                                                    |
 | 测试     | 3 条：100ms 内两次 begin_finalize 同 conv → 第二次 false；5s 后再次 true；clear 后立即 true                                                                                         |
 | 预估 LoC | 80 · 预估人天 0.7                                                                                                                                                                   |
 | 接口契约 | [§21.1](./interface-contracts.md#211-finalized_turns-存储)                                                                                                                          |
-| 事实来源 | [aionui-audit §4.3 + §8 #3](./aionui-audit.md#8-源码中发现的硬约束agent-行为易坏点)                                                                                                 |
+| 事实来源 | [chislui-audit §4.3 + §8 #3](./chislui-audit.md#8-源码中发现的硬约束agent-行为易坏点)                                                                                                 |
 
 ### W4-D19b — `on_agent_finish` / re-wake 路径接入 dedup
 
 | 项       | 内容                                                                                                                                                          |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/session.rs`（`on_agent_finish` 第一行插入 `if !scheduler.begin_finalize(conv_id) { return; }`；wake 成功后调 `clear_finalized_turn`） |
+| 目标文件 | `crates/chislui-team/src/session.rs`（`on_agent_finish` 第一行插入 `if !scheduler.begin_finalize(conv_id) { return; }`；wake 成功后调 `clear_finalized_turn`） |
 | 职责     | 只做调用点接入：两个固定位置插入 D19a 提供的方法调用                                                                                                          |
 | 依赖     | W4-D19a                                                                                                                                                       |
 | 测试     | 2 条：同 conv 100ms 两次 Finish → 只 finalize 一次；re-wake 后 finalize 立即可执行                                                                            |
@@ -719,7 +719,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                         |
 | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/scheduler.rs`（新 fn + `CrashReason` enum）                                                                                                                          |
+| 目标文件 | `crates/chislui-team/src/scheduler.rs`（新 fn + `CrashReason` enum）                                                                                                                          |
 | 职责     | 只做识别：`Finish { agent_crash: true }` → `AgentCrash`；`Error { message }` 含 `"process exited unexpectedly"` → `ProcessExited`；含 `"Session not found"` → `SessionNotFound`；否则 `None` |
 | 依赖     | W4-D25a（chunk 类型）                                                                                                                                                                        |
 | 测试     | 4 条：4 种 variant 每种一条单元测试                                                                                                                                                          |
@@ -730,7 +730,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                                                                                                 |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-team/src/scheduler.rs`（`handle_agent_crash` 内部"写 testament"私有 helper）                                                                                                                                                                                          |
+| 目标文件 | `crates/chislui-team/src/scheduler.rs`（`handle_agent_crash` 内部"写 testament"私有 helper）                                                                                                                                                                                          |
 | 职责     | 只做一件事：按 `reason: CrashReason` 格式化 testament 文本（`"Teammate '<name>' crashed during task (reason: <ProcessExited\|AgentCrash\|SessionNotFound>). Last message: ...". Please investigate."`）并 `mailbox.write(from=slot_id, to=lead_slot_id, Message, content=testament)` |
 | 依赖     | W4-D20a（CrashReason enum）                                                                                                                                                                                                                                                          |
 | 测试     | 2 条：三种 reason 的 testament 文本包含对应关键词；mailbox.write 参数 `to=lead_slot_id`                                                                                                                                                                                              |
@@ -742,7 +742,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项           | 内容                                                                                                                                                                                                                                            |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件     | `crates/aionui-team/src/scheduler.rs`（`handle_agent_crash` 主体：串接 D20b-1 的 testament + 下列"进程卫生"步骤）                                                                                                                               |
+| 目标文件     | `crates/chislui-team/src/scheduler.rs`（`handle_agent_crash` 主体：串接 D20b-1 的 testament + 下列"进程卫生"步骤）                                                                                                                               |
 | 职责         | 只做清理+唤醒流水线：<br>a. 调 D20b-1 写 testament<br>b. `task_manager.kill(conv_id, AgentKillReason::Crash)`<br>c. `set_status(slot_id, Failed)`<br>d. `release_wake_lock(slot_id)` + `clear_wake_timeout(slot_id)`<br>e. `wake(lead_slot_id)` |
 | 依赖         | W4-D20b-1 + W4-D18a（release_wake_lock） + W4-D18b-1（clear_wake_timeout）                                                                                                                                                                      |
 | 测试         | 3 条：kill 被调；set_status(Failed) 生效；wake(leader) 被调                                                                                                                                                                                     |
@@ -755,13 +755,13 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                |
 | -------- | --------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/scheduler.rs`（在 D20b 的方法里加 `if role == Lead` 分支）                  |
-| 职责     | 只做 leader crash 的特殊分支：只 `set_status(Failed)`，不 remove、不 wake 其他（aionui-audit §2.1） |
+| 目标文件 | `crates/chislui-team/src/scheduler.rs`（在 D20b 的方法里加 `if role == Lead` 分支）                  |
+| 职责     | 只做 leader crash 的特殊分支：只 `set_status(Failed)`，不 remove、不 wake 其他（chislui-audit §2.1） |
 | 依赖     | W4-D20b                                                                                             |
 | 测试     | 2 条：leader crash 不触发其他 wake；leader crash 后 agents 数组未变                                 |
 | 预估 LoC | 40 · 预估人天 0.3                                                                                   |
 | 接口契约 | [§22.3](./interface-contracts.md#223-handle_agent_crash-leader-分支)                                |
-| 事实来源 | [aionui-audit §2.1 crash recovery](./aionui-audit.md#21-能力清单)                                   |
+| 事实来源 | [chislui-audit §2.1 crash recovery](./chislui-audit.md#21-能力清单)                                   |
 
 ---
 
@@ -769,13 +769,13 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                  |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-common/src/lib.rs`（`RATE_LIMIT_REGEX` once_cell Lazy）+ `crates/aionui-team/src/session.rs`（`on_agent_finish` 里 Error chunk 分支：若 regex 命中 → `set_status(Failed)` 不走 crash） |
+| 目标文件 | `crates/chislui-common/src/lib.rs`（`RATE_LIMIT_REGEX` once_cell Lazy）+ `crates/chislui-team/src/session.rs`（`on_agent_finish` 里 Error chunk 分支：若 regex 命中 → `set_status(Failed)` 不走 crash） |
 | 职责     | 只做 regex 匹配 + 状态设置（不 kill 不 testament）                                                                                                                                                    |
 | 依赖     | W4-D25c                                                                                                                                                                                               |
 | 测试     | 3 条：命中 "HTTP 429"；命中 "rate limit"；不命中 "syntax error"                                                                                                                                       |
 | 预估 LoC | 50 · 预估人天 0.3                                                                                                                                                                                     |
 | 接口契约 | [§23](./interface-contracts.md#23-429--rate-limit-识别)                                                                                                                                               |
-| 事实来源 | [aionui-audit §2.1 "429 / 限流识别"](./aionui-audit.md#21-能力清单)                                                                                                                                   |
+| 事实来源 | [chislui-audit §2.1 "429 / 限流识别"](./chislui-audit.md#21-能力清单)                                                                                                                                   |
 
 ---
 
@@ -783,14 +783,14 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项           | 内容                                                                                                                                                              |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件     | `crates/aionui-team/src/scheduler.rs`（`handle_inactivity_timeout(slot_id)` 被 D18b 的 timer 调用）                                                               |
+| 目标文件     | `crates/chislui-team/src/scheduler.rs`（`handle_inactivity_timeout(slot_id)` 被 D18b 的 timer 调用）                                                               |
 | 职责         | 只做 inactivity 决策：`set_status(Failed)` + `release_wake_lock` + 若非 leader 则写 idle_notification 给 leader + wake leader；leader 自己 stuck 只 failed 不递归 |
 | 依赖         | W4-D18a/b                                                                                                                                                         |
 | 测试         | 3 条：teammate stuck → failed + leader 邮箱有通知；leader stuck → 只 failed；wake_timeout handler 调用后不影响其他 slot timer                                     |
 | 预估 LoC     | 100 · 预估人天 1.0                                                                                                                                                |
 | 不能再拆理由 | 同一个 handler 内 leader / 非 leader 是 if/else 决策树，共用前置（set_status + release_lock）；拆分会让 set_status 调用散落                                       |
 | 接口契约     | [§24](./interface-contracts.md#24-inactivity-watchdog)                                                                                                            |
-| 事实来源     | [aionui-audit §2.1 inactivity watchdog](./aionui-audit.md#21-能力清单)                                                                                            |
+| 事实来源     | [chislui-audit §2.1 inactivity watchdog](./chislui-audit.md#21-能力清单)                                                                                            |
 
 ---
 
@@ -798,14 +798,14 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项           | 内容                                                                                                                                                                                |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件     | `crates/aionui-team/src/service.rs`（`TeamSessionService` 加 `add_agent_locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>` + `add_agent` 入口取锁 + `remove_team` 清 lock entry） |
+| 目标文件     | `crates/chislui-team/src/service.rs`（`TeamSessionService` 加 `add_agent_locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>` + `add_agent` 入口取锁 + `remove_team` 清 lock entry） |
 | 职责         | 只做 add_agent 的 per-team 串行化                                                                                                                                                   |
 | 依赖         | 无                                                                                                                                                                                  |
 | 测试         | 2 条：并发 10 次 add_agent 同 team → 长度 10；不同 team 并发不互相阻塞                                                                                                              |
 | 预估 LoC     | 80 · 预估人天 0.7                                                                                                                                                                   |
 | 不能再拆理由 | lock 的申请 / 使用 / 清理三点必须在同一 service 对象内联动，拆开会让 lock entry 泄漏                                                                                                |
 | 接口契约     | [§25](./interface-contracts.md#25-add_agent_locks-串行化)                                                                                                                           |
-| 事实来源     | [aionui-audit §8 #14](./aionui-audit.md#8-源码中发现的硬约束agent-行为易坏点)                                                                                                       |
+| 事实来源     | [chislui-audit §8 #14](./chislui-audit.md#8-源码中发现的硬约束agent-行为易坏点)                                                                                                       |
 
 ---
 
@@ -813,7 +813,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                   |
 | -------- | ------------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-team/src/mcp/protocol.rs`（新枚举 `McpNotification::McpReady { slot_id, auth_token }`） |
+| 目标文件 | `crates/chislui-team/src/mcp/protocol.rs`（新枚举 `McpNotification::McpReady { slot_id, auth_token }`） |
 | 职责     | 只定义协议类型（serde tag="type"）                                                                     |
 | 依赖     | 无                                                                                                     |
 | 测试     | 1 条：JSON roundtrip                                                                                   |
@@ -824,7 +824,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                           |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/mcp/server.rs`（`TeamMcpServer` 加字段 `ready_latch: DashSet<String>` + `ready_notify: DashMap<String, Arc<Notify>>`） |
+| 目标文件 | `crates/chislui-team/src/mcp/server.rs`（`TeamMcpServer` 加字段 `ready_latch: DashSet<String>` + `ready_notify: DashMap<String, Arc<Notify>>`） |
 | 职责     | 只加字段 + 构造时初始化；不实现任何方法                                                                                                        |
 | 依赖     | 无                                                                                                                                             |
 | 测试     | 1 条：构造后两字段均为空                                                                                                                       |
@@ -836,7 +836,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                       |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/mcp/server.rs`（方法实现：收到 D24a 的通知帧时调）                                                                                 |
+| 目标文件 | `crates/chislui-team/src/mcp/server.rs`（方法实现：收到 D24a 的通知帧时调）                                                                                 |
 | 职责     | 只做一件事：`ready_latch.insert(slot_id)` → 查 `ready_notify` map；存在则 `Notify::notify_waiters()`；不存在说明无 waiter，只存 latch 下一次 wait 立即返回 |
 | 依赖     | W4-D24a（帧类型）+ W4-D24b-1（字段）                                                                                                                       |
 | 测试     | 2 条：notify 后 latch 中有对应 slot_id；有 waiter 时 notify 唤醒 waiter                                                                                    |
@@ -848,21 +848,21 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项           | 内容                                                                                                                                                                                                                     |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 目标文件     | `crates/aionui-team/src/mcp/server.rs`（方法实现：外部 service 调用此方法等待 ready）                                                                                                                                    |
-| 职责         | 只做一件事：若 `ready_latch.contains(slot_id)` 直接 Ok；否则取 / 创建 `Notify` 放入 `ready_notify`；`tokio::select!` 等 `notify.notified()` 或 `sleep(30s)`；**timeout 分支也 `Ok(())`**（aionui-audit §8 #11 graceful） |
+| 目标文件     | `crates/chislui-team/src/mcp/server.rs`（方法实现：外部 service 调用此方法等待 ready）                                                                                                                                    |
+| 职责         | 只做一件事：若 `ready_latch.contains(slot_id)` 直接 Ok；否则取 / 创建 `Notify` 放入 `ready_notify`；`tokio::select!` 等 `notify.notified()` 或 `sleep(30s)`；**timeout 分支也 `Ok(())`**（chislui-audit §8 #11 graceful） |
 | 依赖         | W4-D24b-1（字段） + W4-D24b-2（notify 写入）                                                                                                                                                                             |
 | 测试         | 3 条：已有 latch 直接返回；无 notify 30s graceful Ok；两个 slot 并发独立计时互不干扰                                                                                                                                     |
 | 预估 LoC     | 50                                                                                                                                                                                                                       |
 | 预估人天     | 0.5                                                                                                                                                                                                                      |
 | 不能再拆理由 | `tokio::select!` 两路（notify / sleep）是原子并发原语，拆开引入 race                                                                                                                                                     |
 | 接口契约     | [§26.2.3](./interface-contracts.md#262-server-notify--wait)                                                                                                                                                              |
-| 事实来源     | [aionui-audit §3.1 "MCP ready 握手"](./aionui-audit.md#31-能力清单) · [aionui-audit §8 #11](./aionui-audit.md#8-源码中发现的硬约束agent-行为易坏点)（graceful timeout）                                                  |
+| 事实来源     | [chislui-audit §3.1 "MCP ready 握手"](./chislui-audit.md#31-能力清单) · [chislui-audit §8 #11](./chislui-audit.md#8-源码中发现的硬约束agent-行为易坏点)（graceful timeout）                                                  |
 
 ### W4-D24c — Bridge 端发 `mcp_ready` 通知
 
 | 项       | 内容                                                                                                    |
 | -------- | ------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-app/src/bridge.rs`（D6 主 bridge 逻辑内 initialize 成功后追加一行 send）                 |
+| 目标文件 | `crates/chislui-app/src/bridge.rs`（D6 主 bridge 逻辑内 initialize 成功后追加一行 send）                 |
 | 职责     | 只做一件事：TCP connect + initialize ok 后 fire-and-forget 发 `{type:"mcp_ready", slot_id, auth_token}` |
 | 依赖     | D6（bridge 主体）+ W4-D24a（协议类型）                                                                  |
 | 测试     | 1 条集成：bridge 启动 → 连上 mock server → server 在 100ms 内收到 `mcp_ready`                           |
@@ -883,60 +883,60 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                   |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-team/src/guide/server.rs`（新 struct + `start_singleton` + `stop`）                                                                     |
+| 目标文件 | `crates/chislui-team/src/guide/server.rs`（新 struct + `start_singleton` + `stop`）                                                                     |
 | 职责     | 只做 TCP server 生命周期：bind 127.0.0.1 随机端口 + auth_token UUID + accept_loop 骨架（dispatch 留占位 TODO 交给 D26b/c） + `stop` 发 shutdown signal |
 | 依赖     | 无（纯 TCP 框架）                                                                                                                                      |
 | 测试     | 2 条：start 返回成功 addr；stop 后 bind 端口释放                                                                                                       |
 | 预估 LoC | 80 · 预估人天 0.8                                                                                                                                      |
 | 接口契约 | [§27.1](./interface-contracts.md#271-guidemcpserver-结构--启停)                                                                                        |
-| 事实来源 | [aionui-audit §3.1 Team Guide MCP 生命周期](./aionui-audit.md#31-能力清单)                                                                             |
+| 事实来源 | [chislui-audit §3.1 Team Guide MCP 生命周期](./chislui-audit.md#31-能力清单)                                                                             |
 
-### W5-D26b-1 — `aion_create_team` args 解析 + 默认值补全（纯函数）
+### W5-D26b-1 — `chisl_create_team` args 解析 + 默认值补全（纯函数）
 
 | 项       | 内容                                                                                                                                                                                                                                                                                                                   |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/guide/handlers.rs`（新 `parse_create_team_args(args, caller_conversation) -> CreateTeamParams` 纯函数）                                                                                                                                                                                        |
+| 目标文件 | `crates/chislui-team/src/guide/handlers.rs`（新 `parse_create_team_args(args, caller_conversation) -> CreateTeamParams` 纯函数）                                                                                                                                                                                        |
 | 职责     | 只做"输入变成结构"：<br>a. 解析必需字段 `summary`（缺失 Err）<br>b. 解析可选 `name` / `workspace`<br>c. workspace 缺省 → 从 `caller_conversation.extra.workspace` 继承<br>d. name 缺省 → `summary.split_whitespace().take(5).collect::<Vec<_>>().join(" ")`<br>e. 返回 `CreateTeamParams { summary, name, workspace }` |
 | 依赖     | 无（纯数据映射）                                                                                                                                                                                                                                                                                                       |
 | 测试     | 4 条：summary 缺失 Err；name 缺省用 summary 前 5 词；workspace 缺省继承 caller；全字段自定义优先生效                                                                                                                                                                                                                   |
 | 预估 LoC | 70                                                                                                                                                                                                                                                                                                                     |
 | 预估人天 | 0.6                                                                                                                                                                                                                                                                                                                    |
-| 接口契约 | [§27.2.1](./interface-contracts.md#272-handle_aion_create_team)                                                                                                                                                                                                                                                        |
+| 接口契约 | [§27.2.1](./interface-contracts.md#272-handle_chisl_create_team)                                                                                                                                                                                                                                                        |
 
-### W5-D26b-2 — `handle_aion_create_team` 调 service + 返回结构化
+### W5-D26b-2 — `handle_chisl_create_team` 调 service + 返回结构化
 
 | 项       | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/guide/handlers.rs`（handler 主体）                                                                                                                                                                                                                                                                                                                                                                                                            |
+| 目标文件 | `crates/chislui-team/src/guide/handlers.rs`（handler 主体）                                                                                                                                                                                                                                                                                                                                                                                                            |
 | 职责     | 只做"拿到 params 后调 service"：<br>a. 调 D26b-1 拿 `CreateTeamParams`<br>b. 构造 `CreateTeamRequest { agents: [Lead { conversation_id: caller_conversation_id 复用 W3-D15b }], workspace_mode: "shared", session_mode: "yolo" }`<br>c. `service.create_team("system_default_user", req).await`<br>d. 返回 `{ team_id, name, route: "/team/<id>", lead_agent, status: "team_created", next_step: "The team page has been opened automatically. End your turn now." }` |
 | 依赖     | W5-D26b-1（params）+ W3-D15b（conversation 复用）                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | 测试     | 3 条：正常路径 service.create_team 被调且返回含 next_step；service Err 时返 ToolResult.is_error=true；leader 复用 caller_conversation_id                                                                                                                                                                                                                                                                                                                              |
 | 预估 LoC | 70                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | 预估人天 | 0.7                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| 接口契约 | [§27.2.2](./interface-contracts.md#272-handle_aion_create_team)                                                                                                                                                                                                                                                                                                                                                                                                       |
-| 事实来源 | [aionui-audit §1.2 建团流程](./aionui-audit.md#12-建团流程时序图mcp-spawn)                                                                                                                                                                                                                                                                                                                                                                                            |
+| 接口契约 | [§27.2.2](./interface-contracts.md#272-handle_chisl_create_team)                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 事实来源 | [chislui-audit §1.2 建团流程](./chislui-audit.md#12-建团流程时序图mcp-spawn)                                                                                                                                                                                                                                                                                                                                                                                            |
 
-### W5-D26c — `handle_aion_list_models` handler
+### W5-D26c — `handle_chisl_list_models` handler
 
 | 项       | 内容                                                                                         |
 | -------- | -------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/guide/handlers.rs`（新 fn，仅 list_models）                          |
+| 目标文件 | `crates/chislui-team/src/guide/handlers.rs`（新 fn，仅 list_models）                          |
 | 职责     | 只做 tool 的 handler：直接复用 D4 的 `team_list_models` handler（硬编码 backend × model 表） |
 | 依赖     | W5-D26a + D4                                                                                 |
 | 测试     | 1 条：返回 JSON schema 和 D4 一致                                                            |
 | 预估 LoC | 40 · 预估人天 0.3                                                                            |
-| 接口契约 | [§27.3](./interface-contracts.md#273-handle_aion_list_models)                                |
+| 接口契约 | [§27.3](./interface-contracts.md#273-handle_chisl_list_models)                                |
 
 ### W5-D26d — 建团成功后 emit 3 个 WS 事件
 
 | 项       | 内容                                                                                                                                                      |
 | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/guide/handlers.rs`（D26b 的末尾插入事件广播）                                                                                     |
-| 职责     | 只在 `handle_aion_create_team` 成功路径尾部 emit 3 个 WS 事件：`team.listChanged` + `conversation.listChanged` + `deepLink.received { route:/team/<id> }` |
+| 目标文件 | `crates/chislui-team/src/guide/handlers.rs`（D26b 的末尾插入事件广播）                                                                                     |
+| 职责     | 只在 `handle_chisl_create_team` 成功路径尾部 emit 3 个 WS 事件：`team.listChanged` + `conversation.listChanged` + `deepLink.received { route:/team/<id> }` |
 | 依赖     | W5-D26b（handler 已出结果）+ W5-D31a（事件类型定义）                                                                                                      |
 | 测试     | 1 条集成：建团成功 → WS 订阅者收到三个事件                                                                                                                |
 | 预估 LoC | 50 · 预估人天 0.4                                                                                                                                         |
-| 接口契约 | [§27.4](./interface-contracts.md#274-aion_create_team-成功后的-ws-事件)                                                                                   |
+| 接口契约 | [§27.4](./interface-contracts.md#274-chisl_create_team-成功后的-ws-事件)                                                                                   |
 
 ---
 
@@ -944,14 +944,14 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项           | 内容                                                                                                                                                             |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件     | `crates/aionui-app/src/bridge.rs`（D6 主 bridge 里加 `if env::var(AION_MCP_BACKEND).is_ok()` 分支）                                                              |
+| 目标文件     | `crates/chislui-app/src/bridge.rs`（D6 主 bridge 里加 `if env::var(AION_MCP_BACKEND).is_ok()` 分支）                                                              |
 | 职责         | 只做 bridge 端分叉：env 里有 `AION_MCP_BACKEND` → 走 guide bridge 模式，每条 tools/call payload 额外带 `backend` + `conversation_id`；否则走 team bridge（不动） |
 | 依赖         | D6（bridge 主体） + W5-D26（guide server 约定协议）                                                                                                              |
 | 测试         | 2 条：guide 模式 payload 含 backend+conversation_id；team 模式（无 backend env）行为不变                                                                         |
 | 预估 LoC     | 80 · 预估人天 0.7                                                                                                                                                |
 | 不能再拆理由 | bridge 的 if/else 分叉是单点入口，分叉条件检查和两条路径选择不能拆分                                                                                             |
 | 接口契约     | [§28](./interface-contracts.md#28-guide-stdio-bridge-分支)                                                                                                       |
-| 事实来源     | [aionui-audit §3.3 stdio↔TCP 桥架构](./aionui-audit.md#33-stdio--tcp-桥架构)                                                                                     |
+| 事实来源     | [chislui-audit §3.3 stdio↔TCP 桥架构](./chislui-audit.md#33-stdio--tcp-桥架构)                                                                                     |
 
 ---
 
@@ -959,8 +959,8 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                           |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-team/src/guide/capability.rs`（新增）                                                                                                                           |
-| 职责     | 只做纯函数：`pub fn is_team_capable_backend(backend: &str, mcp_stdio_capable: bool) -> bool` + 硬白名单常量 `TEAM_CAPABLE_BACKENDS = &["claude", "codex", "gemini", "aionrs"]` |
+| 目标文件 | `crates/chislui-team/src/guide/capability.rs`（新增）                                                                                                                           |
+| 职责     | 只做纯函数：`pub fn is_team_capable_backend(backend: &str, mcp_stdio_capable: bool) -> bool` + 硬白名单常量 `TEAM_CAPABLE_BACKENDS = &["claude", "codex", "gemini", "chislrs"]` |
 | 依赖     | 无                                                                                                                                                                             |
 | 测试     | 3 条：白名单命中；非白名单 + mcp_stdio_capable=true 命中；非白名单 + false 不命中                                                                                              |
 | 预估 LoC | 40 · 预估人天 0.3                                                                                                                                                              |
@@ -970,19 +970,19 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                   |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-ai-agent/src/acp_agent.rs`（构造 instructions 的地方加分支）                                                                                                                            |
+| 目标文件 | `crates/chislui-ai-agent/src/acp_agent.rs`（构造 instructions 的地方加分支）                                                                                                                            |
 | 职责     | 只做 instructions 拼接分支：<br>`if extra.team_mcp_stdio_config.is_none() && is_team_capable_backend(...)` → 调 `build_team_guide_prompt(backend, leader_label=None)` append 进 instructions；否则不动 |
 | 依赖     | W5-D28a + D5a（prompt builder） + D2（AcpBuildExtra）                                                                                                                                                  |
 | 测试     | 3 条：solo claude 含 Guide prompt；已在 team 的 agent 不含；solo backend="unknown" 不含                                                                                                                |
 | 预估 LoC | 60 · 预估人天 0.5                                                                                                                                                                                      |
 | 接口契约 | [§29.2](./interface-contracts.md#292-guide-prompt-注入到-instructions)                                                                                                                                 |
-| 事实来源 | [aionui-audit §8 #17 Guide 互斥](./aionui-audit.md#8-源码中发现的硬约束agent-行为易坏点)                                                                                                               |
+| 事实来源 | [chislui-audit §8 #17 Guide 互斥](./chislui-audit.md#8-源码中发现的硬约束agent-行为易坏点)                                                                                                               |
 
 ### W5-D28c — `session/new.mcp_servers` 追加 Guide config + 互斥 guard
 
 | 项       | 内容                                                                                                                                                |
 | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-ai-agent/src/acp_agent.rs`（`session_new_and_prompt` 里 mcp_servers 构造的地方加分支）                                               |
+| 目标文件 | `crates/chislui-ai-agent/src/acp_agent.rs`（`session_new_and_prompt` 里 mcp_servers 构造的地方加分支）                                               |
 | 职责     | 只做 mcp_servers 追加分支：<br>同 D28b 的 guard 条件 → 若满足 → `guide_server.stdio_config(backend, conv_id)` 转成 `McpServer` 追加进 vec；否则不动 |
 | 依赖     | W5-D28a + W5-D26（guide config 来源） + W2 D10（mcp_servers 注入已有）                                                                              |
 | 测试     | 3 条：solo claude 的 mcp_servers 包含 guide；已在 team 的 agent 不包含；solo 非白名单不包含                                                         |
@@ -995,7 +995,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                        |
 | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/session.rs`（新 struct `SpawnAgentRequest` + `TeamSession::spawn_agent` 空壳 fn 签名，body `todo!()`）                                              |
+| 目标文件 | `crates/chislui-team/src/session.rs`（新 struct `SpawnAgentRequest` + `TeamSession::spawn_agent` 空壳 fn 签名，body `todo!()`）                                              |
 | 职责     | 只做类型声明 + 方法签名：`SpawnAgentRequest { name, agent_type, custom_agent_id, model }` + `pub async fn spawn_agent(caller_slot_id, req) -> Result<TeamAgent, TeamError>` |
 | 依赖     | 无                                                                                                                                                                          |
 | 测试     | 1 条：类型可构造 + 方法签名可编译（trait 对象 Send）                                                                                                                        |
@@ -1007,7 +1007,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                             |
 | -------- | ------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 第一段校验）                                  |
+| 目标文件 | `crates/chislui-team/src/session.rs`（`spawn_agent` 第一段校验）                                  |
 | 职责     | 只做一件事：按 `caller_slot_id` 取 agent；若 `agent.role != Lead` → `Err(TeamError::LeaderOnly)` |
 | 依赖     | W5-D29a-1（方法骨架）                                                                            |
 | 测试     | 2 条：caller Lead 通过；非 Lead 返 Err                                                           |
@@ -1019,7 +1019,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                     |
 | -------- | -------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 第二段校验）                                          |
+| 目标文件 | `crates/chislui-team/src/session.rs`（`spawn_agent` 第二段校验）                                          |
 | 职责     | 只做一件事：调 W3-D14a `normalize_name`；对比现有 agents 规范化名；冲突 → `Err(TeamError::NameConflict)` |
 | 依赖     | W5-D29a-2 + W3-D14a（normalize_name）                                                                    |
 | 测试     | 2 条：新 name 通过；已有规范化同名返 Err                                                                 |
@@ -1031,20 +1031,20 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                            |
 | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 第三段校验）                                                                                                 |
+| 目标文件 | `crates/chislui-team/src/session.rs`（`spawn_agent` 第三段校验）                                                                                                 |
 | 职责     | 只做一件事：`req.agent_type` 缺省继承 caller.backend；校验在 `SPAWN_BACKEND_WHITELIST`（`["claude", "codex"]`）；非白名单 → `Err(TeamError::BackendNotAllowed)` |
 | 依赖     | W5-D29a-3                                                                                                                                                       |
 | 测试     | 2 条：白名单通过；非白名单返 Err                                                                                                                                |
 | 预估 LoC | 25                                                                                                                                                              |
 | 预估人天 | 0.2                                                                                                                                                             |
 | 接口契约 | [§30.1.4](./interface-contracts.md#301-spawnagentrequest--校验层)                                                                                               |
-| 事实来源 | [aionui-audit §2.1 MCP spawn](./aionui-audit.md#21-能力清单) · backend-audit §1.5.2 SPAWN_BACKEND_WHITELIST                                                     |
+| 事实来源 | [chislui-audit §2.1 MCP spawn](./chislui-audit.md#21-能力清单) · backend-audit §1.5.2 SPAWN_BACKEND_WHITELIST                                                     |
 
 ### W5-D29b — `TeamSessionService::add_agent` 扩展用于 spawn
 
 | 项           | 内容                                                                                                                                              |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件     | `crates/aionui-team/src/service.rs`（`add_agent` 扩展：原签名保留，内部持 W4-D23 lock + build conversation + 分配 slot_id + update repo）         |
+| 目标文件     | `crates/chislui-team/src/service.rs`（`add_agent` 扩展：原签名保留，内部持 W4-D23 lock + build conversation + 分配 slot_id + update repo）         |
 | 职责         | 只做 add_agent 扩展：把现有 add_agent 流程（read-modify-write agents）封装为"持锁 + 新建 conversation + 分配 slot_id"的原子操作，返回 `TeamAgent` |
 | 依赖         | W4-D23（add_agent_locks）                                                                                                                         |
 | 测试         | 2 条：持锁期间其他 add_agent 阻塞；返回的 TeamAgent 有 slot_id + conv_id                                                                          |
@@ -1056,7 +1056,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                 |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 中段第 1 步）                                                                     |
+| 目标文件 | `crates/chislui-team/src/session.rs`（`spawn_agent` 中段第 1 步）                                                                     |
 | 职责     | 只做一件事：`conversation_service.update_extra(new_conv_id, {team_mcp_stdio_config: session.stdio_spec(new_slot_id).into_config()})` |
 | 依赖     | W5-D29b（new_conv_id/new_slot_id） + W2 D7a（stdio_spec）                                                                            |
 | 测试     | 1 条：update_extra 被调且参数含 team_mcp_stdio_config                                                                                |
@@ -1068,7 +1068,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项           | 内容                                                                                                                                                       |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件     | `crates/aionui-team/src/session.rs`（`spawn_agent` 中段第 2/3 步）                                                                                         |
+| 目标文件     | `crates/chislui-team/src/session.rs`（`spawn_agent` 中段第 2/3 步）                                                                                         |
 | 职责         | 只做两步原子"重启 agent 进程"：`task_manager.kill(new_conv_id, Some(TeamSpawn))`（NotFound 视为成功）→ `task_manager.get_or_build_task(new_conv_id, opts)` |
 | 依赖         | W5-D29c-1（extra 已写）+ W2 D9（kill/get_or_build_task 已有）                                                                                              |
 | 测试         | 2 条：kill 被调；kill 后 get_or_build_task 被调                                                                                                            |
@@ -1081,7 +1081,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                               |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 末段第 1 步）                                                                                                   |
+| 目标文件 | `crates/chislui-team/src/session.rs`（`spawn_agent` 末段第 1 步）                                                                                                   |
 | 职责     | 只做一件事：`mailbox.write(from=caller_slot_id, to=new_slot_id, Message, content="You have been spawned as <name>. Read your mailbox and wait for instructions.")` |
 | 依赖     | W5-D29c-2（new agent 已就绪）                                                                                                                                      |
 | 测试     | 1 条：mailbox 读 new_slot_id 的未读 = 1 条欢迎消息                                                                                                                 |
@@ -1093,7 +1093,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                         |
 | -------- | ------------------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 末段第 2 步）                                             |
+| 目标文件 | `crates/chislui-team/src/session.rs`（`spawn_agent` 末段第 2 步）                                             |
 | 职责     | 只做一件事：调 `wake(new_slot_id)` 触发首次 role prompt 注入（D7a 的 compute_wake_input → D7b 的 send 路径） |
 | 依赖     | W5-D29d-1 + W4-D18a（wake lock 可用） + D7b（send 路径接 wake）                                              |
 | 测试     | 1 条：wake 被调且 task_manager.send_message 收到 role prompt payload                                         |
@@ -1105,7 +1105,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                         |
 | -------- | -------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 末段第 3 步）                             |
+| 目标文件 | `crates/chislui-team/src/session.rs`（`spawn_agent` 末段第 3 步）                             |
 | 职责     | 只做一件事：`broadcaster.broadcast(WsEvent::TeamAgentSpawned { team_id, agent: new_agent })` |
 | 依赖     | W5-D29d-2                                                                                    |
 | 测试     | 1 条：WS 订阅者收到 team.agentSpawned 事件且 payload 正确                                    |
@@ -1119,7 +1119,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                   |
 | -------- | ---------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/mcp/server.rs`（`handle_send_message` 顶部加 if 分支）                                         |
+| 目标文件 | `crates/chislui-team/src/mcp/server.rs`（`handle_send_message` 顶部加 if 分支）                                         |
 | 职责     | 只做识别分发：若 `message.trim() == "shutdown_approved"` → 调 D30a-2（处理分支）；否则走下面的 rejected / 普通消息分支 |
 | 依赖     | 无（纯字符串匹配）                                                                                                     |
 | 测试     | 2 条：approved 走 approved 分支；普通消息不走                                                                          |
@@ -1131,20 +1131,20 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                                               |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/mcp/server.rs`（在 D30a-1 识别后调用的 async helper）                                                                                                                                                      |
+| 目标文件 | `crates/chislui-team/src/mcp/server.rs`（在 D30a-1 识别后调用的 async helper）                                                                                                                                                      |
 | 职责     | 只做已识别后的 approved 流程：<br>a. `scheduler.remove_agent(caller_slot_id)`（D30d 负责真 kill）<br>b. `mailbox.write(to=leader, content="Teammate '<name>' has been removed (approved shutdown).")`<br>c. `wake(leader_slot_id)` |
 | 依赖     | W5-D30a-1（识别） + W5-D30d-3（remove_agent 改造完整完成）                                                                                                                                                                         |
 | 测试     | 3 条：remove_agent 被调；leader 邮箱有通知；leader 被 wake                                                                                                                                                                         |
 | 预估 LoC | 60                                                                                                                                                                                                                                 |
 | 预估人天 | 0.5                                                                                                                                                                                                                                |
 | 接口契约 | [§31.1.2](./interface-contracts.md#311-approved-拦截)                                                                                                                                                                              |
-| 事实来源 | [aionui-audit §2.1 shutdown 协议](./aionui-audit.md#21-能力清单)                                                                                                                                                                   |
+| 事实来源 | [chislui-audit §2.1 shutdown 协议](./chislui-audit.md#21-能力清单)                                                                                                                                                                   |
 
 ### W5-D30b — `team_send_message` 识别 `shutdown_rejected: <reason>`
 
 | 项       | 内容                                                                                                                                                                                      |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/mcp/server.rs`（同 D30a 所在位置的第二个拦截分支）                                                                                                                |
+| 目标文件 | `crates/chislui-team/src/mcp/server.rs`（同 D30a 所在位置的第二个拦截分支）                                                                                                                |
 | 职责     | 只做 rejected 拦截：识别 `starts_with("shutdown_rejected:")` → 提取 reason → mailbox.write(to=leader, content="Teammate '<name>' declined shutdown: <reason>") → wake leader（不 remove） |
 | 依赖     | W5-D30a（共享 team_send_message 的拦截点，merge 顺序需协调）                                                                                                                              |
 | 测试     | 2 条：rejected 触发 leader 通知；remove_agent 未被调                                                                                                                                      |
@@ -1155,19 +1155,19 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                      |
 | -------- | ------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/scheduler.rs`（`shutdown_agent` 方法顶部）        |
+| 目标文件 | `crates/chislui-team/src/scheduler.rs`（`shutdown_agent` 方法顶部）        |
 | 职责     | 只加一行校验：`if target.role == Lead → Err(CannotShutdownLeader)`        |
 | 依赖     | 无                                                                        |
 | 测试     | 1 条：leader 调 shutdown_agent(target=leader) 返 Err                      |
 | 预估 LoC | 30 · 预估人天 0.2                                                         |
 | 接口契约 | [§31.3](./interface-contracts.md#313-shutdown_agent-目标-role-校验)       |
-| 事实来源 | [aionui-audit §2.1 "Leader 不可 shutdown"](./aionui-audit.md#21-能力清单) |
+| 事实来源 | [chislui-audit §2.1 "Leader 不可 shutdown"](./chislui-audit.md#21-能力清单) |
 
 ### W5-D30d-1 — `remove_agent` 改造：`task_manager.kill`
 
 | 项       | 内容                                                                                                                   |
 | -------- | ---------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/scheduler.rs`（`remove_agent` 第 1 步）                                                        |
+| 目标文件 | `crates/chislui-team/src/scheduler.rs`（`remove_agent` 第 1 步）                                                        |
 | 职责     | 只做一件事：`task_manager.kill(conv_id, Some(AgentKillReason::Shutdown))`（NotFound 视为成功；其他 err 只 log 不阻塞） |
 | 依赖     | 无（既有 task_manager）                                                                                                |
 | 测试     | 2 条：kill 被调；kill NotFound 不 panic                                                                                |
@@ -1179,7 +1179,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项           | 内容                                                                                                                                                                                                                                                                                   |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件     | `crates/aionui-team/src/scheduler.rs`（`remove_agent` 第 2 步；使用 W4-D18a/b-1/W4-D19a 已有 API）                                                                                                                                                                                     |
+| 目标文件     | `crates/chislui-team/src/scheduler.rs`（`remove_agent` 第 2 步；使用 W4-D18a/b-1/W4-D19a 已有 API）                                                                                                                                                                                     |
 | 职责         | 只做内部 state 清理 3 件（每件是 1 行调用，一起做是因为**同一个 remove_agent 函数内**，拆成跨函数反而让职责逃逸）：<br>a. `active_wakes.remove(slot_id)`（W4-D18a 提供）<br>b. `clear_wake_timeout(slot_id)`（W4-D18b-1 提供）<br>c. `finalized_turns.remove(conv_id)`（W4-D19a 提供） |
 | 依赖         | W4-D18a + W4-D18b-1 + W4-D19a                                                                                                                                                                                                                                                          |
 | 测试         | 1 条：三处 map 里该 slot_id/conv_id 都被清空                                                                                                                                                                                                                                           |
@@ -1192,14 +1192,14 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                 |
 | -------- | -------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/scheduler.rs`（`remove_agent` 第 3 步）                                                      |
+| 目标文件 | `crates/chislui-team/src/scheduler.rs`（`remove_agent` 第 3 步）                                                      |
 | 职责     | 只做一件事：`slots.lock().remove(slot_id)` + `broadcaster.broadcast(WsEvent::TeamAgentRemoved { team_id, slot_id })` |
 | 依赖     | W5-D30d-1 + W5-D30d-2（前两步已完成）                                                                                |
 | 测试     | 2 条：slots 里无该 slot_id；WS 订阅者收到 agentRemoved 事件                                                          |
 | 预估 LoC | 25                                                                                                                   |
 | 预估人天 | 0.2                                                                                                                  |
 | 接口契约 | [§31.4.3](./interface-contracts.md#314-remove_agent-真-kill)                                                         |
-| 事实来源 | [aionui-audit §2.1 TeammateManager.removeAgent](./aionui-audit.md#21-能力清单)                                       |
+| 事实来源 | [chislui-audit §2.1 TeammateManager.removeAgent](./chislui-audit.md#21-能力清单)                                       |
 
 ---
 
@@ -1207,19 +1207,19 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                                                                                                                                                                                                       |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 目标文件 | `crates/aionui-api-types/src/team.rs`（新 enum + 两个 payload struct）                                                                                                                                                                                                                                                                                                                     |
+| 目标文件 | `crates/chislui-api-types/src/team.rs`（新 enum + 两个 payload struct）                                                                                                                                                                                                                                                                                                                     |
 | 职责     | 只定义类型：<br>a. `TeamMcpPhase` 10 个 variant（tcp_ready / tcp_error / session_injecting / session_ready / session_error / load_failed / degraded / config_write_failed / mcp_tools_waiting / mcp_tools_ready）<br>b. `TeamMcpStatusPayload { team_id, slot_id, phase, port, server_count, error }`<br>c. `TeammateMessagePayload { conversation_id, content, from_slot_id, from_name }` |
 | 依赖     | 无                                                                                                                                                                                                                                                                                                                                                                                         |
 | 测试     | 2 条：10 个 phase serde roundtrip；两个 payload 序列化字段齐                                                                                                                                                                                                                                                                                                                               |
 | 预估 LoC | 60 · 预估人天 0.4                                                                                                                                                                                                                                                                                                                                                                          |
 | 接口契约 | [§32.1](./interface-contracts.md#321-teammcpphase--payload-类型)                                                                                                                                                                                                                                                                                                                           |
-| 事实来源 | [aionui-audit §7.6 事件](./aionui-audit.md#76-事件--ipc后端等价需提供-websocket-或-sse)                                                                                                                                                                                                                                                                                                    |
+| 事实来源 | [chislui-audit §7.6 事件](./chislui-audit.md#76-事件--ipc后端等价需提供-websocket-或-sse)                                                                                                                                                                                                                                                                                                    |
 
 ### W5-D31b-1 — `team.mcpStatus` tcp 层 2 点广播（mcp/server.rs）
 
 | 项       | 内容                                                                                     |
 | -------- | ---------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/mcp/server.rs`（在 TCP `bind` 成功 / 失败处各插一行 broadcast）  |
+| 目标文件 | `crates/chislui-team/src/mcp/server.rs`（在 TCP `bind` 成功 / 失败处各插一行 broadcast）  |
 | 职责     | 只负责 server.rs 文件内 2 个点：`tcp_ready`（bind OK 后） + `tcp_error`（bind 失败分支） |
 | 依赖     | W5-D31a（payload 类型）                                                                  |
 | 测试     | 2 条：正常 start 观察到 tcp_ready；port 冲突 → tcp_error                                 |
@@ -1231,7 +1231,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                                                                                                                      |
 | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/service.rs`（`ensure_session` 的 6 个分支处各插 broadcast）                                                                                                                                                                                                                       |
+| 目标文件 | `crates/chislui-team/src/service.rs`（`ensure_session` 的 6 个分支处各插 broadcast）                                                                                                                                                                                                                       |
 | 职责     | 只负责 service.rs 内 6 个点：`session_injecting`（循环 agents 开始） + `session_ready`（sessions.insert 成功） + `session_error`（任一 agent 失败回滚） + `config_write_failed`（update_extra 失败） + `load_failed`（get_or_build_task 失败） + `degraded`（wait_for_mcp_ready timeout，hook W4-D24b-3） |
 | 依赖     | W5-D31a + W4-D24b-3（degraded 需要 wait_for_mcp_ready 的 timeout 信号）                                                                                                                                                                                                                                   |
 | 测试     | 2 条集成：正常 ensure_session 观察到 session_ready；模拟 update_extra 失败 → config_write_failed                                                                                                                                                                                                          |
@@ -1243,7 +1243,7 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                  |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-app/src/bridge.rs`（bridge 的 tools/list 前 / 后两个时机）                                                             |
+| 目标文件 | `crates/chislui-app/src/bridge.rs`（bridge 的 tools/list 前 / 后两个时机）                                                             |
 | 职责     | 只负责 bridge.rs 内 2 个点：`mcp_tools_waiting`（bridge 连 TCP 成功、tools/list 未返前） + `mcp_tools_ready`（tools/list 成功返回后） |
 | 依赖     | W5-D31a + D6（bridge 主体）+ W4-D24c（`mcp_ready` 已发）                                                                              |
 | 测试     | 1 条集成：bridge 启动 → 观察到 mcp_tools_waiting → 观察到 mcp_tools_ready                                                             |
@@ -1255,13 +1255,13 @@ Wave 5（3 人关键路径 + 可并行点）
 
 | 项       | 内容                                                                                                                                                                                                          |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 目标文件 | `crates/aionui-team/src/session.rs`（`compute_wake_input` 内 teammate 分支末尾遍历 unread_messages 逐条 emit）                                                                                                |
+| 目标文件 | `crates/chislui-team/src/session.rs`（`compute_wake_input` 内 teammate 分支末尾遍历 unread_messages 逐条 emit）                                                                                                |
 | 职责     | 只做 emit：若 agent.role != Lead，则遍历 unread_messages，每条 broadcast `WsEvent::ConversationResponseStream { type:"teammate_message", conversation_id, content, from_slot_id, from_name }`（Lead 不 emit） |
 | 依赖     | W5-D31a                                                                                                                                                                                                       |
 | 测试     | 2 条：teammate 有 2 条 unread → emit 2 次；Lead 有 2 条 unread → emit 0 次                                                                                                                                    |
 | 预估 LoC | 40 · 预估人天 0.3                                                                                                                                                                                             |
 | 接口契约 | [§32.3](./interface-contracts.md#323-teammate_message-emit)                                                                                                                                                   |
-| 事实来源 | [aionui-audit §2.1 "active 期间输入字节流"](./aionui-audit.md#21-能力清单)                                                                                                                                    |
+| 事实来源 | [chislui-audit §2.1 "active 期间输入字节流"](./chislui-audit.md#21-能力清单)                                                                                                                                    |
 
 ---
 
@@ -1269,24 +1269,24 @@ Wave 5（3 人关键路径 + 可并行点）
 
 |    开发者     | Wave | 模块                                                                | 文件                                                                        |        LoC         | 人天 |
 | :-----------: | :--: | ------------------------------------------------------------------- | --------------------------------------------------------------------------- | :----------------: | :--: |
-|      D1       |  1   | team_mcp types                                                      | `aionui-api-types/src/team_mcp.rs`                                          |         40         | 0.5  |
-|      D2       |  1   | AcpBuildExtra 字段                                                  | `aionui-ai-agent/src/types.rs`                                              |         15         | 0.3  |
-|      D3       |  1   | Stdio ServerSpec                                                    | `aionui-team/src/mcp/bridge.rs`                                             |         80         | 1.0  |
-|      D4       |  1   | 两个新 MCP 工具（list_models / describe_assistant）                 | `aionui-team/src/mcp/{tools,server}.rs`                                     |        150         | 1.0  |
-|    **D4b**    |  1   | **`TEAM_SPAWN_AGENT_DESCRIPTION` 原文常量**（P0#48 补漏）           | `aionui-team/src/mcp/tools.rs`                                              |         40         | 0.3  |
-|      D5a      |  1   | Team Guide Prompt                                                   | `aionui-team/src/prompts/team_guide.rs`                                     |        120         | 0.5  |
+|      D1       |  1   | team_mcp types                                                      | `chislui-api-types/src/team_mcp.rs`                                          |         40         | 0.5  |
+|      D2       |  1   | AcpBuildExtra 字段                                                  | `chislui-ai-agent/src/types.rs`                                              |         15         | 0.3  |
+|      D3       |  1   | Stdio ServerSpec                                                    | `chislui-team/src/mcp/bridge.rs`                                             |         80         | 1.0  |
+|      D4       |  1   | 两个新 MCP 工具（list_models / describe_assistant）                 | `chislui-team/src/mcp/{tools,server}.rs`                                     |        150         | 1.0  |
+|    **D4b**    |  1   | **`TEAM_SPAWN_AGENT_DESCRIPTION` 原文常量**（P0#48 补漏）           | `chislui-team/src/mcp/tools.rs`                                              |         40         | 0.3  |
+|      D5a      |  1   | Team Guide Prompt                                                   | `chislui-team/src/prompts/team_guide.rs`                                     |        120         | 0.5  |
 |     D5b-1     |  1   | Lead Prompt 常量 (include_str! txt)                                 | `lead.rs` + `prompt_templates/lead.txt`                                     | ⚠️ 48 rust+188 txt | 0.3  |
-|     D5b-2     |  1   | Lead Prompt builder                                                 | `aionui-team/src/prompts/lead.rs`                                           |         30         | 0.5  |
-|      D5c      |  1   | Teammate Prompt + wake payload                                      | `aionui-team/src/prompts/teammate.rs`                                       |       ⚠️ 150       | 1.0  |
-|      D6       |  1   | mcp-bridge subcommand                                               | `aionui-app/src/bridge.rs`                                                  |        180         | 1.5  |
-|    **D7a**    |  2   | **TeamSession 三个新方法（compute/spec/finish）**                   | `aionui-team/src/session.rs`                                                |        150         | 1.5  |
-|    **D7b**    |  2   | **send 路径接 wake + `files` 附件 + log-not-throw**（P0#45/#46）    | `aionui-team/src/session.rs` + `aionui-api-types/src/team.rs` + `routes.rs` |        120         | 1.2  |
-|    **D7c**    |  2   | **`send_message_to_agent(silent=true)` 占位**                       | `aionui-team/src/session.rs`                                                |         40         | 0.3  |
-|      D8       |  2   | Scheduler 首次 wake                                                 | `aionui-team/src/scheduler.rs`                                              |        120         | 1.5  |
-|      D9       |  2   | ensure_session 闭环                                                 | `aionui-team/src/service.rs`                                                |       ⚠️ 200       | 2.0  |
-|      D10      |  2   | acp_agent 注入                                                      | `aionui-ai-agent/src/acp_agent.rs`                                          |         60         | 1.0  |
-|      D11      |  2   | app 装配 + smoke test                                               | `aionui-app/*`                                                              |        180         | 2.0  |
-|   **D11.5**   |  2   | **`remove_team` 级联 kill agent 进程**（P0#47 补漏）                | `aionui-team/src/service.rs`                                                |         40         | 0.3  |
+|     D5b-2     |  1   | Lead Prompt builder                                                 | `chislui-team/src/prompts/lead.rs`                                           |         30         | 0.5  |
+|      D5c      |  1   | Teammate Prompt + wake payload                                      | `chislui-team/src/prompts/teammate.rs`                                       |       ⚠️ 150       | 1.0  |
+|      D6       |  1   | mcp-bridge subcommand                                               | `chislui-app/src/bridge.rs`                                                  |        180         | 1.5  |
+|    **D7a**    |  2   | **TeamSession 三个新方法（compute/spec/finish）**                   | `chislui-team/src/session.rs`                                                |        150         | 1.5  |
+|    **D7b**    |  2   | **send 路径接 wake + `files` 附件 + log-not-throw**（P0#45/#46）    | `chislui-team/src/session.rs` + `chislui-api-types/src/team.rs` + `routes.rs` |        120         | 1.2  |
+|    **D7c**    |  2   | **`send_message_to_agent(silent=true)` 占位**                       | `chislui-team/src/session.rs`                                                |         40         | 0.3  |
+|      D8       |  2   | Scheduler 首次 wake                                                 | `chislui-team/src/scheduler.rs`                                              |        120         | 1.5  |
+|      D9       |  2   | ensure_session 闭环                                                 | `chislui-team/src/service.rs`                                                |       ⚠️ 200       | 2.0  |
+|      D10      |  2   | acp_agent 注入                                                      | `chislui-ai-agent/src/acp_agent.rs`                                          |         60         | 1.0  |
+|      D11      |  2   | app 装配 + smoke test                                               | `chislui-app/*`                                                              |        180         | 2.0  |
+|   **D11.5**   |  2   | **`remove_team` 级联 kill agent 进程**（P0#47 补漏）                | `chislui-team/src/service.rs`                                                |         40         | 0.3  |
 |    W3-D12a    |  3   | `list_teams(user_id)`                                               | service / repo / routes                                                     |         40         | 0.3  |
 |    W3-D12b    |  3   | `get_team(user_id, id)` 归属校验                                    | service / routes                                                            |         40         | 0.3  |
 |    W3-D12c    |  3   | `remove_team(user_id, id)` 归属校验                                 | service / routes                                                            |         40         | 0.3  |
@@ -1326,9 +1326,9 @@ Wave 5（3 人关键路径 + 可并行点）
 | **W4-D24b-3** |  4   | **wait_for_mcp_ready graceful select!**                             | team/mcp/server.rs                                                          |         50         | 0.5  |
 |    W4-D24c    |  4   | Bridge 发 mcp_ready                                                 | app/bridge.rs                                                               |         30         | 0.2  |
 |    W5-D26a    |  5   | `GuideMcpServer` 结构 + 启停                                        | team/guide/server.rs                                                        |         80         | 0.8  |
-| **W5-D26b-1** |  5   | **`aion_create_team` args 解析 + 默认值（纯函数）**                 | team/guide/handlers.rs                                                      |         70         | 0.6  |
-| **W5-D26b-2** |  5   | **`handle_aion_create_team` 调 service + 返回结构化**               | team/guide/handlers.rs                                                      |         70         | 0.7  |
-|    W5-D26c    |  5   | `handle_aion_list_models` handler                                   | team/guide/handlers.rs                                                      |         40         | 0.3  |
+| **W5-D26b-1** |  5   | **`chisl_create_team` args 解析 + 默认值（纯函数）**                 | team/guide/handlers.rs                                                      |         70         | 0.6  |
+| **W5-D26b-2** |  5   | **`handle_chisl_create_team` 调 service + 返回结构化**               | team/guide/handlers.rs                                                      |         70         | 0.7  |
+|    W5-D26c    |  5   | `handle_chisl_list_models` handler                                   | team/guide/handlers.rs                                                      |         40         | 0.3  |
 |    W5-D26d    |  5   | 建团成功后 3 个 WS 事件                                             | team/guide/handlers.rs                                                      |         50         | 0.4  |
 |    W5-D27     |  5   | Guide stdio bridge 分支                                             | app/bridge.rs                                                               |         80         | 0.7  |
 |    W5-D28a    |  5   | `is_team_capable_backend` 纯函数                                    | team/guide/capability.rs                                                    |         40         | 0.3  |
@@ -1379,7 +1379,7 @@ Wave 5（3 人关键路径 + 可并行点）
 ## 5. 交付硬性要求（所有模块适用）
 
 1. **测试先行**：每个模块必须先写 2–4 条单元/集成测试（见各模块"测试策略"行），再开工；PR 必须带测试证据
-2. **禁 mock 逃课**：D4 的 descriptor 文本要对比 team-prompts.md 原文；D5 的 builder 要对比 AionUi 源码拷贝；D9/D11 的集成测试用 `MockWorkerTaskManager`（**合法 mock**，只为隔离真 ACP 进程）但必须 assert 调用顺序和参数
+2. **禁 mock 逃课**：D4 的 descriptor 文本要对比 team-prompts.md 原文；D5 的 builder 要对比 ChislUi 源码拷贝；D9/D11 的集成测试用 `MockWorkerTaskManager`（**合法 mock**，只为隔离真 ACP 进程）但必须 assert 调用顺序和参数
 3. **一次性交付**：按 leader 规则 #4，每个模块交付 = 该开发者下线；有返工派新人接手（每人只处理一个模块一次）
 4. **文档交接**：每个模块 PR 必须更新 [interface-contracts.md](./interface-contracts.md) 的对应 section 状态（TODO → Shipped）
 5. **CLAUDE.md 规则**：符合"只管 backend / 只 ACP / 事实来源是审计报告"

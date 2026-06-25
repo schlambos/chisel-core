@@ -1,15 +1,15 @@
-# Team 提示词体系（AionUi 参考实现）
+# Team 提示词体系（ChislUi 参考实现）
 
-> 本文档完整记录 AionUi main 分支中 team 模块的三层提示词设计。
-> 源码路径前缀：`/Volumes/Macintosh HD/Users/zhuqingyu/project/AionUi/src/process/team/prompts/`
+> 本文档完整记录 ChislUi main 分支中 team 模块的三层提示词设计。
+> 源码路径前缀：`/Volumes/Macintosh HD/Users/zhuqingyu/project/ChislUi/src/process/team/prompts/`
 
 **相关文档**：
 
-- [MCP 通信](./mcp.md) — Team Guide MCP 的工具定义（`aion_create_team` / `aion_list_models`）
+- [MCP 通信](./mcp.md) — Team Guide MCP 的工具定义（`chisl_create_team` / `chisl_list_models`）
 - [内部调度](./internals.md) — scheduler 状态机、wake 机制（prompt 里的 "Standing By" 与 wake 紧密关联）
 - [前端接入指南](./frontend-guide.md) — 前端视角的 team 接入
 - [后端 GAP 分析](./backend-current-state-and-gap.md) — 后端缺失的 prompt 能力清单
-- [AionUi 完整调研](./aionui-team-complete.md) — team 模块全貌（含 prompt 注入路径）
+- [ChislUi 完整调研](./chislui-team-complete.md) — team 模块全貌（含 prompt 注入路径）
 
 ---
 
@@ -66,7 +66,7 @@
 ### 建团 7 步流程（严格顺序，不可跳步）
 
 ```
-Step 1: 调 aion_list_models         ← 查可用 agent type + model
+Step 1: 调 chisl_list_models         ← 查可用 agent type + model
 Step 2: 一句话解释为什么需要 team
 Step 3: 输出团队配置表               ← 核心！
         ┌──────────┬───────────────┬────────┬─────────────────┐
@@ -77,7 +77,7 @@ Step 3: 输出团队配置表               ← 核心！
         │ Tester   │ 写测试        │ gemini │ (from list)     │
         └──────────┴───────────────┴────────┴─────────────────┘
 Step 4: **结束 turn，等用户确认**    ← 严禁在出表格的同一 turn 调工具
-Step 5: 用户确认后 → 调 aion_create_team(summary 包含目标 + 阵容)
+Step 5: 用户确认后 → 调 chisl_create_team(summary 包含目标 + 阵容)
 Step 6: 系统自动跳转 team 页，agent 读 next_step 并执行
 Step 7: 用户拒绝 → 继续 solo，不再提 team
 ```
@@ -89,7 +89,7 @@ Step 7: 用户拒绝 → 继续 solo，不再提 team
 | `backend`     | agent 的 backend type（claude/gemini/codex/...）          | 配置表里 Type 列的默认值                              |
 | `leaderLabel` | 如果当前会话用了 preset assistant → 传 assistant 的显示名 | Leader 行显示 `Word Creator (claude)` 而非纯 `claude` |
 
-### aion_create_team 工具描述（`getCreateTeamToolDescription()`）
+### chisl_create_team 工具描述（`getCreateTeamToolDescription()`）
 
 工具描述里再次强调 3 个前置条件：
 
@@ -162,7 +162,7 @@ Step 10: 分配任务 → team_send_message
 
 ### Shutdown 规则（原文，必须原样复用到后端 prompt）
 
-以下是 AionUi leader prompt 中关于 shutdown 的**原文**，后端实现时应直接复用：
+以下是 ChislUi leader prompt 中关于 shutdown 的**原文**，后端实现时应直接复用：
 
 ```
 ## Shutting Down Teammates
@@ -249,11 +249,11 @@ Step 6: team_send_message → 向 leader 汇报
 
 ## 5. MCP Tool Description 原文（后端必须原样复用）
 
-以下是 AionUi 每个 MCP 工具的 description + schema 原文。后端在 `tools/list` 返回的 `ToolDescriptor` 里必须使用这些文本，不要改写。
+以下是 ChislUi 每个 MCP 工具的 description + schema 原文。后端在 `tools/list` 返回的 `ToolDescriptor` 里必须使用这些文本，不要改写。
 
 ### 5.1 Team Guide MCP（2 个工具）
 
-#### aion_create_team
+#### chisl_create_team
 
 **Description**（来自 `getCreateTeamToolDescription()`）：
 
@@ -285,7 +285,7 @@ name: string (optional) — Optional team name. When omitted the first few words
 workspace: string (optional) — Absolute path to the project workspace directory. Team agents will use this as their shared working directory. When omitted a temporary workspace is created.
 ```
 
-#### aion_list_models
+#### chisl_list_models
 
 **Description**：
 
@@ -514,10 +514,10 @@ agent_type: string (optional) — Agent type/backend to query (e.g. "gemini", "c
 
 ## 6. 后端实现现状
 
-**后端（aionui-backend）已有**：
+**后端（chislui-backend）已有**：
 
-- `crates/aionui-team/src/prompts.rs` — leader + teammate prompt 的基础版本
-- `crates/aionui-team/src/mcp/tools.rs` — `team_spawn_agent` 工具描述
+- `crates/chislui-team/src/prompts.rs` — leader + teammate prompt 的基础版本
+- `crates/chislui-team/src/mcp/tools.rs` — `team_spawn_agent` 工具描述
 
 **后端缺失**：
 
@@ -527,16 +527,16 @@ agent_type: string (optional) — Agent type/backend to query (e.g. "gemini", "c
 - ⚠️ Preset Assistant 选择逻辑 — 没有 `team_describe_assistant` 工具
 - ⚠️ `team_list_models` 工具 — 没有
 
-### 后端已有 prompt vs AionUi prompt 对比
+### 后端已有 prompt vs ChislUi prompt 对比
 
-后端的 `prompts.rs` 需要与 AionUi 对齐的点：
+后端的 `prompts.rs` 需要与 ChislUi 对齐的点：
 
 1. Leader prompt 的"先出阵容表、等确认、再 spawn"流程是否已包含
 2. Teammate prompt 的 "Standing By" 超时防护是否已包含
 3. "依赖串行调度"规则是否已包含
 4. Model 选择指引是否已包含
 
-（需要读后端 prompts.rs 做逐项比对，本文档先记录 AionUi 侧事实）
+（需要读后端 prompts.rs 做逐项比对，本文档先记录 ChislUi 侧事实）
 
 ---
 

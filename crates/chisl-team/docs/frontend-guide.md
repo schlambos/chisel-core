@@ -58,11 +58,11 @@
 
 | 模块                                                                    | 状态 | 说明                                                                   |
 | ----------------------------------------------------------------------- | :--: | ---------------------------------------------------------------------- |
-| D26a GuideMcpServer 骨架                                                |  ✅  | 应用级单例，暴露 `aion_create_team` / `aion_list_models` 给 solo agent |
-| D26b-1 `aion_create_team` 参数解析                                      |  ✅  |                                                                        |
-| D26b-2 `handle_aion_create_team` handler                                |  ✅  | 调 service + 返回结构化                                                |
-| D26c `aion_list_models` 处理器                                          |  ✅  |                                                                        |
-| D28a `is_team_capable_backend` 白名单                                   |  ✅  | `guide/capability.rs`，白名单 `claude / codex / gemini / aionrs`       |
+| D26a GuideMcpServer 骨架                                                |  ✅  | 应用级单例，暴露 `chisl_create_team` / `chisl_list_models` 给 solo agent |
+| D26b-1 `chisl_create_team` 参数解析                                      |  ✅  |                                                                        |
+| D26b-2 `handle_chisl_create_team` handler                                |  ✅  | 调 service + 返回结构化                                                |
+| D26c `chisl_list_models` 处理器                                          |  ✅  |                                                                        |
+| D28a `is_team_capable_backend` 白名单                                   |  ✅  | `guide/capability.rs`，白名单 `claude / codex / gemini / chislrs`       |
 | D28b Guide prompt 注入（solo 互斥）                                     |  ✅  | solo agent 首轮消息注入 Team Guide prompt                              |
 | D28c Guide MCP guard（solo 互斥）                                       |  ✅  | team 模式下不注入 Guide                                                |
 | D29a-1 `SpawnAgentRequest` + 方法骨架                                   |  ✅  |                                                                        |
@@ -117,15 +117,15 @@ agent 连接 MCP server 后，以下工具对 agent 可见且可调用：
 
 | 工具               | 状态 | 说明                                                               |
 | ------------------ | :--: | ------------------------------------------------------------------ |
-| `aion_create_team` |  ✅  | handler 已落地（D26b-2），调 service.create_team + 返回结构化 JSON |
-| `aion_list_models` |  ✅  | D26c handler 已合入，返回可用 backend + models 列表                |
+| `chisl_create_team` |  ✅  | handler 已落地（D26b-2），调 service.create_team + 返回结构化 JSON |
+| `chisl_list_models` |  ✅  | D26c handler 已合入，返回可用 backend + models 列表                |
 
 前端一般不直接感知这个 MCP；但当用户在单聊里说"帮我起一个团队"时，agent 会执行以下流程（由 Team Guide prompt 强制）：
 
-1. 调 `aion_list_models` 查询可用 agent 类型和模型
+1. 调 `chisl_list_models` 查询可用 agent 类型和模型
 2. 向用户展示阵容推荐表（角色/职责/agent type/推荐模型）
-3. **结束回合，等用户确认**（prompt 禁止在同一回合调 `aion_create_team`）
-4. 用户回复"确认" / "go ahead" 后 → 调 `aion_create_team`
+3. **结束回合，等用户确认**（prompt 禁止在同一回合调 `chisl_create_team`）
+4. 用户回复"确认" / "go ahead" 后 → 调 `chisl_create_team`
 5. 后端自动建 team + 起 session + 注入 MCP
 6. 返回 `next_step` 指引 agent 结束回合（前端收到 WS 事件跳转 team 页）
 
@@ -161,7 +161,7 @@ tools_ready, degraded
 
 当前已广播：`tcp_ready`（成功 bind，带 `port`）、`tcp_error`（bind 失败，带 `error`）、`session_injecting`、`session_ready`（带 `server_count`）、`load_failed`、`config_write_failed`。
 
-Payload 类型定义：`aionui-api-types::TeamMcpStatusPayload`、`TeamMcpPhase`；另有 `TeammateMessagePayload`（为 teammate 之间消息的左气泡展示预留）。
+Payload 类型定义：`chislui-api-types::TeamMcpStatusPayload`、`TeamMcpPhase`；另有 `TeammateMessagePayload`（为 teammate 之间消息的左气泡展示预留）。
 
 ### 前端须知
 
@@ -236,7 +236,7 @@ Team 模块不再提供 `POST /api/teams/{id}/messages` 或 `POST /api/teams/{id
 | `team.agent.renamed`  | 改名                               | `team_id, slot_id, name`                                 |
 | `team.mcpStatus`      | per-team MCP server 生命周期       | `team_id, slot_id?, phase, port?, error?, server_count?` |
 
-Payload 类型定义在 `crates/aionui-api-types/src/team.rs`（含 `TeamMcpPhase`、`TeamMcpStatusPayload`、`TeammateMessagePayload`）。**HTTP 没有状态轮询端点**，想知道 agent 现在在干啥只能靠 WS。
+Payload 类型定义在 `crates/chislui-api-types/src/team.rs`（含 `TeamMcpPhase`、`TeamMcpStatusPayload`、`TeammateMessagePayload`）。**HTTP 没有状态轮询端点**，想知道 agent 现在在干啥只能靠 WS。
 
 Agent 的回复内容本身走的是 conversation 的 WS 流（`conversation.message.*` / `conversation.stream.*`），与普通单聊完全一致。
 
